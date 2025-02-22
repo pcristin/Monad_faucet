@@ -31,3 +31,7 @@ vendor/
 .Trashes
 ehthumbs.db
 Thumbs.db 
+
+# Cursor specific files
+.cursorrules
+.cursor/
