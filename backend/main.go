@@ -40,28 +40,28 @@ func main() {
 		log.Fatalf("Failed to create event listener: %v", err)
 	}
 	defer listener.Close()
-	log.Println("Event listener created successfully")
-
-	// Create a context for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Create a channel to receive shutdown signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
+	// Create a context that we'll cancel on shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Start listening for events in a goroutine
 	events, errors := listener.ListenToDeposits(ctx)
 	go func() {
-		log.Println("Starting event listener goroutine...")
 		for {
 			select {
 			case event := <-events:
-				log.Printf("🎉 Deposit event received: Depositor=%s Amount=%s", event.Depositor.Hex(), event.Amount.String())
+				log.Printf("🎉 %s", event.String())
 			case err := <-errors:
-				log.Printf("❌ Error from event listener: %v", err)
+				if ctx.Err() == nil { // Only log errors if context is not cancelled
+					log.Printf("❌ Error from event listener: %v", err)
+				}
 			case <-ctx.Done():
-				log.Println("Event listener goroutine shutting down...")
+				log.Println("Event processing goroutine shutting down...")
 				return
 			}
 		}
@@ -73,8 +73,9 @@ func main() {
 		port = "8080"
 	}
 
-	gin.SetMode(gin.DebugMode)
-	r := gin.Default()
+	gin.SetMode(gin.ReleaseMode) // Switch to release mode
+	r := gin.New()               // Use New() instead of Default() for more control
+	r.Use(gin.Recovery())        // Add recovery middleware
 
 	// CORS middleware
 	r.Use(func(c *gin.Context) {
@@ -107,7 +108,7 @@ func main() {
 	go func() {
 		log.Printf("Starting HTTP server on port %s...", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start server: %v", err)
+			log.Printf("HTTP server error: %v", err)
 		}
 	}()
 
@@ -116,19 +117,20 @@ func main() {
 
 	// Wait for shutdown signal
 	<-sigChan
-	log.Println("Shutdown signal received...")
+	log.Println("\nShutdown signal received...")
 
 	// Create a timeout context for graceful shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
-	// Cancel the event listener context
+	// First cancel the event listener context
 	cancel()
 
-	// Shutdown the HTTP server
+	// Then shutdown the HTTP server
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("HTTP server shutdown error: %v", err)
+		log.Printf("HTTP server forced to shutdown: %v", err)
 	}
 
 	log.Println("Server shutdown complete.")
+	os.Exit(0)
 }
