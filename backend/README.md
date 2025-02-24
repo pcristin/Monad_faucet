@@ -1,55 +1,250 @@
 # Monad Faucet Backend
 
-Backend service for the Monad testnet faucet.
+This is the backend service for the Monad Faucet, which facilitates token swaps between Arbitrum and Monad networks.
+
+## Features
+
+- Listens to deposit events on Arbitrum network
+- Validates deposits and checks contract states
+- Dynamic swap ratio calculation:
+  - ETH/MON: Based on Chainlink ETH/USD price feed and current MON/USD ratio
+  - USDC/MON and USDT/MON: Based on current MON/USD ratio
+- Mints MON tokens on the Monad network
+- Provides REST API for frontend integration
+- Handles automated refunds for failed transactions
+- Admin API for dynamic MON/USD ratio updates
 
 ## Prerequisites
 
-- Go 1.21 or later
-- Make (optional, for using Makefile commands)
+- Go 1.22 or newer
+- Access to Arbitrum and Monad networks
+- API keys for Arbitrum RPC (if using Alchemy or Infura)
+
+## Project Structure
+
+```
+backend/
+├── cmd/
+│   └── faucet/          # Main application entry point
+├── config/              # Configuration management
+├── internal/            # Private application code
+│   ├── api/             # HTTP API handlers
+│   └── blockchain/      # Blockchain interaction code
+├── pkg/                 # Public packages
+│   └── logger/          # Structured logging
+├── .env.example         # Example environment variables
+├── go.mod               # Go module definition
+└── README.md            # Project documentation
+```
 
 ## Setup
 
-1. Clone the repository:
-```bash
-git clone https://github.com/monad-labs/monad-faucet.git
-cd monad-faucet/backend
-```
+1. Clone the repository
+2. Copy `.env.example` to `.env` and fill in the required values:
+   ```env
+   PORT=8080
+   ARB_RPC_URL=your-arbitrum-rpc-url
+   ARB_DEPOSITOR_ADDRESS=your-arbitrum-contract-address
+   MONAD_RPC_URL=your-monad-rpc-url
+   MONAD_DISTRIBUTOR_ADDRESS=your-monad-contract-address
+   WALLET_PRIVATE_KEY=your-private-key-here
+   ADMIN_API_KEY_1=your-first-admin-key-here
+   ADMIN_API_KEY_2=your-second-admin-key-here
+   ```
+3. Install dependencies:
+   ```bash
+   go mod download
+   ```
+4. Build and run the service:
+   ```bash
+   go build -o faucet ./cmd/faucet
+   ./faucet
+   ```
 
-2. Install dependencies:
-```bash
-go mod download
-```
-
-3. Create a `.env` file:
-```bash
-cp .env.example .env
-# Edit .env with your configuration
-```
-
-## Development
-
-To run the server in development mode:
-
-```bash
-go run main.go
-```
-
-The server will start on port 8080 by default. You can change this by setting the `PORT` environment variable.
+   Or for development:
+   ```bash
+   go run cmd/faucet/main.go
+   ```
 
 ## API Endpoints
 
-- `GET /health` - Health check endpoint
-- More endpoints coming soon...
+### GET /api/state
+Returns the current state of the bridge.
 
-## Environment Variables
+Response:
+```json
+{
+  "is_paused": false,
+  "min_amount": "1000000000000000",
+  "mon_balance": "1000000000000000000000",
+  "swap_ratios": {
+    "ETH": "300000000000000000000000",
+    "USDC": "10000000000000000000",
+    "USDT": "10000000000000000000"
+  }
+}
+```
 
-- `PORT` - Server port (default: 8080)
-- More variables will be added as needed
+### POST /api/estimate
+Estimates the amount of MON tokens to be received.
+
+Request:
+```json
+{
+  "amount": "1000000000000000000",
+  "currency": "ETH"
+}
+```
+
+Response:
+```json
+{
+  "input_amount": "1000000000000000000",
+  "input_currency": "ETH",
+  "mon_amount": "300000000000000000000000",
+  "swap_ratio": "300000000000000000000000"
+}
+```
+
+### POST /api/admin/ratio
+Updates the MON/USD ratio (requires admin authentication).
+
+Request:
+```json
+{
+  "mon_usd_ratio": "0.1"
+}
+```
+Headers:
+```
+X-Admin-Key: your-admin-key-here
+```
+
+Response:
+```json
+{
+  "message": "MON/USD ratio updated successfully",
+  "new_ratio": "0.1"
+}
+```
+
+### POST /api/admin/pause
+Pauses deposit functionality on the Arbitrum contract (requires admin authentication).
+
+Headers:
+```
+X-Admin-Key: your-admin-key-here
+```
+
+Response:
+```json
+{
+  "message": "Deposits paused successfully"
+}
+```
+
+### POST /api/admin/resume
+Resumes deposit functionality on the Arbitrum contract (requires admin authentication).
+
+Headers:
+```
+X-Admin-Key: your-admin-key-here
+```
+
+Response:
+```json
+{
+  "message": "Deposits resumed successfully"
+}
+```
+
+## Price Calculation
+
+The service calculates token swap ratios based on:
+
+1. MON/USD ratio (configurable via admin API)
+   - Example: If 1 MON = $0.1, then 1 USDC/USDT = 10 MON
+
+2. ETH price from Chainlink oracle
+   - Example: If ETH = $3000 and 1 MON = $0.1, then 1 ETH = 30000 MON
+
+## Architecture
+
+The backend consists of several key components:
+
+1. **Event Listener**: Monitors the Arbitrum network for deposit events
+2. **Bridge Service**: Handles the business logic for processing deposits and refunds
+3. **Contract Interfaces**: Interacts with smart contracts on both networks
+4. **API Layer**: Provides HTTP endpoints for frontend integration
+5. **Price Oracle**: Integrates with Chainlink for ETH/USD price feeds
+6. **Admin System**: Manages MON/USD ratio updates securely
+7. **Configuration**: Centralized configuration management
+8. **Logging**: Structured logging with different levels (INFO, WARN, ERROR)
+
+## Error Handling
+
+The service implements robust error handling:
+
+- Failed deposits are automatically queued for refund
+- Network issues trigger automatic reconnection
+- Invalid requests receive appropriate error responses
+- All errors are logged for monitoring
+- Price feed failures fallback to last known good price
+
+## Logging
+
+The service uses structured logging with different levels:
+
+- INFO: Normal operation events
+- WARN: Potential issues that don't affect operation
+- ERROR: Critical issues that require attention
+- FATAL: Issues that cause the service to terminate
+
+Important events that are logged include:
+- Deposit events
+- Processing status
+- Refund operations
+- Contract state changes
+- Network connectivity issues
+- Price ratio updates
+- Admin operations
+
+## Security
+
+1. **Admin Access**:
+   - Two separate admin keys for redundancy and security
+   - API key authentication required for ratio updates
+   - Keys stored in environment variables
+   - Recommended to use long, random strings (32+ characters)
+
+2. **Transaction Safety**:
+   - Gas price estimation with safety buffer
+   - Nonce management for transaction ordering
+   - Receipt verification for all transactions
+   - Automatic refunds for failed operations
+
+## Development
+
+To run the service in development mode:
+
+```bash
+go run cmd/faucet/main.go
+```
+
+For testing:
+
+```bash
+go test ./...
+```
 
 ## Contributing
 
 1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request 
+2. Create your feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a new Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details. 

@@ -3,9 +3,7 @@ package blockchain
 import (
 	"context"
 	"fmt"
-	"log"
 	"math/big"
-	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -13,28 +11,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/pcristin/monad-faucet/pkg/logger"
 )
-
-type CurrencyType = uint8
-
-const (
-	CurrencyETH  CurrencyType = 0
-	CurrencyUSDC CurrencyType = 1
-	CurrencyUSDT CurrencyType = 2
-)
-
-func CurrencyTypeToString(c CurrencyType) string {
-	switch c {
-	case CurrencyETH:
-		return "ETH"
-	case CurrencyUSDC:
-		return "USDC"
-	case CurrencyUSDT:
-		return "USDT"
-	default:
-		return fmt.Sprintf("Unknown(%d)", c)
-	}
-}
 
 type DepositEvent struct {
 	Depositor   common.Address
@@ -66,37 +44,27 @@ type EventListener struct {
 	client      *ethclient.Client
 	contractABI abi.ABI
 	address     common.Address
-	lastBlock   uint64
 }
 
 func NewEventListener(rpcURL string) (*EventListener, error) {
-	log.Printf("Connecting to WebSocket endpoint: %s", rpcURL)
 	client, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Web3 client: %v", err)
 	}
 
 	// Test connection by getting network ID
-	networkID, err := client.NetworkID(context.Background())
+	_, err = client.NetworkID(context.Background())
 	if err != nil {
 		client.Close()
 		return nil, fmt.Errorf("failed to get network ID, connection might be invalid: %v", err)
 	}
-	log.Printf("Connected to network ID: %s", networkID.String())
-
-	parsedABI, err := abi.JSON(strings.NewReader(BridgeABI))
-	if err != nil {
-		client.Close()
-		return nil, fmt.Errorf("failed to parse ABI: %v", err)
-	}
 
 	listener := &EventListener{
 		client:      client,
-		contractABI: parsedABI,
+		contractABI: DepositorABI,
 		address:     common.HexToAddress(BridgeAddress),
 	}
 
-	log.Printf("Event listener initialized for contract: %s", BridgeAddress)
 	return listener, nil
 }
 
@@ -104,7 +72,6 @@ func (l *EventListener) ListenToDeposits(ctx context.Context) (<-chan DepositEve
 	events := make(chan DepositEvent)
 	errors := make(chan error)
 
-	// Create a filter query for the Deposit event
 	query := ethereum.FilterQuery{
 		Addresses: []common.Address{l.address},
 		Topics: [][]common.Hash{
@@ -112,9 +79,6 @@ func (l *EventListener) ListenToDeposits(ctx context.Context) (<-chan DepositEve
 		},
 	}
 
-	log.Printf("Starting subscription with filter ID: %s", l.contractABI.Events["DepositEvent"].ID.Hex())
-
-	// Subscribe to logs with retry mechanism
 	go func() {
 		defer close(events)
 		defer close(errors)
@@ -122,40 +86,31 @@ func (l *EventListener) ListenToDeposits(ctx context.Context) (<-chan DepositEve
 		for {
 			select {
 			case <-ctx.Done():
-				log.Println("Context cancelled, stopping event listener")
 				return
 			default:
 				logs := make(chan types.Log)
 				sub, err := l.client.SubscribeFilterLogs(ctx, query, logs)
 				if err != nil {
-					log.Printf("Failed to subscribe to logs: %v, retrying in 5 seconds...", err)
 					errors <- fmt.Errorf("subscription error: %v", err)
 					time.Sleep(5 * time.Second)
 					continue
 				}
 
-				log.Println("Successfully subscribed to events")
-
-				// Handle events in a nested loop
 				for {
 					select {
 					case err := <-sub.Err():
-						log.Printf("Subscription error: %v, reconnecting...", err)
 						errors <- fmt.Errorf("subscription error: %v", err)
 						sub.Unsubscribe()
 						time.Sleep(5 * time.Second)
 						goto RECONNECT
 					case vLog := <-logs:
-						log.Printf("Received log from block %d, tx: %s", vLog.BlockNumber, vLog.TxHash.Hex())
 						event, err := l.parseDepositEvent(vLog)
 						if err != nil {
-							log.Printf("Failed to parse event: %v", err)
 							errors <- fmt.Errorf("parse error: %v", err)
 							continue
 						}
 						events <- event
 					case <-ctx.Done():
-						log.Println("Context cancelled, stopping subscription")
 						sub.Unsubscribe()
 						return
 					}
@@ -169,66 +124,36 @@ func (l *EventListener) ListenToDeposits(ctx context.Context) (<-chan DepositEve
 	return events, errors
 }
 
-func (l *EventListener) pollEvents(ctx context.Context, events chan<- DepositEvent) error {
-	currentBlock, err := l.client.BlockNumber(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get current block number: %v", err)
-	}
-
-	if currentBlock <= l.lastBlock {
-		return nil // No new blocks
-	}
-
-	fromBlock := l.lastBlock + 1
-	toBlock := currentBlock
-
-	query := ethereum.FilterQuery{
-		FromBlock: new(big.Int).SetUint64(fromBlock),
-		ToBlock:   new(big.Int).SetUint64(toBlock),
-		Addresses: []common.Address{l.address},
-		Topics: [][]common.Hash{
-			{l.contractABI.Events["DepositEvent"].ID},
-		},
-	}
-
-	logs, err := l.client.FilterLogs(ctx, query)
-	if err != nil {
-		return fmt.Errorf("failed to filter logs: %v", err)
-	}
-
-	if len(logs) > 0 {
-		log.Printf("Found %d events between blocks %d and %d", len(logs), fromBlock, toBlock)
-	}
-
-	for _, vLog := range logs {
-		event, err := l.parseDepositEvent(vLog)
-		if err != nil {
-			log.Printf("Failed to parse event: %v", err)
-			continue
-		}
-		log.Printf("📥 %s", event.String())
-		events <- event
-	}
-
-	l.lastBlock = toBlock
-	return nil
+type rawDepositEvent struct {
+	Depositor   common.Address
+	Amount      *big.Int
+	DepositId   *big.Int
+	Currency    uint8
+	BlockNumber uint64
 }
 
 func (l *EventListener) parseDepositEvent(vLog types.Log) (DepositEvent, error) {
-	var event DepositEvent
+	var raw rawDepositEvent
 
-	err := l.contractABI.UnpackIntoInterface(&event, "DepositEvent", vLog.Data)
+	err := l.contractABI.UnpackIntoInterface(&raw, "DepositEvent", vLog.Data)
 	if err != nil {
-		return event, fmt.Errorf("failed to unpack event: %v", err)
+		return DepositEvent{}, fmt.Errorf("failed to unpack event: %v", err)
 	}
 
-	event.Depositor = common.BytesToAddress(vLog.Topics[1].Bytes())
-	event.BlockNumber = vLog.BlockNumber
+	raw.Depositor = common.BytesToAddress(vLog.Topics[1].Bytes())
+	raw.BlockNumber = vLog.BlockNumber
 
-	return event, nil
+	// Convert raw event to DepositEvent with proper CurrencyType
+	return DepositEvent{
+		Depositor:   raw.Depositor,
+		Amount:      raw.Amount,
+		DepositId:   raw.DepositId,
+		Currency:    CurrencyType(raw.Currency),
+		BlockNumber: raw.BlockNumber,
+	}, nil
 }
 
 func (l *EventListener) Close() {
-	log.Println("Closing event listener")
+	logger.Info("Closing event listener")
 	l.client.Close()
 }
