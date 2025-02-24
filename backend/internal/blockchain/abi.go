@@ -425,4 +425,4 @@ const BridgeABI = `[
   }
 ]`
 
-const BridgeAddress = "0x840eA97AE7A1fFA0A2c74Ec409237D70E33F2D83"
+const BridgeAddress = "0x487177c3278faa36dd317dbb4ca97425a4f4ee31"
