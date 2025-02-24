@@ -8,12 +8,12 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
- * @title ArbitrumDepositContract
+ * @title MonadFaucetDepositContract
  * @dev A contract that accepts deposits in ETH, USDT, and USDC.
  *      It logs all deposit details via events and supports parameterized refunds.
  *      No mapping is used to store deposit data on-chain.
  */
-contract ArbitrumDepositContract is Ownable, Pausable, ReentrancyGuard {
+contract MonadFaucetDepositContract is Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // Enumeration to represent the type of currency deposited.
