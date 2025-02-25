@@ -15,6 +15,7 @@ import (
 	"github.com/pcristin/monad-faucet/config"
 	"github.com/pcristin/monad-faucet/internal/api"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
+	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
@@ -24,6 +25,15 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to load configuration: %v", err)
 	}
+
+	// Initialize database
+	db, err := database.New(cfg.DataDir)
+	if err != nil {
+		logger.Fatal("Failed to initialize database: %v", err)
+	}
+	defer db.Close()
+
+	logger.Info("Database initialized in directory: %s", cfg.DataDir)
 
 	// Parse private key
 	privateKey, err := crypto.HexToECDSA(cfg.WalletPrivateKey)

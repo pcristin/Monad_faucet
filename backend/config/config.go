@@ -16,6 +16,7 @@ type Config struct {
 	MonadDistributorAddr string
 	WalletPrivateKey     string
 	AdminAPIKeys         []string
+	DataDir              string // Directory to store SQLite database
 }
 
 func Load() (*Config, error) {
@@ -23,17 +24,38 @@ func Load() (*Config, error) {
 		fmt.Printf("Warning: .env file not found\n")
 	}
 
+	// Determine the appropriate data directory
+	dataDir := getEnvOrDefault("DATA_DIR", "")
+	if dataDir == "" {
+		// Default locations based on environment
+		if os.Getenv("RENDER") != "" {
+			// If running on Render, use /var/data if available (requires paid plan with disk)
+			if _, err := os.Stat("/var/data"); err == nil {
+				dataDir = "/var/data"
+			} else {
+				// For free tier, use /tmp which is ephemeral
+				dataDir = "/tmp"
+				fmt.Printf("Warning: Using ephemeral /tmp directory for database on Render free tier\n")
+				fmt.Printf("Note: Database will be reset on service restart\n")
+			}
+		} else {
+			// Local development - use a data directory in the current working directory
+			dataDir = "./data"
+		}
+	}
+
 	cfg := &Config{
 		Port:                 getEnvOrDefault("PORT", "8080"),
 		ArbRpcURL:            getEnvOrFatal("ARB_RPC_URL"),
 		MonadRpcURL:          getEnvOrFatal("MONAD_RPC_URL"),
-		ArbDepositorAddr:     getEnvOrFatal("ARB_DEPOSITOR_ADDRESS"),
-		MonadDistributorAddr: getEnvOrFatal("MONAD_DISTRIBUTOR_ADDRESS"),
+		ArbDepositorAddr:     getEnvOrDefault("ARB_DEPOSITOR_ADDRESS", "0xYourDepositorAddressHere"),
+		MonadDistributorAddr: getEnvOrDefault("MONAD_DISTRIBUTOR_ADDRESS", "0xYourDistributorAddressHere"),
 		WalletPrivateKey:     strings.TrimPrefix(getEnvOrFatal("WALLET_PRIVATE_KEY"), "0x"),
 		AdminAPIKeys: []string{
 			getEnvOrFatal("ADMIN_API_KEY_1"),
 			getEnvOrDefault("ADMIN_API_KEY_2", ""), // Optional second key
 		},
+		DataDir: dataDir,
 	}
 
 	return cfg, nil
