@@ -2,9 +2,9 @@ services:
   - type: web
     name: monad-faucet
     env: docker
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: backend/Dockerfile
     plan: free
-    rootDir: backend
+    rootDir: .
     healthCheckPath: /api/info
     envVars:
       - key: PORT
