@@ -268,6 +268,44 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 	})
 }
 
+// AdminUpdateWalletLimitRequest represents the request to update wallet limit percentage
+type AdminUpdateWalletLimitRequest struct {
+	LimitPercentage int64 `json:"limit_percentage" binding:"required"` // e.g. 30 for 30% of total MON balance
+}
+
+// AdminUpdateWalletLimit updates the wallet limit percentage (requires admin authentication)
+func (h *Handler) AdminUpdateWalletLimit(c *gin.Context) {
+	// Check admin API key
+	apiKey := c.GetHeader("X-Admin-Key")
+	if !isValidAdminKey(apiKey) {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "Invalid admin API key",
+		})
+		return
+	}
+
+	var req AdminUpdateWalletLimitRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid request parameters",
+		})
+		return
+	}
+
+	// Update the wallet limit percentage
+	if err := blockchain.UpdateWalletLimitPercentage(req.LimitPercentage); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":          "Wallet limit percentage updated successfully",
+		"limit_percentage": req.LimitPercentage,
+	})
+}
+
 // RegisterRoutes registers all API routes
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api := r.Group("/api")
@@ -280,5 +318,6 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		api.POST("/admin/ratio", h.AdminUpdateRatio)
 		api.POST("/admin/pause", h.PauseDeposits)
 		api.POST("/admin/resume", h.ResumeDeposits)
+		api.POST("/admin/wallet-limit", h.AdminUpdateWalletLimit)
 	}
 }

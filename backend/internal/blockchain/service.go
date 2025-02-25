@@ -18,7 +18,21 @@ import (
 )
 
 // WalletLimitPercentage is the percentage of total MON balance that can be distributed to a single wallet in 24 hours
-const WalletLimitPercentage = 30 // 30% of total distributor MON balance
+var WalletLimitPercentage int64 = 30 // 30% of total distributor MON balance
+
+// UpdateWalletLimitPercentage updates the wallet limit percentage
+func UpdateWalletLimitPercentage(newPercentage int64) error {
+	if newPercentage <= 0 {
+		return fmt.Errorf("wallet limit percentage must be positive")
+	}
+	if newPercentage > 100 {
+		return fmt.Errorf("wallet limit percentage cannot exceed 100%%")
+	}
+
+	WalletLimitPercentage = newPercentage
+	logger.Info("Wallet limit percentage updated to %d%%", newPercentage)
+	return nil
+}
 
 // BridgeService handles the business logic for the bridge operations
 type BridgeService struct {
