@@ -17,6 +17,9 @@ import (
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
+// WalletLimitPercentage is the percentage of total MON balance that can be distributed to a single wallet in 24 hours
+const WalletLimitPercentage = 30 // 30% of total distributor MON balance
+
 // BridgeService handles the business logic for the bridge operations
 type BridgeService struct {
 	arbDepositor     *ArbitrumDepositor
@@ -26,6 +29,8 @@ type BridgeService struct {
 	wg               sync.WaitGroup
 	ctx              context.Context
 	cancel           context.CancelFunc
+	walletUsage      map[common.Address]*WalletUsage // Track wallet usage
+	walletMutex      sync.RWMutex                    // Mutex for thread-safe access to walletUsage
 }
 
 // NewBridgeService creates a new instance of BridgeService
@@ -41,6 +46,7 @@ func NewBridgeService(
 		refundChan:       make(chan *big.Int, 100),
 		ctx:              ctx,
 		cancel:           cancel,
+		walletUsage:      make(map[common.Address]*WalletUsage),
 	}
 }
 
@@ -149,6 +155,9 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 		return fmt.Errorf("failed to mint tokens: %v", err)
 	}
 
+	// Update wallet usage after successful mint
+	s.updateWalletUsage(event.Depositor, monAmount)
+
 	logger.Info("Successfully processed deposit %s", event.String())
 	return nil
 }
@@ -170,6 +179,11 @@ func (s *BridgeService) validateDeposit(state *ContractState, event DepositEvent
 				new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 			).Text('f', 6),
 		)
+	}
+
+	// Check wallet limit
+	if err := s.checkWalletLimit(event.Depositor, monAmount, state.MonBalance); err != nil {
+		return err
 	}
 
 	var out []interface{}
@@ -424,4 +438,95 @@ func (s *BridgeService) ResumeDeposits(ctx context.Context) error {
 
 	logger.Info("Successfully resumed deposits (tx: %s)", signedTx.Hash().Hex())
 	return nil
+}
+
+// checkWalletLimit checks if a wallet has exceeded its 24-hour limit
+// Returns nil if the wallet is within limits, otherwise returns an error
+func (s *BridgeService) checkWalletLimit(wallet common.Address, requestedAmount *big.Int, totalMonBalance *big.Int) error {
+	s.walletMutex.RLock()
+	usage, exists := s.walletUsage[wallet]
+	s.walletMutex.RUnlock()
+
+	// Calculate the maximum allowed amount (30% of total MON balance)
+	maxAllowedAmount := new(big.Int).Mul(totalMonBalance, big.NewInt(WalletLimitPercentage))
+	maxAllowedAmount = new(big.Int).Div(maxAllowedAmount, big.NewInt(100))
+
+	// If the wallet has no usage record or the last usage was more than 24 hours ago,
+	// we only need to check if the current request exceeds the limit
+	if !exists || time.Since(usage.LastUpdated) > 24*time.Hour {
+		if requestedAmount.Cmp(maxAllowedAmount) > 0 {
+			// Format amounts for logging
+			maxAllowedFormatted := new(big.Float).Quo(
+				new(big.Float).SetInt(maxAllowedAmount),
+				new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			).Text('f', 6)
+			requestedFormatted := new(big.Float).Quo(
+				new(big.Float).SetInt(requestedAmount),
+				new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			).Text('f', 6)
+
+			return fmt.Errorf("requested amount (%s MON) exceeds wallet limit (%s MON per 24 hours)",
+				requestedFormatted, maxAllowedFormatted)
+		}
+		return nil
+	}
+
+	// If the wallet has a usage record and it's less than 24 hours old,
+	// we need to check if the total usage (including this request) exceeds the limit
+	if time.Since(usage.LastUpdated) <= 24*time.Hour {
+		totalUsage := new(big.Int).Add(usage.TotalAmount, requestedAmount)
+		if totalUsage.Cmp(maxAllowedAmount) > 0 {
+			// Calculate remaining allowance
+			remainingAllowance := new(big.Int).Sub(maxAllowedAmount, usage.TotalAmount)
+			if remainingAllowance.Sign() < 0 {
+				remainingAllowance = big.NewInt(0)
+			}
+
+			// Format amounts for logging
+			maxAllowedFormatted := new(big.Float).Quo(
+				new(big.Float).SetInt(maxAllowedAmount),
+				new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			).Text('f', 6)
+			totalUsageFormatted := new(big.Float).Quo(
+				new(big.Float).SetInt(totalUsage),
+				new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			).Text('f', 6)
+			remainingFormatted := new(big.Float).Quo(
+				new(big.Float).SetInt(remainingAllowance),
+				new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			).Text('f', 6)
+
+			return fmt.Errorf("wallet limit exceeded (limit: %s MON, total requested: %s MON, remaining: %s MON)",
+				maxAllowedFormatted, totalUsageFormatted, remainingFormatted)
+		}
+	}
+
+	return nil
+}
+
+// updateWalletUsage updates the usage record for a wallet
+func (s *BridgeService) updateWalletUsage(wallet common.Address, amount *big.Int) {
+	s.walletMutex.Lock()
+	defer s.walletMutex.Unlock()
+
+	usage, exists := s.walletUsage[wallet]
+	now := time.Now()
+
+	if !exists {
+		// Create new usage record
+		s.walletUsage[wallet] = &WalletUsage{
+			TotalAmount: new(big.Int).Set(amount),
+			LastUpdated: now,
+		}
+		return
+	}
+
+	// If last usage was more than 24 hours ago, reset the counter
+	if time.Since(usage.LastUpdated) > 24*time.Hour {
+		usage.TotalAmount = new(big.Int).Set(amount)
+	} else {
+		// Otherwise add to the existing amount
+		usage.TotalAmount = new(big.Int).Add(usage.TotalAmount, amount)
+	}
+	usage.LastUpdated = now
 }
