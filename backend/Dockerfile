@@ -3,14 +3,11 @@ FROM golang:1.22-alpine AS builder
 # Set working directory
 WORKDIR /app
 
-# Copy Go module files first for better layer caching
-COPY go.mod go.sum ./
+# Copy everything from backend
+COPY backend/ ./
 
 # Download dependencies
 RUN go mod download
-
-# Copy the rest of the source code
-COPY . ./
 
 # Build the application with optimizations
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o main ./cmd/faucet
