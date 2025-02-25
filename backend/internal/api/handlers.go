@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
+	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
 type Handler struct {
@@ -214,10 +215,56 @@ func (h *Handler) ResumeDeposits(c *gin.Context) {
 	})
 }
 
+// GetFaucetInfo returns simplified faucet information
+func (h *Handler) GetFaucetInfo(c *gin.Context) {
+	state, err := h.bridgeService.GetState(c.Request.Context())
+	if err != nil {
+		logger.Error("Failed to get faucet info: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	// Convert MON balance from wei to MON (divide by 10^18)
+	divisor := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	monBalance := new(big.Float).SetInt(state.MonBalance)
+	monBalance = new(big.Float).Quo(monBalance, divisor)
+
+	// Convert swap ratios to exchange rates
+	exchangeRates := make(map[string]string)
+
+	// For each currency, convert the swap ratio to exchange rates
+	for currency, ratio := range state.SwapRatios {
+		if ratio.Sign() > 0 {
+			// The swap ratio is MON per 1 unit of currency
+			// We need to invert it to get how much of the currency equals 1 MON
+			// First convert ratio to big.Float for precision
+			ratioFloat := new(big.Float).SetInt(ratio)
+			ratioFloat = new(big.Float).Quo(ratioFloat, divisor)
+
+			// Calculate currency needed for 1 MON (1/ratio)
+			one := new(big.Float).SetInt64(1)
+			exchangeRateFloat := new(big.Float).Quo(one, ratioFloat)
+
+			currencyString := blockchain.CurrencyTypeToString(currency)
+			// Format to 6 decimal places
+			exchangeRates[currencyString] = exchangeRateFloat.Text('f', 6)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"faucetWorking": !state.IsPaused,
+		"faucetReserve": monBalance.Text('f', 6),
+		"exchangeRate":  exchangeRates,
+	})
+}
+
 // RegisterRoutes registers all API routes
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api := r.Group("/api")
 	{
+		api.GET("/info", h.GetFaucetInfo)
 		api.GET("/state", h.GetBridgeState)
 		api.POST("/estimate", h.EstimateSwap)
 
