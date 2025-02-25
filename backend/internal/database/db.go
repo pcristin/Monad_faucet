@@ -4,17 +4,13 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/lib/pq" // PostgreSQL driver
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
 const (
-	// Database file name
-	dbFileName = "monad_faucet.db"
-
 	// Schema version for migrations
 	schemaVersion = 1
 )
@@ -26,19 +22,23 @@ type DB struct {
 
 // New creates a new database connection
 func New(dataDir string) (*DB, error) {
-	// Create data directory if it doesn't exist
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create data directory: %w", err)
-	}
+	// Get database connection string from environment variable
+	// If not provided, use the dataDir parameter for backward compatibility
+	dbURL := getDBConnectionString()
 
-	dbPath := filepath.Join(dataDir, dbFileName)
-	db, err := sql.Open("sqlite3", dbPath+"?_journal=WAL&_busy_timeout=5000")
+	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	// Test the connection
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+
 	// Set connection pool settings
-	db.SetMaxOpenConns(10)
+	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(time.Hour)
 
@@ -54,11 +54,70 @@ func New(dataDir string) (*DB, error) {
 	return database, nil
 }
 
+// getDBConnectionString gets the PostgreSQL connection string from env vars
+func getDBConnectionString() string {
+	// Check for the DATABASE_URL environment variable (provided by Render)
+	if dbURL := getEnv("DATABASE_URL", ""); dbURL != "" {
+		return dbURL
+	}
+
+	// Fallback to constructing a connection string from individual parameters
+	host := getEnv("DB_HOST", "localhost")
+	port := getEnv("DB_PORT", "5432")
+	user := getEnv("DB_USER", "postgres")
+	password := getEnv("DB_PASSWORD", "postgres")
+	dbname := getEnv("DB_NAME", "monad_faucet")
+	sslmode := getEnv("DB_SSLMODE", "disable")
+
+	// Format: "host=localhost port=5432 user=postgres password=postgres dbname=monad_faucet sslmode=disable"
+	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
+		host, port, user, password, dbname, sslmode)
+}
+
+// getEnv gets an environment variable or returns the default value
+func getEnv(key, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists && value != "" {
+		return value
+	}
+	return defaultValue
+}
+
 // initSchema creates the database tables if they don't exist
 func (db *DB) initSchema() error {
-	// Check if we need to initialize or migrate the schema
+	// Check if the version table exists
+	var exists bool
+	err := db.QueryRow(`
+		SELECT EXISTS (
+			SELECT FROM information_schema.tables 
+			WHERE table_schema = 'public' 
+			AND table_name = 'schema_version'
+		)
+	`).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("failed to check if schema_version table exists: %w", err)
+	}
+
+	// Create the version table if it doesn't exist
+	if !exists {
+		_, err = db.Exec(`
+			CREATE TABLE schema_version (
+				version INTEGER NOT NULL
+			)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to create schema_version table: %w", err)
+		}
+
+		// Insert initial version
+		_, err = db.Exec(`INSERT INTO schema_version (version) VALUES (0)`)
+		if err != nil {
+			return fmt.Errorf("failed to initialize schema version: %w", err)
+		}
+	}
+
+	// Get current schema version
 	var version int
-	err := db.QueryRow("PRAGMA user_version").Scan(&version)
+	err = db.QueryRow(`SELECT version FROM schema_version`).Scan(&version)
 	if err != nil {
 		return fmt.Errorf("failed to get schema version: %w", err)
 	}
@@ -109,7 +168,7 @@ func (db *DB) initSchema() error {
 		// Create transaction_history table
 		_, err = tx.Exec(`
 			CREATE TABLE IF NOT EXISTS transaction_history (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				id SERIAL PRIMARY KEY,
 				deposit_id TEXT NOT NULL,
 				wallet_address TEXT NOT NULL,
 				amount TEXT NOT NULL,
@@ -119,7 +178,7 @@ func (db *DB) initSchema() error {
 				tx_hash TEXT,
 				created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				UNIQUE(deposit_id)
+				CONSTRAINT unique_deposit_id UNIQUE(deposit_id)
 			)
 		`)
 		if err != nil {
@@ -129,7 +188,7 @@ func (db *DB) initSchema() error {
 		// Create admin_actions table
 		_, err = tx.Exec(`
 			CREATE TABLE IF NOT EXISTS admin_actions (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				id SERIAL PRIMARY KEY,
 				action TEXT NOT NULL,
 				params TEXT NOT NULL,
 				admin_key TEXT NOT NULL,
@@ -153,7 +212,7 @@ func (db *DB) initSchema() error {
 	}
 
 	// Update schema version
-	_, err = tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion))
+	_, err = tx.Exec(`UPDATE schema_version SET version = $1`, schemaVersion)
 	if err != nil {
 		return fmt.Errorf("failed to update schema version: %w", err)
 	}
