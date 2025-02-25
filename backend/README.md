@@ -13,6 +13,7 @@ This is the backend service for the Monad Faucet, which facilitates token swaps 
 - Provides REST API for frontend integration
 - Handles automated refunds for failed transactions
 - Admin API for dynamic MON/USD ratio updates
+- Wallet-based distribution limits to prevent abuse (configurable percentage of total MON balance)
 
 ## Prerequisites
 
@@ -82,6 +83,24 @@ Response:
     "USDC": "10000000000000000000",
     "USDT": "10000000000000000000"
   }
+}
+```
+
+### GET /api/info
+Returns simplified faucet information.
+
+Response:
+```json
+{
+  "faucetWorking": true,
+  "faucetReserve": "3.429538",
+  "exchangeRate": {
+    "ETH": "0.000418",
+    "USDC": "1.000000",
+    "USDT": "1.000000"
+  },
+  "walletDailyLimit": "1.371815",
+  "limitDuration": "24 hours"
 }
 ```
 
@@ -155,6 +174,28 @@ Response:
 ```json
 {
   "message": "Deposits resumed successfully"
+}
+```
+
+### POST /api/admin/wallet-limit
+Updates the wallet limit percentage (requires admin authentication).
+
+Request:
+```json
+{
+  "limit_percentage": 40
+}
+```
+Headers:
+```
+X-Admin-Key: your-admin-key-here
+```
+
+Response:
+```json
+{
+  "message": "Wallet limit percentage updated successfully",
+  "limit_percentage": 40
 }
 ```
 
@@ -247,4 +288,30 @@ go test ./...
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Wallet Limits
+
+The service implements wallet-based distribution limits to prevent abuse:
+
+1. **Limit Calculation**:
+   - Each wallet is limited to a configurable percentage of the total MON balance in a 24-hour period
+   - Default: 30% of total MON balance
+   - Configurable via admin API (1-100%)
+
+2. **Limit Duration**:
+   - Limits reset after 24 hours from the last distribution
+   - Usage is tracked per wallet address
+
+3. **Validation**:
+   - Deposits are validated against wallet limits before processing
+   - If a wallet exceeds its limit, the deposit is rejected and refunded
+   - Detailed error messages indicate remaining allowance
+
+4. **Admin Control**:
+   - Administrators can adjust the limit percentage via API
+   - Useful for promotional periods or adjusting to demand
+
+5. **Transparency**:
+   - Current wallet limit is included in the `/api/info` endpoint
+   - Frontend can display this information to users 
