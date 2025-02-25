@@ -8,7 +8,7 @@ require (
 	github.com/ethereum/go-ethereum v1.15.2
 	github.com/gin-gonic/gin v1.9.1
 	github.com/joho/godotenv v1.5.1
-	github.com/mattn/go-sqlite3 v1.14.24
+	github.com/lib/pq v1.10.9
 )
 
 require (
