@@ -1,0 +1,30 @@
+# Git files
+.git
+.gitignore
+
+# Docker files
+Dockerfile
+.dockerignore
+
+# Build artifacts
+bin/
+tmp/
+build/
+
+# Local development files
+.env
+*.log
+logs/
+
+# Editor/IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Other files not needed in container
+README.md
+LICENSE
+*.md
+docs/
+tests/ 
