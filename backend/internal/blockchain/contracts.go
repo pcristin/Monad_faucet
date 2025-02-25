@@ -8,7 +8,6 @@ import (
 	"math/big"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -17,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
 // ArbitrumDepositor represents the Arbitrum depositor contract
@@ -140,26 +140,17 @@ func NewMonadDistributor(client *ethclient.Client, address common.Address, priva
 
 // GetEthSwapRatio returns the current ETH/MON swap ratio based on ETH/USD price from Chainlink
 func (d *ArbitrumDepositor) GetEthSwapRatio(ctx context.Context) (*big.Int, error) {
-	priceFeedAbi, err := abi.JSON(strings.NewReader(PriceFeedABI))
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse price feed ABI: %v", err)
-	}
-
-	priceFeed := bind.NewBoundContract(common.HexToAddress(ChainlinkEthUsdFeed), priceFeedAbi, d.client, d.client, d.client)
-
-	var out []interface{}
-	err = priceFeed.Call(&bind.CallOpts{Context: ctx}, &out, "latestRoundData")
-	if err != nil {
-		return nil, fmt.Errorf("failed to get ETH/USD price: %v", err)
-	}
-
-	ethUsdPrice := out[1].(*big.Int)
-	return ethUsdPrice, nil
+	// Use the retry wrapper function
+	return getEthSwapRatioWithRetry(ctx, d, NewRetryClient(d.client))
 }
 
 // GetContractState fetches the current state of both contracts
 func GetContractState(ctx context.Context, arb *ArbitrumDepositor, monad *MonadDistributor) (*ContractState, error) {
 	var state ContractState
+
+	// Create retry clients
+	arbRetryClient := NewRetryClient(arb.client)
+	monadRetryClient := NewRetryClient(monad.client)
 
 	// Call contract methods in parallel using goroutines
 	errChan := make(chan error, 4) // Updated to 4 for the additional ETH ratio check
@@ -167,7 +158,7 @@ func GetContractState(ctx context.Context, arb *ArbitrumDepositor, monad *MonadD
 	// Check if paused
 	go func() {
 		var out []interface{}
-		err := arb.BoundContract.Call(&bind.CallOpts{Context: ctx}, &out, "paused")
+		err := arbRetryClient.CallWithRetry(ctx, arb.BoundContract, &out, "paused")
 		if err != nil {
 			errChan <- fmt.Errorf("failed to check pause status: %v", err)
 			return
@@ -179,7 +170,7 @@ func GetContractState(ctx context.Context, arb *ArbitrumDepositor, monad *MonadD
 	// Get min amount for ETH deposits
 	go func() {
 		var out []interface{}
-		err := arb.BoundContract.Call(&bind.CallOpts{Context: ctx}, &out, "minEthDeposit")
+		err := arbRetryClient.CallWithRetry(ctx, arb.BoundContract, &out, "minEthDeposit")
 		if err != nil {
 			errChan <- fmt.Errorf("failed to get min amount: %v", err)
 			return
@@ -190,35 +181,18 @@ func GetContractState(ctx context.Context, arb *ArbitrumDepositor, monad *MonadD
 
 	// Get MON balance (native token) with retries
 	go func() {
-		var balance *big.Int
-		var err error
-		maxRetries := 3
-		for i := 0; i < maxRetries; i++ {
-			timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			balance, err = monad.client.BalanceAt(timeoutCtx, monad.address, nil)
-			cancel()
-
-			if err == nil {
-				state.MonBalance = balance
-				errChan <- nil
-				return
-			}
-
-			if ctx.Err() != nil {
-				errChan <- fmt.Errorf("failed to get MON balance: context cancelled")
-				return
-			}
-
-			if i < maxRetries-1 {
-				time.Sleep(time.Duration(1<<uint(i)) * time.Second)
-			}
+		balance, err := monadRetryClient.BalanceAtWithRetry(ctx, monad.address, nil)
+		if err != nil {
+			errChan <- fmt.Errorf("failed to get MON balance: %v", err)
+			return
 		}
-		errChan <- fmt.Errorf("failed to get MON balance after %d retries: %v", maxRetries, err)
+		state.MonBalance = balance
+		errChan <- nil
 	}()
 
 	// Get current ETH/MON swap ratio
 	go func() {
-		ethRatio, err := arb.GetEthSwapRatio(ctx)
+		ethRatio, err := getEthSwapRatioWithRetry(ctx, arb, arbRetryClient)
 		if err != nil {
 			errChan <- fmt.Errorf("failed to get ETH swap ratio: %v", err)
 			return
@@ -240,10 +214,32 @@ func GetContractState(ctx context.Context, arb *ArbitrumDepositor, monad *MonadD
 	return &state, nil
 }
 
+// getEthSwapRatioWithRetry gets the ETH/USD price with retry logic
+func getEthSwapRatioWithRetry(ctx context.Context, d *ArbitrumDepositor, retryClient *RetryClient) (*big.Int, error) {
+	priceFeedAbi, err := abi.JSON(strings.NewReader(PriceFeedABI))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse price feed ABI: %v", err)
+	}
+
+	priceFeed := bind.NewBoundContract(common.HexToAddress(ChainlinkEthUsdFeed), priceFeedAbi, d.client, d.client, d.client)
+
+	var out []interface{}
+	err = retryClient.CallWithRetry(ctx, priceFeed, &out, "latestRoundData")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get ETH/USD price: %v", err)
+	}
+
+	ethUsdPrice := out[1].(*big.Int)
+	return ethUsdPrice, nil
+}
+
 // RefundDeposit initiates a refund for a failed deposit
 func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.Int) error {
+	// Create retry client
+	retryClient := NewRetryClient(d.client)
+
 	// Get deposit details from events
-	logs, err := d.client.FilterLogs(ctx, ethereum.FilterQuery{
+	logs, err := retryClient.FilterLogsWithRetry(ctx, ethereum.FilterQuery{
 		FromBlock: big.NewInt(0),
 		ToBlock:   nil,
 		Addresses: []common.Address{d.address},
@@ -252,38 +248,32 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to filter logs: %v", err)
+		return fmt.Errorf("failed to get deposit events: %v", err)
 	}
 
+	// Find the deposit with the matching ID
 	var depositEvent struct {
 		Depositor common.Address
 		Amount    *big.Int
+		DepositId *big.Int
 		Currency  uint8
 	}
 
 	found := false
 	for _, log := range logs {
-		var event struct {
-			Depositor common.Address
-			Amount    *big.Int
-			DepositId *big.Int
-			Currency  uint8
-		}
-		err = d.BoundContract.UnpackLog(&event, "DepositEvent", log)
+		err = d.BoundContract.UnpackLog(&depositEvent, "DepositEvent", log)
 		if err != nil {
 			continue
 		}
-		if event.DepositId.Cmp(depositId) == 0 {
-			depositEvent.Depositor = event.Depositor
-			depositEvent.Amount = event.Amount
-			depositEvent.Currency = event.Currency
+
+		if depositEvent.DepositId.Cmp(depositId) == 0 {
 			found = true
 			break
 		}
 	}
 
 	if !found {
-		return fmt.Errorf("deposit event not found for ID: %s", depositId.String())
+		return fmt.Errorf("deposit ID %s not found", depositId.String())
 	}
 
 	// Get current gas price with a small buffer (20% increase)
@@ -295,7 +285,7 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 	gasPrice = new(big.Int).Div(gasPrice, big.NewInt(10))
 
 	// Pack the refund data
-	input, err := DepositorABI.Pack("refundDeposit", depositId, depositEvent.Depositor, depositEvent.Amount, depositEvent.Currency)
+	input, err := DepositorABI.Pack("refundDeposit", depositId)
 	if err != nil {
 		return fmt.Errorf("failed to pack refund data: %v", err)
 	}
@@ -314,7 +304,16 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 		To:   &d.address,
 		Data: input,
 	}
-	gasLimit, err := d.client.EstimateGas(ctx, msg)
+
+	// Use retry for gas estimation
+	var gasLimit uint64
+	estimateGasOp := func() error {
+		var estimateErr error
+		gasLimit, estimateErr = d.client.EstimateGas(ctx, msg)
+		return estimateErr
+	}
+
+	err = RetryWithBackoff(estimateGasOp, DefaultRetryConfig())
 	if err != nil {
 		return fmt.Errorf("failed to estimate gas: %v", err)
 	}
@@ -322,8 +321,15 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 	// Add 20% buffer to gas limit
 	gasLimit = gasLimit * 12 / 10
 
-	// Create transaction
-	nonce, err := d.client.PendingNonceAt(ctx, fromAddress)
+	// Create transaction with retry for nonce
+	var nonce uint64
+	nonceOp := func() error {
+		var nonceErr error
+		nonce, nonceErr = d.client.PendingNonceAt(ctx, fromAddress)
+		return nonceErr
+	}
+
+	err = RetryWithBackoff(nonceOp, DefaultRetryConfig())
 	if err != nil {
 		return fmt.Errorf("failed to get nonce: %v", err)
 	}
@@ -343,7 +349,12 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 		return fmt.Errorf("failed to sign transaction: %v", err)
 	}
 
-	err = d.client.SendTransaction(ctx, signedTx)
+	// Send transaction with retry
+	sendTxOp := func() error {
+		return d.client.SendTransaction(ctx, signedTx)
+	}
+
+	err = RetryWithBackoff(sendTxOp, DefaultRetryConfig())
 	if err != nil {
 		return fmt.Errorf("failed to send refund transaction: %v", err)
 	}
@@ -358,7 +369,7 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 		return fmt.Errorf("refund transaction failed")
 	}
 
-	log.Printf("Successfully refunded deposit ID %s (tx: %s)", depositId.String(), signedTx.Hash().Hex())
+	logger.Info("Successfully refunded deposit ID %s (tx: %s)", depositId.String(), signedTx.Hash().Hex())
 	return nil
 }
 
