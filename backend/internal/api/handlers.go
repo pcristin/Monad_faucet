@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -404,7 +403,8 @@ func validateTxHash(txHash string) error {
 func (h *Handler) GetTransactionStatus(c *gin.Context) {
 	// Decode the request
 	var req struct {
-		TxHash string `json:"tx_hash"`
+		TxHash         string `json:"tx_hash"`
+		ArbitrumTxHash string `json:"arbitrum_tx_hash"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -414,12 +414,18 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		return
 	}
 
+	// Use arbitrum_tx_hash if provided, otherwise fall back to tx_hash
+	txHash := req.ArbitrumTxHash
+	if txHash == "" {
+		txHash = req.TxHash
+	}
+
 	// Log the transaction status request
 	logger.Info("Transaction status request: tx_hash=%s, client_ip=%s, user_agent=%s",
-		req.TxHash, c.ClientIP(), c.Request.UserAgent())
+		txHash, c.ClientIP(), c.Request.UserAgent())
 
 	// Check for empty tx_hash
-	if req.TxHash == "" {
+	if txHash == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "Transaction hash cannot be empty",
 			"status":  "error",
@@ -429,7 +435,7 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 	}
 
 	// Validate transaction hash format
-	if err := validateTxHash(req.TxHash); err != nil {
+	if err := validateTxHash(txHash); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   fmt.Sprintf("Invalid transaction hash: %v", err),
 			"status":  "error",
@@ -448,10 +454,10 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 	}
 
 	// Check if this is a transaction in our database
-	tx, err := h.bridgeService.GetDB().GetTransactionByArbitrumTxHash(req.TxHash)
+	tx, err := h.bridgeService.GetDB().GetTransactionByArbitrumTxHash(txHash)
 	if err == nil && tx != nil {
 		// We found a transaction in our database
-		response.Txs["Arbitrum"] = req.TxHash
+		response.Txs["Arbitrum"] = txHash
 
 		// Return the appropriate status
 		switch tx.Status {
@@ -481,22 +487,6 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 	response.Status = "not_found"
 	response.Message = "Transaction not found in our system"
 	c.JSON(http.StatusOK, response)
-}
-
-// checkArbitrumConnection verifies that we can connect to the Arbitrum client
-func (h *Handler) checkArbitrumConnection(ctx context.Context) error {
-	client := h.bridgeService.GetArbitrumClient()
-	if client == nil {
-		return fmt.Errorf("arbitrum client is nil")
-	}
-
-	// Try to get current block number to verify connection
-	_, err := client.BlockNumber(ctx)
-	if err != nil {
-		return fmt.Errorf("cannot get block number from Arbitrum: %w", err)
-	}
-
-	return nil
 }
 
 // HealthCheck handles health check requests
