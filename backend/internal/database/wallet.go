@@ -24,7 +24,7 @@ func (db *DB) GetWalletUsage(wallet common.Address) (*WalletUsage, error) {
 	)
 
 	err := db.QueryRow(
-		"SELECT total_amount, last_updated FROM wallet_usage WHERE wallet_address = $1",
+		`SELECT total_amount, last_updated FROM wallet_usage WHERE wallet_address = $1`,
 		wallet.Hex(),
 	).Scan(&totalAmount, &lastUpdated)
 

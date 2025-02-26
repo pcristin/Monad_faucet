@@ -13,7 +13,7 @@ This is the backend service for the Monad Faucet, which facilitates token swaps 
 - Provides REST API for frontend integration
 - Handles automated refunds for failed transactions
 - Admin API for dynamic MON/USD ratio updates
-- Wallet-based distribution limits to prevent abuse (configurable percentage of total MON balance)
+- Wallet-based distribution limits to prevent abuse (configurable percentage of total MON balance per transaction)
 
 ## Prerequisites
 
@@ -199,7 +199,7 @@ Response:
 }
 ```
 
-> Note: Setting `limit_percentage` to 0 disables the wallet limit entirely.
+> Note: Setting `limit_percentage` to 0 disables the wallet limit entirely. The limit is applied per transaction rather than over a time period.
 
 ## Price Calculation
 
