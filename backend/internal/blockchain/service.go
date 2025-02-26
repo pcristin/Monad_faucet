@@ -781,3 +781,8 @@ func (s *BridgeService) GetCacheSize() int {
 	defer s.txCacheMutex.RUnlock()
 	return len(s.txCache)
 }
+
+// GetDB returns the database connection
+func (s *BridgeService) GetDB() *database.DB {
+	return s.db
+}

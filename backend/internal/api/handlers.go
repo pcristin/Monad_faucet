@@ -225,6 +225,14 @@ func (h *Handler) AdminUpdateRatio(c *gin.Context) {
 	// Update the ratio
 	blockchain.UpdateMonUsdRatio(newRatioInt)
 
+	// Log the admin action in the database
+	if h.bridgeService != nil && h.bridgeService.GetDB() != nil {
+		params := fmt.Sprintf("new_ratio=%s", req.MonUsdRatio)
+		if err := h.bridgeService.GetDB().LogAdminAction("update_ratio", params, apiKey); err != nil {
+			logger.Error("Failed to log admin action: %v", err)
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"message":   "MON/USD ratio updated successfully",
 		"new_ratio": req.MonUsdRatio,
@@ -256,6 +264,13 @@ func (h *Handler) PauseDeposits(c *gin.Context) {
 		return
 	}
 
+	// Log the admin action in the database
+	if h.bridgeService != nil && h.bridgeService.GetDB() != nil {
+		if err := h.bridgeService.GetDB().LogAdminAction("pause_deposits", "", apiKey); err != nil {
+			logger.Error("Failed to log admin action: %v", err)
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Deposits paused successfully",
 	})
@@ -277,6 +292,13 @@ func (h *Handler) ResumeDeposits(c *gin.Context) {
 			"error": fmt.Sprintf("Failed to resume deposits: %v", err),
 		})
 		return
+	}
+
+	// Log the admin action in the database
+	if h.bridgeService != nil && h.bridgeService.GetDB() != nil {
+		if err := h.bridgeService.GetDB().LogAdminAction("resume_deposits", "", apiKey); err != nil {
+			logger.Error("Failed to log admin action: %v", err)
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -367,6 +389,14 @@ func (h *Handler) AdminUpdateWalletLimit(c *gin.Context) {
 			"error": err.Error(),
 		})
 		return
+	}
+
+	// Log the admin action in the database
+	if h.bridgeService != nil && h.bridgeService.GetDB() != nil {
+		params := fmt.Sprintf("limit_percentage=%d", req.LimitPercentage)
+		if err := h.bridgeService.GetDB().LogAdminAction("update_wallet_limit", params, apiKey); err != nil {
+			logger.Error("Failed to log admin action: %v", err)
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
