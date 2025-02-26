@@ -406,3 +406,18 @@ func (db *DB) UpdateDepositIDForTransaction(txHash string, depositID *big.Int) e
 
 	return nil
 }
+
+// UpdateTransactionHash updates the transaction hash for a specific deposit ID
+func (db *DB) UpdateTransactionHash(depositID *big.Int, txHash string) error {
+	_, err := db.Exec(
+		`UPDATE transaction_history 
+		SET tx_hash = $1, updated_at = CURRENT_TIMESTAMP 
+		WHERE deposit_id = $2`,
+		txHash,
+		depositID.String(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update transaction hash: %w", err)
+	}
+	return nil
+}
