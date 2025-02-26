@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
@@ -525,30 +526,15 @@ func (s *BridgeService) GetDepositIDFromTxHash(ctx context.Context, txHash strin
 		return nil, fmt.Errorf("invalid transaction hash format")
 	}
 
-	// Get transaction receipt
-	receipt, err := s.arbDepositor.client.TransactionReceipt(ctx, hash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get transaction receipt: %w", err)
+	// Try to find the transaction in the database
+	tx, err := s.db.GetTransactionByArbitrumTxHash(hash.Hex())
+	if err == nil && tx != nil {
+		logger.Info("Found transaction with deposit ID %s for tx %s in database", tx.DepositID.String(), txHash)
+		return tx.DepositID, nil
 	}
 
-	// Check if transaction was successful
-	if receipt.Status != 1 {
-		return nil, fmt.Errorf("transaction failed")
-	}
-
-	// Parse logs to find deposit event
-	for _, log := range receipt.Logs {
-		// Check if log is from our contract
-		if log.Address == s.arbDepositor.address {
-			// Try to parse as deposit event
-			event, err := s.parseDepositEvent(*log)
-			if err == nil {
-				return event.DepositId, nil
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("deposit event not found in transaction logs")
+	// If not in database, return an error
+	return nil, fmt.Errorf("transaction not found in database")
 }
 
 // parseDepositEvent parses a log into a DepositEvent
@@ -750,4 +736,42 @@ func (s *BridgeService) GetCacheSize() int {
 // GetDB returns the database connection
 func (s *BridgeService) GetDB() *database.DB {
 	return s.db
+}
+
+// GetArbitrumClient returns the Arbitrum client
+func (s *BridgeService) GetArbitrumClient() *ethclient.Client {
+	return s.arbDepositor.client
+}
+
+// GetArbitrumContractAddress returns the Arbitrum contract address
+func (s *BridgeService) GetArbitrumContractAddress() common.Address {
+	return s.arbDepositor.address
+}
+
+// FindMonadTransactionByDepositID looks for a transaction on the Monad blockchain by deposit ID
+// Returns the transaction hash, status, and any error that occurred
+func (s *BridgeService) FindMonadTransactionByDepositID(ctx context.Context, depositID *big.Int) (string, string, error) {
+	logger.Info("Looking for Monad transaction with deposit ID: %s", depositID.String())
+
+	// Try looking in the database as a first option
+	tx, err := s.db.GetTransactionByDepositID(depositID)
+	if err == nil && tx != nil {
+		logger.Info("Found transaction in database: deposit_id=%s, status=%s, tx_hash=%s",
+			depositID.String(), tx.Status, tx.TxHash)
+
+		// If there's a transaction hash in the database, use it
+		if tx.TxHash != "" {
+			return tx.TxHash, string(tx.Status), nil
+		}
+
+		// If status is completed but no hash, it might be special handling
+		if tx.Status == database.StatusCompleted {
+			logger.Info("Transaction marked as completed in database: %s", depositID.String())
+			return "", "success", nil
+		}
+	}
+
+	// Not found in database
+	logger.Info("No Monad transaction found for deposit ID: %s", depositID.String())
+	return "", "", nil
 }

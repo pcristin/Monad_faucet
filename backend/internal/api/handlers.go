@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -90,92 +91,7 @@ func NewHandler(bridgeService *blockchain.BridgeService) *Handler {
 	}
 }
 
-// GetBridgeState returns the current state of the bridge
-func (h *Handler) GetBridgeState(c *gin.Context) {
-	state, err := h.bridgeService.GetState(c.Request.Context())
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": err.Error(),
-		})
-		return
-	}
-
-	// Convert big.Int values to strings for JSON response
-	swapRatios := make(map[string]string)
-	for currency, ratio := range state.SwapRatios {
-		swapRatios[blockchain.CurrencyTypeToString(currency)] = ratio.String()
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"is_paused":   state.IsPaused,
-		"min_amount":  state.MinAmount.String(),
-		"mon_balance": state.MonBalance.String(),
-		"swap_ratios": swapRatios,
-	})
-}
-
-type EstimateSwapRequest struct {
-	Amount   string `json:"amount" binding:"required"`
-	Currency string `json:"currency" binding:"required,oneof=ETH USDC USDT"`
-}
-
-// EstimateSwap calculates the amount of MON tokens to be received
-func (h *Handler) EstimateSwap(c *gin.Context) {
-	var req EstimateSwapRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid request parameters",
-		})
-		return
-	}
-
-	// Parse amount
-	amount, ok := new(big.Int).SetString(req.Amount, 10)
-	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid amount format",
-		})
-		return
-	}
-
-	// Get current state
-	state, err := h.bridgeService.GetState(c.Request.Context())
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": err.Error(),
-		})
-		return
-	}
-
-	// Convert currency string to type
-	var currencyType blockchain.CurrencyType
-	switch req.Currency {
-	case "ETH":
-		currencyType = blockchain.CurrencyETH
-	case "USDC":
-		currencyType = blockchain.CurrencyUSDC
-	case "USDT":
-		currencyType = blockchain.CurrencyUSDT
-	}
-
-	// Calculate MON amount
-	swapRatio := state.SwapRatios[currencyType]
-	if swapRatio == nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid currency",
-		})
-		return
-	}
-
-	monAmount := new(big.Int).Mul(amount, swapRatio)
-
-	c.JSON(http.StatusOK, gin.H{
-		"input_amount":   req.Amount,
-		"input_currency": req.Currency,
-		"mon_amount":     monAmount.String(),
-		"swap_ratio":     swapRatio.String(),
-	})
-}
+// GetBridgeState method removed as it's redundant with GetFaucetInfo
 
 // AdminUpdateRatioRequest represents the request to update MON/USD ratio
 type AdminUpdateRatioRequest struct {
@@ -339,23 +255,58 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 
 	// Convert swap ratios to exchange rates
 	exchangeRates := make(map[string]string)
-
-	// For each currency, convert the swap ratio to exchange rates
 	for currency, ratio := range state.SwapRatios {
 		if ratio.Sign() > 0 {
-			// The swap ratio is MON per 1 unit of currency
-			// We need to invert it to get how much of the currency equals 1 MON
-			// First convert ratio to big.Float for precision
-			ratioFloat := new(big.Float).SetInt(ratio)
-			ratioFloat = new(big.Float).Quo(ratioFloat, divisor)
+			// The contract returns ratio as "MON wei per smallest unit of currency"
+			// For USDC/USDT with 1 MON = 0.1 USD, the ratio is 10^18 / 0.1 = 10^19
+			// This means 1 smallest unit of USDC (0.000001 USDC) gives 10^19/10^6 = 10^13 MON wei
+			// To get USDC per 1 MON, we need: 10^6 / (10^19/10^18) = 10^6 / 10 = 0.1 USDC
 
-			// Calculate currency needed for 1 MON (1/ratio)
-			one := new(big.Float).SetInt64(1)
-			exchangeRateFloat := new(big.Float).Quo(one, ratioFloat)
+			var currencyDecimals int64
+			switch currency {
+			case blockchain.CurrencyETH:
+				currencyDecimals = 18 // ETH has 18 decimals
+			case blockchain.CurrencyUSDC, blockchain.CurrencyUSDT:
+				currencyDecimals = 6 // USDC/USDT have 6 decimals
+			default:
+				currencyDecimals = 18
+			}
 
-			currencyString := blockchain.CurrencyTypeToString(currency)
-			// Format to 6 decimal places
-			exchangeRates[currencyString] = exchangeRateFloat.Text('f', 6)
+			// For USD-based tokens (USDC/USDT), the ratio directly represents MON/USD ratio
+			// For ETH, we need to calculate based on ETH/USD price
+			var currencyPerMon *big.Float
+
+			if currency == blockchain.CurrencyUSDC || currency == blockchain.CurrencyUSDT {
+				// For USDC/USDT: 1 MON = 0.1 USD, so we need 0.1 USDC/USDT per 1 MON
+				// The ratio is 10^18 / monUsdRatio, so to get USDC per MON:
+				// 10^6 (USDC decimals) / (10^18 / monUsdRatio) * 10^18 = monUsdRatio / 10^12
+
+				// Get the MON/USD ratio (e.g., 0.1 * 10^18 for 0.1 USD per 1 MON)
+				monUsdRatio := blockchain.GetMonUsdRatio()
+
+				// Convert to USDC/USDT per MON
+				currencyPerMon = new(big.Float).Quo(
+					new(big.Float).SetInt(monUsdRatio),
+					new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+				)
+			} else {
+				// For ETH: Calculate based on the ratio from contract
+				// First calculate smallest units per MON
+				smallestUnitsPerMon := new(big.Float).Quo(
+					new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+					new(big.Float).SetInt(ratio),
+				)
+
+				// Then convert to human-readable format
+				currencyPerMon = new(big.Float).Quo(
+					smallestUnitsPerMon,
+					new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(currencyDecimals), nil)),
+				)
+			}
+
+			exchangeRates[blockchain.CurrencyTypeToString(currency)] = currencyPerMon.Text('f', 6)
+		} else {
+			exchangeRates[blockchain.CurrencyTypeToString(currency)] = "0.000000"
 		}
 	}
 
@@ -449,110 +400,83 @@ func validateTxHash(txHash string) error {
 	return nil
 }
 
-// GetTransactionStatus returns the status of a transaction
+// GetTransactionStatus retrieves the status of a transaction
 func (h *Handler) GetTransactionStatus(c *gin.Context) {
-	// Start timing the request for logging
-	startTime := time.Now()
-
-	// Get client IP for rate limiting
-	clientIP := c.ClientIP()
-
-	// Simple in-memory rate limiting (can be replaced with Redis in production)
-	if !h.rateLimiter.Allow(clientIP) {
-		c.JSON(http.StatusTooManyRequests, gin.H{
-			"status":  "error",
-			"message": "Rate limit exceeded. Please try again later.",
-		})
-		return
+	// Decode the request
+	var req struct {
+		TxHash string `json:"tx_hash"`
 	}
 
-	var req GetTransactionStatusRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid request parameters",
+			"error": "Invalid request format",
 		})
 		return
 	}
 
-	// Validate transaction hash format
-	if err := validateTxHash(req.ArbitrumTxHash); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"status":  "error",
-			"message": fmt.Sprintf("Invalid transaction hash: %v", err),
-		})
-		return
-	}
-
-	// Log the request
+	// Log the transaction status request
 	logger.Info("Transaction status request: tx_hash=%s, client_ip=%s, user_agent=%s",
-		req.ArbitrumTxHash,
-		clientIP,
-		c.Request.UserAgent())
+		req.TxHash, c.ClientIP(), c.Request.UserAgent())
 
-	// Get transaction from database by deposit ID
-	depositID, err := h.bridgeService.GetDepositIDFromTxHash(c.Request.Context(), req.ArbitrumTxHash)
-	if err != nil {
-		logger.Warn("Transaction not found: tx_hash=%s, error=%s",
-			req.ArbitrumTxHash,
-			err.Error())
-
-		c.JSON(http.StatusNotFound, gin.H{
-			"status":  "error",
-			"message": fmt.Sprintf("Transaction not found: %v", err),
-		})
-		return
-	}
-
-	// Get transaction details
-	tx, err := h.bridgeService.GetTransactionByDepositID(c.Request.Context(), depositID)
-	if err != nil {
-		logger.Error("Failed to get transaction details for deposit ID %s: %v",
-			depositID.String(), err)
-
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"status":  "error",
-			"message": fmt.Sprintf("Failed to get transaction details: %v", err),
-		})
-		return
-	}
-
-	// Prepare response
-	response := TransactionResponse{
+	// Prepare the response structure
+	response := struct {
+		Status  string            `json:"status"`
+		Message string            `json:"message"`
+		Txs     map[string]string `json:"txs,omitempty"`
+	}{
 		Txs: make(map[string]string),
 	}
 
-	// Add Arbitrum deposit transaction hash
-	response.Txs["Arbitrum"] = req.ArbitrumTxHash
+	// Check if this is a transaction in our database
+	tx, err := h.bridgeService.GetDB().GetTransactionByArbitrumTxHash(req.TxHash)
+	if err == nil && tx != nil {
+		// We found a transaction in our database
+		response.Txs["Arbitrum"] = req.TxHash
 
-	// Set status and message based on transaction status
-	switch tx.Status {
-	case "completed":
-		response.Status = "success"
-		response.Message = "MON distribution successful"
-		response.Txs["Monad"] = tx.TxHash
-	case "failed":
-		response.Status = "error"
-		response.Message = "Transaction execution reverted"
-	case "refunded":
-		response.Status = "refunded"
-		response.Message = "Deposit was successful, but MON couldn't be distributed"
-		response.Txs["Arbitrum refund"] = tx.TxHash
-	case "pending":
-		response.Status = "pending"
-		response.Message = "Transaction is still being processed"
-	default:
-		response.Status = "unknown"
-		response.Message = "Unknown transaction status"
+		// Return the appropriate status
+		switch tx.Status {
+		case "pending":
+			response.Status = "pending"
+			response.Message = "Transaction is pending on Arbitrum"
+		case "completed":
+			response.Status = "success"
+			response.Message = "MON tokens have been distributed to your wallet"
+		case "failed":
+			response.Status = "error"
+			response.Message = "Transaction execution has reverted"
+		case "refunded":
+			response.Status = "refunded"
+			response.Message = "Your deposit was successful but MON distribution failed, and a refund was processed"
+		default:
+			response.Status = "unknown"
+			response.Message = "Transaction status is unknown"
+		}
+
+		// Return the response
+		c.JSON(http.StatusOK, response)
+		return
 	}
 
-	// Log the response
-	logger.Info("Transaction status response: tx_hash=%s, deposit_id=%s, status=%s, duration_ms=%d",
-		req.ArbitrumTxHash,
-		depositID.String(),
-		response.Status,
-		time.Since(startTime).Milliseconds())
-
+	// Transaction not found in our database
+	response.Status = "not_found"
+	response.Message = "Transaction not found in our system"
 	c.JSON(http.StatusOK, response)
+}
+
+// checkArbitrumConnection verifies that we can connect to the Arbitrum client
+func (h *Handler) checkArbitrumConnection(ctx context.Context) error {
+	client := h.bridgeService.GetArbitrumClient()
+	if client == nil {
+		return fmt.Errorf("arbitrum client is nil")
+	}
+
+	// Try to get current block number to verify connection
+	_, err := client.BlockNumber(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot get block number from Arbitrum: %w", err)
+	}
+
+	return nil
 }
 
 // HealthCheck handles health check requests
@@ -678,8 +602,6 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api := r.Group("/api")
 	{
 		api.GET("/info", h.GetFaucetInfo)
-		api.GET("/state", h.GetBridgeState)
-		api.POST("/estimate", h.EstimateSwap)
 
 		// Transaction status endpoints
 		api.POST("/tx-status", h.GetTransactionStatus) // Keep for backward compatibility

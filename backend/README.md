@@ -201,6 +201,47 @@ Response:
 
 > Note: Setting `limit_percentage` to 0 disables the wallet limit entirely. The limit is applied per transaction rather than over a time period.
 
+### POST /api/tx-status
+### POST /api/v1/transaction/status
+Retrieves the status of a transaction by its Arbitrum transaction hash. Only transactions processed by our system will be found.
+
+Request:
+```json
+{
+  "tx_hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+}
+```
+
+Response:
+```json
+{
+  "status": "success",
+  "message": "MON tokens have been distributed to your wallet",
+  "txs": {
+    "Arbitrum": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+  }
+}
+```
+
+Possible status values:
+- `success`: Transaction was successful, MON tokens were distributed
+- `pending`: Transaction is still being processed
+- `error`: Transaction execution reverted
+- `refunded`: Deposit was successful, but MON couldn't be distributed and was refunded
+- `not_found`: Transaction was not found in our system
+
+## Transaction Processing
+
+The faucet processes transactions in several steps:
+
+1. User initiates a deposit on Arbitrum network
+2. Backend detects the deposit event
+3. System validates the deposit and waits for confirmations
+4. MON tokens are minted on Monad network
+5. Transaction status is updated in the database
+
+The transaction status endpoint allows users to check the current status of their transaction. Only transactions initiated through our system will be found in the transaction status endpoint.
+
 ## Price Calculation
 
 The service calculates token swap ratios based on:
