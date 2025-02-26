@@ -162,7 +162,7 @@ func (s *BridgeService) processRefunds() {
 			return
 		case depositId := <-s.refundChan:
 			ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
-			if err := s.arbDepositor.RefundDeposit(ctx, depositId); err != nil {
+			if err := s.refundDeposit(ctx, depositId); err != nil {
 				logger.Error("Error processing refund for deposit ID %s: %v", depositId.String(), err)
 			} else {
 				logger.Info("Successfully refunded deposit ID: %s", depositId.String())
@@ -321,6 +321,15 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int) *big.Int {
 	result := new(big.Int).Mul(depositAmount, swapRatio)
 	result = new(big.Int).Div(result, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+
+	// Ensure minimum amount (1 wei)
+	// If the calculation results in zero due to tiny input or rounding,
+	// return at least 1 wei to avoid the "Transfer amount must be greater than zero" error
+	if result.Sign() <= 0 {
+		logger.Warn("Calculated MON amount is zero, setting to minimum (1 wei)")
+		return big.NewInt(1) // Minimum of 1 wei
+	}
+
 	return result
 }
 
@@ -774,4 +783,9 @@ func (s *BridgeService) FindMonadTransactionByDepositID(ctx context.Context, dep
 	// Not found in database
 	logger.Info("No Monad transaction found for deposit ID: %s", depositID.String())
 	return "", "", nil
+}
+
+func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) error {
+	logger.Info("Delegating refund of deposit ID %s to ArbitrumDepositor", depositId.String())
+	return s.arbDepositor.RefundDeposit(ctx, depositId)
 }
