@@ -227,7 +227,8 @@ func (h *Handler) AdminUpdateRatio(c *gin.Context) {
 
 	// Log the admin action in the database
 	if h.bridgeService != nil && h.bridgeService.GetDB() != nil {
-		params := fmt.Sprintf("new_ratio=%s", req.MonUsdRatio)
+		// Use JSON format instead of key=value format to avoid SQL syntax issues
+		params := fmt.Sprintf(`{"new_ratio":"%s"}`, req.MonUsdRatio)
 		if err := h.bridgeService.GetDB().LogAdminAction("update_ratio", params, apiKey); err != nil {
 			logger.Error("Failed to log admin action: %v", err)
 		}
@@ -401,7 +402,8 @@ func (h *Handler) AdminUpdateWalletLimit(c *gin.Context) {
 
 	// Log the admin action in the database
 	if h.bridgeService != nil && h.bridgeService.GetDB() != nil {
-		params := fmt.Sprintf("limit_percentage=%d", req.LimitPercentage)
+		// Use JSON format instead of key=value format to avoid SQL syntax issues
+		params := fmt.Sprintf(`{"limit_percentage":%d}`, req.LimitPercentage)
 		if err := h.bridgeService.GetDB().LogAdminAction("update_wallet_limit", params, apiKey); err != nil {
 			logger.Error("Failed to log admin action: %v", err)
 		}
