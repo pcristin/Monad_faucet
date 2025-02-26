@@ -59,4 +59,8 @@ faucet_data/
 
 # Local testing files
 docker-compose.yml
-backend/cmd/mockdata/ 
+backend/cmd/mockdata/
+
+# Admin scripts
+backend/scripts/admin/*
+!backend/scripts/admin/.gitkeep 
