@@ -130,6 +130,11 @@ func main() {
 		// Process request
 		c.Next()
 
+		// Skip logging for health checks in production to reduce log volume
+		if os.Getenv("RENDER") == "true" && (path == "/health" || path == "/") {
+			return
+		}
+
 		// Log request details after completion
 		latency := time.Since(start)
 		clientIP := c.ClientIP()
