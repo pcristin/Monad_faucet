@@ -418,6 +418,26 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 	logger.Info("Transaction status request: tx_hash=%s, client_ip=%s, user_agent=%s",
 		req.TxHash, c.ClientIP(), c.Request.UserAgent())
 
+	// Check for empty tx_hash
+	if req.TxHash == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Transaction hash cannot be empty",
+			"status":  "error",
+			"message": "Please provide a valid transaction hash",
+		})
+		return
+	}
+
+	// Validate transaction hash format
+	if err := validateTxHash(req.TxHash); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   fmt.Sprintf("Invalid transaction hash: %v", err),
+			"status":  "error",
+			"message": "Please provide a valid transaction hash",
+		})
+		return
+	}
+
 	// Prepare the response structure
 	response := struct {
 		Status  string            `json:"status"`

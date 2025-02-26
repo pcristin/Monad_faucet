@@ -325,8 +325,14 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 	gasPrice = new(big.Int).Mul(gasPrice, big.NewInt(12))
 	gasPrice = new(big.Int).Div(gasPrice, big.NewInt(10))
 
-	// Pack the refund data
-	input, err := DepositorABI.Pack("refundDeposit", depositId)
+	// Pack the refund data - Fix the argument mismatch error by providing all 4 required parameters
+	input, err := DepositorABI.Pack(
+		"refundDeposit",
+		depositId,
+		depositEvent.Depositor,
+		depositEvent.Amount,
+		uint8(depositEvent.Currency),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to pack refund data: %v", err)
 	}
