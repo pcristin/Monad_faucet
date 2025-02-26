@@ -222,7 +222,7 @@ func (s *BridgeService) validateDeposit(state *ContractState, event DepositEvent
 	}
 
 	// Check wallet limit
-	if err := s.checkWalletLimit(event.Depositor, monAmount, state.MonBalance); err != nil {
+	if err := s.checkWalletLimit(monAmount, state.MonBalance); err != nil {
 		return err
 	}
 
@@ -491,7 +491,7 @@ func (s *BridgeService) ResumeDeposits(ctx context.Context) error {
 
 // checkWalletLimit checks if a transaction exceeds the per-transaction wallet limit
 // Returns nil if the wallet is within limits, otherwise returns an error
-func (s *BridgeService) checkWalletLimit(wallet common.Address, requestedAmount *big.Int, totalMonBalance *big.Int) error {
+func (s *BridgeService) checkWalletLimit(requestedAmount *big.Int, totalMonBalance *big.Int) error {
 	// If limit is set to 0, there are no limits
 	if WalletLimitPercentage == 0 {
 		return nil
@@ -544,48 +544,6 @@ func (s *BridgeService) GetDepositIDFromTxHash(ctx context.Context, txHash strin
 
 	// If not in database, return an error
 	return nil, fmt.Errorf("transaction not found in database")
-}
-
-// parseDepositEvent parses a log into a DepositEvent
-func (s *BridgeService) parseDepositEvent(log types.Log) (*DepositEvent, error) {
-	// Define the event signature
-	eventSignature := []byte("Deposit(address,uint256,uint256,uint8)")
-	eventSignatureHash := crypto.Keccak256Hash(eventSignature)
-
-	// Check if this log matches our event
-	if log.Topics[0] != eventSignatureHash {
-		return nil, fmt.Errorf("log is not a Deposit event")
-	}
-
-	// Parse the event data
-	var event struct {
-		Depositor common.Address
-		Amount    *big.Int
-		DepositId *big.Int
-		Currency  uint8
-	}
-
-	// The first topic is the event signature, the second is the indexed depositor address
-	if len(log.Topics) < 2 {
-		return nil, fmt.Errorf("insufficient topics in log")
-	}
-
-	// Get depositor from the indexed parameter
-	event.Depositor = common.BytesToAddress(log.Topics[1].Bytes())
-
-	// Decode the non-indexed parameters
-	err := s.arbDepositor.BoundContract.UnpackLog(&event, "Deposit", log)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unpack log: %w", err)
-	}
-
-	return &DepositEvent{
-		Depositor:   event.Depositor,
-		Amount:      event.Amount,
-		DepositId:   event.DepositId,
-		Currency:    CurrencyType(event.Currency),
-		BlockNumber: log.BlockNumber,
-	}, nil
 }
 
 // GetTransactionByDepositID retrieves transaction details by deposit ID
