@@ -24,7 +24,7 @@ func (db *DB) GetWalletUsage(wallet common.Address) (*WalletUsage, error) {
 	)
 
 	err := db.QueryRow(
-		"SELECT total_amount, last_updated FROM wallet_usage WHERE wallet_address = ?",
+		"SELECT total_amount, last_updated FROM wallet_usage WHERE wallet_address = $1",
 		wallet.Hex(),
 	).Scan(&totalAmount, &lastUpdated)
 
@@ -56,9 +56,9 @@ func (db *DB) GetWalletUsage(wallet common.Address) (*WalletUsage, error) {
 func (db *DB) UpdateWalletUsage(usage *WalletUsage) error {
 	_, err := db.Exec(
 		`INSERT INTO wallet_usage (wallet_address, total_amount, last_updated) 
-		VALUES (?, ?, ?) 
+		VALUES ($1, $2, $3) 
 		ON CONFLICT(wallet_address) DO UPDATE SET 
-		total_amount = ?, last_updated = ?`,
+		total_amount = $4, last_updated = $5`,
 		usage.WalletAddress.Hex(), usage.TotalAmount.String(), usage.LastUpdated,
 		usage.TotalAmount.String(), usage.LastUpdated,
 	)

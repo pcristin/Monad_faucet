@@ -18,7 +18,7 @@ const (
 // GetSetting retrieves a setting value from the database
 func (db *DB) GetSetting(key string) (string, error) {
 	var value string
-	err := db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&value)
+	err := db.QueryRow("SELECT value FROM settings WHERE key = $1", key).Scan(&value)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", fmt.Errorf("setting not found: %s", key)
@@ -32,9 +32,9 @@ func (db *DB) GetSetting(key string) (string, error) {
 func (db *DB) SetSetting(key, value string) error {
 	_, err := db.Exec(
 		`INSERT INTO settings (key, value, updated_at) 
-		VALUES (?, ?, ?) 
+		VALUES ($1, $2, $3) 
 		ON CONFLICT(key) DO UPDATE SET 
-		value = ?, updated_at = ?`,
+		value = $4, updated_at = $5`,
 		key, value, time.Now(),
 		value, time.Now(),
 	)
@@ -142,7 +142,7 @@ func (db *DB) LogAdminAction(action, params, adminKey string) error {
 	maskedKey := maskAdminKey(adminKey)
 
 	_, err := db.Exec(
-		"INSERT INTO admin_actions (action, params, admin_key) VALUES (?, ?, ?)",
+		"INSERT INTO admin_actions (action, params, admin_key) VALUES ($1, $2, $3)",
 		action, params, maskedKey,
 	)
 	if err != nil {
