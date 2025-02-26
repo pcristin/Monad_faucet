@@ -31,6 +31,11 @@ vendor/
 
 # OS specific files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
 
 # Database files
@@ -50,4 +55,8 @@ bin/
 # Docker volumes
 data/
 postgres_data/
-faucet_data/ 
+faucet_data/
+
+# Local testing files
+docker-compose.yml
+backend/cmd/mockdata/ 
