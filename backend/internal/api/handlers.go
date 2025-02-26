@@ -459,6 +459,11 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		// We found a transaction in our database
 		response.Txs["Arbitrum"] = txHash
 
+		// Add Monad transaction hash if available
+		if tx.MonadTxHash != "" {
+			response.Txs["Monad"] = tx.MonadTxHash
+		}
+
 		// Return the appropriate status
 		switch tx.Status {
 		case "pending":

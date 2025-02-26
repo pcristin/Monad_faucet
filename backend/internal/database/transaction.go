@@ -36,7 +36,8 @@ type Transaction struct {
 	Currency      CurrencyType
 	MonAmount     *big.Int
 	Status        string
-	TxHash        string
+	TxHash        string // Arbitrum transaction hash
+	MonadTxHash   string // Monad transaction hash
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
@@ -46,8 +47,8 @@ func (db *DB) CreateTransaction(tx *Transaction) error {
 	// Use RETURNING clause to get the inserted ID (PostgreSQL compatible)
 	err := db.QueryRow(
 		`INSERT INTO transaction_history 
-		(deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash) 
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		(deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash) 
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id`,
 		tx.DepositID.String(),
 		tx.WalletAddress.Hex(),
@@ -56,6 +57,7 @@ func (db *DB) CreateTransaction(tx *Transaction) error {
 		tx.MonAmount.String(),
 		tx.Status,
 		tx.TxHash,
+		tx.MonadTxHash,
 	).Scan(&tx.ID)
 
 	if err != nil {
@@ -69,7 +71,7 @@ func (db *DB) CreateTransaction(tx *Transaction) error {
 func (db *DB) UpdateTransactionStatus(depositID *big.Int, status, txHash string) error {
 	_, err := db.Exec(
 		`UPDATE transaction_history 
-		SET status = $1, tx_hash = $2, updated_at = CURRENT_TIMESTAMP 
+		SET status = $1, monad_tx_hash = $2, updated_at = CURRENT_TIMESTAMP 
 		WHERE deposit_id = $3`,
 		status,
 		txHash,
@@ -90,7 +92,7 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 	)
 
 	err := db.QueryRow(
-		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at 
 		FROM transaction_history 
 		WHERE deposit_id = $1`,
 		depositID.String(),
@@ -103,6 +105,7 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 		&monAmountStr,
 		&tx.Status,
 		&tx.TxHash,
+		&tx.MonadTxHash,
 		&tx.CreatedAt,
 		&tx.UpdatedAt,
 	)
@@ -133,7 +136,7 @@ func (db *DB) GetTransactionByArbitrumTxHash(txHash string) (*Transaction, error
 	)
 
 	err := db.QueryRow(
-		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at 
 		FROM transaction_history 
 		WHERE tx_hash = $1`,
 		txHash,
@@ -146,6 +149,7 @@ func (db *DB) GetTransactionByArbitrumTxHash(txHash string) (*Transaction, error
 		&monAmountStr,
 		&tx.Status,
 		&tx.TxHash,
+		&tx.MonadTxHash,
 		&tx.CreatedAt,
 		&tx.UpdatedAt,
 	)
@@ -190,7 +194,7 @@ func (db *DB) GetTransactionByArbitrumTxHash(txHash string) (*Transaction, error
 // GetTransactionsByWallet retrieves all transactions for a wallet
 func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) ([]*Transaction, error) {
 	rows, err := db.Query(
-		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at 
 		FROM transaction_history 
 		WHERE wallet_address = $1 
 		ORDER BY created_at DESC 
@@ -221,6 +225,7 @@ func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) 
 			&monAmountStr,
 			&tx.Status,
 			&tx.TxHash,
+			&tx.MonadTxHash,
 			&tx.CreatedAt,
 			&tx.UpdatedAt,
 		)
@@ -248,7 +253,7 @@ func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) 
 // GetRecentTransactions retrieves recent transactions
 func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 	rows, err := db.Query(
-		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at 
 		FROM transaction_history 
 		ORDER BY created_at DESC 
 		LIMIT $1 OFFSET $2`,
@@ -277,6 +282,7 @@ func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 			&monAmountStr,
 			&tx.Status,
 			&tx.TxHash,
+			&tx.MonadTxHash,
 			&tx.CreatedAt,
 			&tx.UpdatedAt,
 		)
@@ -418,6 +424,21 @@ func (db *DB) UpdateTransactionHash(depositID *big.Int, txHash string) error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update transaction hash: %w", err)
+	}
+	return nil
+}
+
+// UpdateMonadTransactionHash updates the Monad transaction hash for a specific deposit ID
+func (db *DB) UpdateMonadTransactionHash(depositID *big.Int, monadTxHash string) error {
+	_, err := db.Exec(
+		`UPDATE transaction_history 
+		SET monad_tx_hash = $1, updated_at = CURRENT_TIMESTAMP 
+		WHERE deposit_id = $2`,
+		monadTxHash,
+		depositID.String(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update Monad transaction hash: %w", err)
 	}
 	return nil
 }

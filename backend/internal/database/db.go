@@ -176,6 +176,7 @@ func (db *DB) initSchema() error {
 				mon_amount TEXT NOT NULL,
 				status TEXT NOT NULL,
 				tx_hash TEXT,
+				monad_tx_hash TEXT,
 				created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				CONSTRAINT unique_deposit_id UNIQUE(deposit_id)
@@ -209,10 +210,46 @@ func (db *DB) initSchema() error {
 		if err != nil {
 			return fmt.Errorf("failed to insert default settings: %w", err)
 		}
+
+		// Set version to 1
+		version = 1
+	}
+
+	// Migration to add monad_tx_hash column
+	if version == 1 {
+		// Check if monad_tx_hash column exists
+		var columnExists bool
+		err = tx.QueryRow(`
+			SELECT EXISTS (
+				SELECT 1 
+				FROM information_schema.columns 
+				WHERE table_name = 'transaction_history' AND column_name = 'monad_tx_hash'
+			)
+		`).Scan(&columnExists)
+		if err != nil {
+			return fmt.Errorf("failed to check if monad_tx_hash column exists: %w", err)
+		}
+
+		// Add monad_tx_hash column if it doesn't exist
+		if !columnExists {
+			_, err = tx.Exec(`
+				ALTER TABLE transaction_history
+				ADD COLUMN monad_tx_hash TEXT
+			`)
+			if err != nil {
+				return fmt.Errorf("failed to add monad_tx_hash column: %w", err)
+			}
+		}
+
+		// Set version to 2
+		version = 2
 	}
 
 	// Update schema version
-	_, err = tx.Exec(`UPDATE schema_version SET version = $1`, schemaVersion)
+	_, err = tx.Exec(`
+		INSERT INTO settings (key, value) VALUES ('schema_version', $1)
+		ON CONFLICT(key) DO UPDATE SET value = $1, updated_at = CURRENT_TIMESTAMP
+	`, fmt.Sprintf("%d", version))
 	if err != nil {
 		return fmt.Errorf("failed to update schema version: %w", err)
 	}
