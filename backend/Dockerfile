@@ -6,17 +6,14 @@ RUN apk add --no-cache gcc musl-dev
 # Set working directory
 WORKDIR /app
 
-# Copy backend directory contents
-COPY backend/ ./backend/
-
-# Copy go.mod and go.sum from backend directory
-COPY backend/go.mod backend/go.sum ./
+# Copy the entire repository
+COPY . .
 
 # Download dependencies
-RUN go mod download
+RUN cd backend && go mod download
 
 # Build the application with CGO enabled
-RUN CGO_ENABLED=1 GOOS=linux go build -a -ldflags="-w -s" -o main ./backend/cmd/faucet
+RUN cd backend && CGO_ENABLED=1 GOOS=linux go build -a -ldflags="-w -s" -o ../main ./cmd/faucet
 
 # Use a minimal alpine image for the final stage
 FROM alpine:latest

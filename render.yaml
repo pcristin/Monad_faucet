@@ -10,12 +10,12 @@ services:
       - key: PORT
         value: 8080
       - key: ARB_RPC_URL
-        sync: true
+        sync: false
       - key: MONAD_RPC_URL
-        sync: true
+        sync: false
       - key: WALLET_PRIVATE_KEY
-        sync: true
+        sync: false
       - key: ADMIN_API_KEY_1
-        sync: true
+        sync: false
       - key: ADMIN_API_KEY_2
-        sync: true
+        sync: false
