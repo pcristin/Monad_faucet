@@ -151,7 +151,7 @@ func (l *EventListener) parseDepositEvent(vLog types.Log) (DepositEvent, error) 
 		DepositId:   raw.DepositId,
 		Currency:    CurrencyType(raw.Currency),
 		BlockNumber: raw.BlockNumber,
-		TxHash:      vLog.TxHash.Hex(), // Set transaction hash
+		TxHash:      vLog.TxHash.Hex(), // Set transaction hash from the log
 	}, nil
 }
 
