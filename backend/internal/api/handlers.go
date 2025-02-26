@@ -5,19 +5,88 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+
+	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
 	"github.com/pcristin/monad-faucet/pkg/logger"
+	"golang.org/x/time/rate"
 )
 
-type Handler struct {
-	bridgeService *blockchain.BridgeService
+// IPRateLimiter is a simple rate limiter for IP addresses
+type IPRateLimiter struct {
+	ips map[string]*rate.Limiter
+	mu  *sync.RWMutex
+	r   rate.Limit
+	b   int
 }
 
+// NewIPRateLimiter creates a new rate limiter for IP addresses
+func NewIPRateLimiter(r rate.Limit, b int) *IPRateLimiter {
+	return &IPRateLimiter{
+		ips: make(map[string]*rate.Limiter),
+		mu:  &sync.RWMutex{},
+		r:   r,
+		b:   b,
+	}
+}
+
+// AddIP adds an IP address to the rate limiter
+func (i *IPRateLimiter) AddIP(ip string) *rate.Limiter {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	limiter := rate.NewLimiter(i.r, i.b)
+	i.ips[ip] = limiter
+	return limiter
+}
+
+// GetLimiter gets the rate limiter for an IP address
+func (i *IPRateLimiter) GetLimiter(ip string) *rate.Limiter {
+	i.mu.RLock()
+	limiter, exists := i.ips[ip]
+	i.mu.RUnlock()
+
+	if !exists {
+		return i.AddIP(ip)
+	}
+	return limiter
+}
+
+// Allow checks if the IP is allowed to make a request
+func (i *IPRateLimiter) Allow(ip string) bool {
+	return i.GetLimiter(ip).Allow()
+}
+
+// Handler handles API requests
+type Handler struct {
+	bridgeService  *blockchain.BridgeService
+	rateLimiter    *IPRateLimiter
+	startTime      time.Time
+	adminAPIKey    string
+	requestCounter atomic.Int64
+	baseGoroutines int
+}
+
+// NewHandler creates a new API handler
 func NewHandler(bridgeService *blockchain.BridgeService) *Handler {
+	// Create a rate limiter with 10 requests per minute and burst of 20
+	rateLimiter := NewIPRateLimiter(rate.Limit(10/60.0), 20)
+
+	// Record the base number of goroutines at startup
+	baseGoroutines := runtime.NumGoroutine()
+
 	return &Handler{
-		bridgeService: bridgeService,
+		bridgeService:  bridgeService,
+		rateLimiter:    rateLimiter,
+		startTime:      time.Now(),
+		adminAPIKey:    os.Getenv("ADMIN_API_KEY"),
+		baseGoroutines: baseGoroutines,
 	}
 }
 
@@ -306,13 +375,279 @@ func (h *Handler) AdminUpdateWalletLimit(c *gin.Context) {
 	})
 }
 
+// GetTransactionStatusRequest represents the request to get transaction status
+type GetTransactionStatusRequest struct {
+	ArbitrumTxHash string `json:"arbitrum_tx_hash" binding:"required"`
+}
+
+// TransactionResponse represents the response with transaction details
+type TransactionResponse struct {
+	Status  string            `json:"status"`
+	Message string            `json:"message"`
+	Txs     map[string]string `json:"txs"`
+}
+
+// validateTxHash validates the format of a transaction hash
+func validateTxHash(txHash string) error {
+	// Check if the hash starts with 0x
+	if len(txHash) < 2 || txHash[:2] != "0x" {
+		return fmt.Errorf("transaction hash must start with 0x")
+	}
+
+	// Check if the hash has the correct length (0x + 64 hex chars)
+	if len(txHash) != 66 {
+		return fmt.Errorf("transaction hash must be 66 characters long (including 0x prefix)")
+	}
+
+	// Check if the hash contains only hex characters
+	for _, c := range txHash[2:] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return fmt.Errorf("transaction hash must contain only hexadecimal characters")
+		}
+	}
+
+	return nil
+}
+
+// GetTransactionStatus returns the status of a transaction
+func (h *Handler) GetTransactionStatus(c *gin.Context) {
+	// Start timing the request for logging
+	startTime := time.Now()
+
+	// Get client IP for rate limiting
+	clientIP := c.ClientIP()
+
+	// Simple in-memory rate limiting (can be replaced with Redis in production)
+	if !h.rateLimiter.Allow(clientIP) {
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"status":  "error",
+			"message": "Rate limit exceeded. Please try again later.",
+		})
+		return
+	}
+
+	var req GetTransactionStatusRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid request parameters",
+		})
+		return
+	}
+
+	// Validate transaction hash format
+	if err := validateTxHash(req.ArbitrumTxHash); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status":  "error",
+			"message": fmt.Sprintf("Invalid transaction hash: %v", err),
+		})
+		return
+	}
+
+	// Log the request
+	logger.Info("Transaction status request: tx_hash=%s, client_ip=%s, user_agent=%s",
+		req.ArbitrumTxHash,
+		clientIP,
+		c.Request.UserAgent())
+
+	// Get transaction from database by deposit ID
+	depositID, err := h.bridgeService.GetDepositIDFromTxHash(c.Request.Context(), req.ArbitrumTxHash)
+	if err != nil {
+		logger.Warn("Transaction not found: tx_hash=%s, error=%s",
+			req.ArbitrumTxHash,
+			err.Error())
+
+		c.JSON(http.StatusNotFound, gin.H{
+			"status":  "error",
+			"message": fmt.Sprintf("Transaction not found: %v", err),
+		})
+		return
+	}
+
+	// Get transaction details
+	tx, err := h.bridgeService.GetTransactionByDepositID(c.Request.Context(), depositID)
+	if err != nil {
+		logger.Error("Failed to get transaction details for deposit ID %s: %v",
+			depositID.String(), err)
+
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status":  "error",
+			"message": fmt.Sprintf("Failed to get transaction details: %v", err),
+		})
+		return
+	}
+
+	// Prepare response
+	response := TransactionResponse{
+		Txs: make(map[string]string),
+	}
+
+	// Add Arbitrum deposit transaction hash
+	response.Txs["Arbitrum"] = req.ArbitrumTxHash
+
+	// Set status and message based on transaction status
+	switch tx.Status {
+	case "completed":
+		response.Status = "success"
+		response.Message = "MON distribution successful"
+		response.Txs["Monad"] = tx.TxHash
+	case "failed":
+		response.Status = "error"
+		response.Message = "Transaction execution reverted"
+	case "refunded":
+		response.Status = "refunded"
+		response.Message = "Deposit was successful, but MON couldn't be distributed"
+		response.Txs["Arbitrum refund"] = tx.TxHash
+	case "pending":
+		response.Status = "pending"
+		response.Message = "Transaction is still being processed"
+	default:
+		response.Status = "unknown"
+		response.Message = "Unknown transaction status"
+	}
+
+	// Log the response
+	logger.Info("Transaction status response: tx_hash=%s, deposit_id=%s, status=%s, duration_ms=%d",
+		req.ArbitrumTxHash,
+		depositID.String(),
+		response.Status,
+		time.Since(startTime).Milliseconds())
+
+	c.JSON(http.StatusOK, response)
+}
+
+// HealthCheck handles health check requests
+func (h *Handler) HealthCheck(c *gin.Context) {
+	// Check database connection
+	if err := h.bridgeService.CheckDatabaseConnection(); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status":  "error",
+			"message": "Database connection failed",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Check blockchain connections
+	if err := h.bridgeService.CheckBlockchainConnections(); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status":  "error",
+			"message": "Blockchain connection failed",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "ok",
+		"message": "Service is healthy",
+		"version": "1.0.0", // Replace with actual version from build
+		"uptime":  time.Since(h.startTime).String(),
+	})
+}
+
+// Metrics represents system metrics
+type Metrics struct {
+	Uptime                string            `json:"uptime"`
+	TotalRequests         int64             `json:"total_requests"`
+	ActiveConnections     int               `json:"active_connections"`
+	PendingTransactions   int               `json:"pending_transactions"`
+	CompletedTransactions int               `json:"completed_transactions"`
+	FailedTransactions    int               `json:"failed_transactions"`
+	RefundedTransactions  int               `json:"refunded_transactions"`
+	CacheSize             int               `json:"cache_size"`
+	MemoryUsage           uint64            `json:"memory_usage"`
+	GoroutineCount        int               `json:"goroutine_count"`
+	BlockchainStatus      map[string]string `json:"blockchain_status"`
+}
+
+// GetMetrics returns system metrics
+func (h *Handler) GetMetrics(c *gin.Context) {
+	// Check if the request has the admin API key
+	apiKey := c.GetHeader("X-API-Key")
+	if apiKey != h.adminAPIKey {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"status":  "error",
+			"message": "Unauthorized",
+		})
+		return
+	}
+
+	// Get transaction counts
+	pendingCount, completedCount, failedCount, refundedCount, err := h.bridgeService.GetTransactionCounts()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status":  "error",
+			"message": "Failed to get transaction counts",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Get memory stats
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+
+	// Get blockchain status
+	blockchainStatus := map[string]string{
+		"arbitrum": "connected",
+		"monad":    "connected",
+	}
+
+	// Check blockchain connections
+	if err := h.bridgeService.CheckBlockchainConnections(); err != nil {
+		if strings.Contains(err.Error(), "arbitrum") {
+			blockchainStatus["arbitrum"] = "disconnected"
+		}
+		if strings.Contains(err.Error(), "monad") {
+			blockchainStatus["monad"] = "disconnected"
+		}
+	}
+
+	// Build metrics response
+	metrics := Metrics{
+		Uptime:                time.Since(h.startTime).String(),
+		TotalRequests:         h.requestCounter.Load(),
+		ActiveConnections:     runtime.NumGoroutine() - h.baseGoroutines,
+		PendingTransactions:   pendingCount,
+		CompletedTransactions: completedCount,
+		FailedTransactions:    failedCount,
+		RefundedTransactions:  refundedCount,
+		CacheSize:             h.bridgeService.GetCacheSize(),
+		MemoryUsage:           memStats.Alloc,
+		GoroutineCount:        runtime.NumGoroutine(),
+		BlockchainStatus:      blockchainStatus,
+	}
+
+	c.JSON(http.StatusOK, metrics)
+}
+
 // RegisterRoutes registers all API routes
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
+	// Add request counter middleware
+	r.Use(func(c *gin.Context) {
+		h.requestCounter.Add(1)
+		c.Next()
+	})
+
+	// Add health check endpoint
+	r.GET("/health", h.HealthCheck)
+
+	// Add metrics endpoint
+	r.GET("/metrics", h.GetMetrics)
+
 	api := r.Group("/api")
 	{
 		api.GET("/info", h.GetFaucetInfo)
 		api.GET("/state", h.GetBridgeState)
 		api.POST("/estimate", h.EstimateSwap)
+
+		// Transaction status endpoints
+		api.POST("/tx-status", h.GetTransactionStatus) // Keep for backward compatibility
+
+		v1 := api.Group("/v1")
+		{
+			v1.POST("/transaction/status", h.GetTransactionStatus)
+		}
 
 		// Admin endpoints
 		api.POST("/admin/ratio", h.AdminUpdateRatio)

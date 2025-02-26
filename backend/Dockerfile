@@ -6,14 +6,17 @@ RUN apk add --no-cache gcc musl-dev
 # Set working directory
 WORKDIR /app
 
+# Copy go.mod and go.sum from root directory
+COPY go.mod go.sum ./
+
 # Copy everything from backend
-COPY backend/ ./
+COPY backend/ ./backend/
 
 # Download dependencies
 RUN go mod download
 
 # Build the application with CGO enabled
-RUN CGO_ENABLED=1 GOOS=linux go build -a -ldflags="-w -s" -o main ./cmd/faucet
+RUN CGO_ENABLED=1 GOOS=linux go build -a -ldflags="-w -s" -o main ./backend/cmd/faucet
 
 # Use a minimal alpine image for the final stage
 FROM alpine:latest
@@ -28,7 +31,7 @@ WORKDIR /app
 COPY --from=builder /app/main .
 
 # Copy any config files if needed
-COPY --from=builder /app/config ./config
+COPY --from=builder /app/backend/config ./config
 
 # The PORT environment variable will be provided by Render
 ENV PORT=8080

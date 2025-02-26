@@ -1,6 +1,7 @@
 package database
 
 import (
+	"database/sql"
 	"fmt"
 	"math/big"
 	"time"
@@ -42,10 +43,12 @@ type Transaction struct {
 
 // CreateTransaction creates a new transaction record in the database
 func (db *DB) CreateTransaction(tx *Transaction) error {
-	result, err := db.Exec(
+	// Use RETURNING clause to get the inserted ID (PostgreSQL compatible)
+	err := db.QueryRow(
 		`INSERT INTO transaction_history 
 		(deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash) 
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id`,
 		tx.DepositID.String(),
 		tx.WalletAddress.Hex(),
 		tx.Amount.String(),
@@ -53,17 +56,12 @@ func (db *DB) CreateTransaction(tx *Transaction) error {
 		tx.MonAmount.String(),
 		tx.Status,
 		tx.TxHash,
-	)
+	).Scan(&tx.ID)
+
 	if err != nil {
 		return fmt.Errorf("failed to create transaction: %w", err)
 	}
 
-	id, err := result.LastInsertId()
-	if err != nil {
-		return fmt.Errorf("failed to get last insert ID: %w", err)
-	}
-
-	tx.ID = id
 	return nil
 }
 
@@ -71,8 +69,8 @@ func (db *DB) CreateTransaction(tx *Transaction) error {
 func (db *DB) UpdateTransactionStatus(depositID *big.Int, status, txHash string) error {
 	_, err := db.Exec(
 		`UPDATE transaction_history 
-		SET status = ?, tx_hash = ?, updated_at = CURRENT_TIMESTAMP 
-		WHERE deposit_id = ?`,
+		SET status = $1, tx_hash = $2, updated_at = CURRENT_TIMESTAMP 
+		WHERE deposit_id = $3`,
 		status,
 		txHash,
 		depositID.String(),
@@ -94,7 +92,7 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 	err := db.QueryRow(
 		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, created_at, updated_at 
 		FROM transaction_history 
-		WHERE deposit_id = ?`,
+		WHERE deposit_id = $1`,
 		depositID.String(),
 	).Scan(
 		&tx.ID,
@@ -109,6 +107,9 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 		&tx.UpdatedAt,
 	)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("transaction not found for deposit ID: %s", depositID.String())
+		}
 		return nil, fmt.Errorf("failed to get transaction: %w", err)
 	}
 
@@ -127,9 +128,9 @@ func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) 
 	rows, err := db.Query(
 		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, created_at, updated_at 
 		FROM transaction_history 
-		WHERE wallet_address = ? 
+		WHERE wallet_address = $1 
 		ORDER BY created_at DESC 
-		LIMIT ? OFFSET ?`,
+		LIMIT $2 OFFSET $3`,
 		wallet.Hex(),
 		limit,
 		offset,
@@ -186,7 +187,7 @@ func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, created_at, updated_at 
 		FROM transaction_history 
 		ORDER BY created_at DESC 
-		LIMIT ? OFFSET ?`,
+		LIMIT $1 OFFSET $2`,
 		limit,
 		offset,
 	)
@@ -234,4 +235,42 @@ func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 	}
 
 	return transactions, nil
+}
+
+// CreateIndexes creates necessary indexes for performance optimization
+func (db *DB) CreateIndexes() error {
+	// Index for wallet_address lookups
+	_, err := db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_transaction_history_wallet_address 
+		ON transaction_history(wallet_address)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create wallet_address index: %w", err)
+	}
+
+	// Index for created_at sorting (recent transactions)
+	_, err = db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_transaction_history_created_at 
+		ON transaction_history(created_at DESC)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create created_at index: %w", err)
+	}
+
+	// Index for status queries
+	_, err = db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_transaction_history_status 
+		ON transaction_history(status)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create status index: %w", err)
+	}
+
+	return nil
+}
+
+// Ping checks if the database connection is alive
+func (db *DB) Ping() error {
+	// For SQL databases, we can use the Ping method
+	return db.DB.Ping()
 }

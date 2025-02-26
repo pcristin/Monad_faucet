@@ -26,12 +26,22 @@ func main() {
 		logger.Fatal("Failed to load configuration: %v", err)
 	}
 
+	// Validate configuration
+	if err := cfg.Validate(); err != nil {
+		logger.Fatal("Configuration validation failed: %v", err)
+	}
+
 	// Initialize database
 	db, err := database.New(cfg.DataDir)
 	if err != nil {
-		logger.Fatal("Failed to initialize database: %v", err)
+		logger.Fatal("Failed to connect to database: %v", err)
 	}
 	defer db.Close()
+
+	// Create indexes for performance optimization
+	if err := db.CreateIndexes(); err != nil {
+		logger.Fatal("Failed to create database indexes: %v", err)
+	}
 
 	logger.Info("Database initialized in directory: %s", cfg.DataDir)
 
@@ -73,7 +83,7 @@ func main() {
 	}
 
 	// Create bridge service
-	bridgeService := blockchain.NewBridgeService(arbDepositor, monadDistributor)
+	bridgeService := blockchain.NewBridgeService(arbDepositor, monadDistributor, db)
 	if err := bridgeService.Start(); err != nil {
 		logger.Fatal("Failed to start bridge service: %v", err)
 	}
@@ -110,6 +120,27 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+
+	// Request logging middleware
+	r.Use(func(c *gin.Context) {
+		// Start timer
+		start := time.Now()
+		path := c.Request.URL.Path
+
+		// Process request
+		c.Next()
+
+		// Log request details after completion
+		latency := time.Since(start)
+		clientIP := c.ClientIP()
+		method := c.Request.Method
+		statusCode := c.Writer.Status()
+		userAgent := c.Request.UserAgent()
+
+		// Log in structured format
+		logger.Info("REQUEST: %s | %d | %s | %s | %s | %v",
+			method, statusCode, clientIP, path, userAgent, latency)
+	})
 
 	// CORS middleware
 	r.Use(func(c *gin.Context) {
@@ -151,16 +182,22 @@ func main() {
 	logger.Info("Shutdown signal received...")
 
 	// Create a timeout context for graceful shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
 	// First cancel the event listener context
 	cancel()
+	logger.Info("Event listener shutdown initiated...")
 
 	// Then shutdown the HTTP server
+	logger.Info("HTTP server shutdown initiated, waiting for in-flight requests to complete...")
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("HTTP server forced to shutdown: %v", err)
 	}
+
+	// Wait for bridge service to complete any in-progress transactions
+	logger.Info("Waiting for bridge service to complete in-progress transactions...")
+	bridgeService.GracefulShutdown(shutdownCtx)
 
 	logger.Info("Server shutdown complete.")
 }

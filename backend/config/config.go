@@ -76,3 +76,34 @@ func getEnvOrDefault(key, defaultValue string) string {
 	}
 	return defaultValue
 }
+
+// Validate checks if all required configuration values are present
+func (c *Config) Validate() error {
+	var missingVars []string
+
+	// Check required environment variables
+	if c.WalletPrivateKey == "" {
+		missingVars = append(missingVars, "WALLET_PRIVATE_KEY")
+	}
+	if c.ArbRpcURL == "" {
+		missingVars = append(missingVars, "ARB_RPC_URL")
+	}
+	if c.MonadRpcURL == "" {
+		missingVars = append(missingVars, "MONAD_RPC_URL")
+	}
+	if c.ArbDepositorAddr == "" {
+		missingVars = append(missingVars, "ARB_DEPOSITOR_ADDR")
+	}
+	if c.MonadDistributorAddr == "" {
+		missingVars = append(missingVars, "MONAD_DISTRIBUTOR_ADDR")
+	}
+	if c.DataDir == "" {
+		missingVars = append(missingVars, "DATA_DIR")
+	}
+
+	if len(missingVars) > 0 {
+		return fmt.Errorf("missing required environment variables: %s", strings.Join(missingVars, ", "))
+	}
+
+	return nil
+}

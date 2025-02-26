@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
@@ -36,31 +37,41 @@ func UpdateWalletLimitPercentage(newPercentage int64) error {
 
 // BridgeService handles the business logic for the bridge operations
 type BridgeService struct {
-	arbDepositor     *ArbitrumDepositor
-	monadDistributor *MonadDistributor
-	depositChan      chan DepositEvent
-	refundChan       chan *big.Int
-	wg               sync.WaitGroup
-	ctx              context.Context
-	cancel           context.CancelFunc
-	walletUsage      map[common.Address]*WalletUsage // Track wallet usage
-	walletMutex      sync.RWMutex                    // Mutex for thread-safe access to walletUsage
+	arbDepositor      *ArbitrumDepositor
+	monadDistributor  *MonadDistributor
+	depositChan       chan DepositEvent
+	refundChan        chan *big.Int
+	wg                sync.WaitGroup
+	ctx               context.Context
+	cancel            context.CancelFunc
+	walletUsage       map[common.Address]*WalletUsage  // Track wallet usage
+	walletMutex       sync.RWMutex                     // Mutex for thread-safe access to walletUsage
+	db                *database.DB                     // Database connection
+	txCache           map[string]*database.Transaction // Cache for transaction status
+	txCacheMutex      sync.RWMutex
+	txCacheExpiration time.Duration
 }
 
 // NewBridgeService creates a new instance of BridgeService
 func NewBridgeService(
 	arbDepositor *ArbitrumDepositor,
 	monadDistributor *MonadDistributor,
+	db *database.DB,
 ) *BridgeService {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &BridgeService{
-		arbDepositor:     arbDepositor,
-		monadDistributor: monadDistributor,
-		depositChan:      make(chan DepositEvent, 100),
-		refundChan:       make(chan *big.Int, 100),
-		ctx:              ctx,
-		cancel:           cancel,
-		walletUsage:      make(map[common.Address]*WalletUsage),
+		arbDepositor:      arbDepositor,
+		monadDistributor:  monadDistributor,
+		depositChan:       make(chan DepositEvent),
+		refundChan:        make(chan *big.Int),
+		wg:                sync.WaitGroup{},
+		ctx:               ctx,
+		cancel:            cancel,
+		walletUsage:       make(map[common.Address]*WalletUsage),
+		walletMutex:       sync.RWMutex{},
+		db:                db,
+		txCache:           make(map[string]*database.Transaction),
+		txCacheExpiration: 5 * time.Minute, // Cache transactions for 5 minutes
 	}
 }
 
@@ -75,11 +86,12 @@ func (s *BridgeService) Start() error {
 }
 
 // Stop gracefully shuts down the service
-func (s *BridgeService) Stop() {
+func (s *BridgeService) Stop() error {
 	logger.Info("Stopping bridge service...")
 	s.cancel()
 	s.wg.Wait()
 	logger.Info("Bridge service stopped")
+	return nil
 }
 
 // HandleDeposit queues a deposit for processing
@@ -457,9 +469,7 @@ func (s *BridgeService) ResumeDeposits(ctx context.Context) error {
 // checkWalletLimit checks if a wallet has exceeded its 24-hour limit
 // Returns nil if the wallet is within limits, otherwise returns an error
 func (s *BridgeService) checkWalletLimit(wallet common.Address, requestedAmount *big.Int, totalMonBalance *big.Int) error {
-	s.walletMutex.RLock()
 	usage, exists := s.walletUsage[wallet]
-	s.walletMutex.RUnlock()
 
 	// Calculate the maximum allowed amount (30% of total MON balance)
 	maxAllowedAmount := new(big.Int).Mul(totalMonBalance, big.NewInt(WalletLimitPercentage))
@@ -520,9 +530,6 @@ func (s *BridgeService) checkWalletLimit(wallet common.Address, requestedAmount 
 
 // updateWalletUsage updates the usage record for a wallet
 func (s *BridgeService) updateWalletUsage(wallet common.Address, amount *big.Int) {
-	s.walletMutex.Lock()
-	defer s.walletMutex.Unlock()
-
 	usage, exists := s.walletUsage[wallet]
 	now := time.Now()
 
@@ -543,4 +550,234 @@ func (s *BridgeService) updateWalletUsage(wallet common.Address, amount *big.Int
 		usage.TotalAmount = new(big.Int).Add(usage.TotalAmount, amount)
 	}
 	usage.LastUpdated = now
+}
+
+// GetDepositIDFromTxHash retrieves the deposit ID from a transaction hash
+func (s *BridgeService) GetDepositIDFromTxHash(ctx context.Context, txHash string) (*big.Int, error) {
+	// Parse the transaction hash
+	hash := common.HexToHash(txHash)
+	if hash == (common.Hash{}) {
+		return nil, fmt.Errorf("invalid transaction hash format")
+	}
+
+	// Get transaction receipt
+	receipt, err := s.arbDepositor.client.TransactionReceipt(ctx, hash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get transaction receipt: %w", err)
+	}
+
+	// Check if transaction was successful
+	if receipt.Status != 1 {
+		return nil, fmt.Errorf("transaction failed")
+	}
+
+	// Parse logs to find deposit event
+	for _, log := range receipt.Logs {
+		// Check if log is from our contract
+		if log.Address == s.arbDepositor.address {
+			// Try to parse as deposit event
+			event, err := s.parseDepositEvent(*log)
+			if err == nil {
+				return event.DepositId, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("deposit event not found in transaction logs")
+}
+
+// parseDepositEvent parses a log into a DepositEvent
+func (s *BridgeService) parseDepositEvent(log types.Log) (*DepositEvent, error) {
+	// Define the event signature
+	eventSignature := []byte("Deposit(address,uint256,uint256,uint8)")
+	eventSignatureHash := crypto.Keccak256Hash(eventSignature)
+
+	// Check if this log matches our event
+	if log.Topics[0] != eventSignatureHash {
+		return nil, fmt.Errorf("log is not a Deposit event")
+	}
+
+	// Parse the event data
+	var event struct {
+		Depositor common.Address
+		Amount    *big.Int
+		DepositId *big.Int
+		Currency  uint8
+	}
+
+	// The first topic is the event signature, the second is the indexed depositor address
+	if len(log.Topics) < 2 {
+		return nil, fmt.Errorf("insufficient topics in log")
+	}
+
+	// Get depositor from the indexed parameter
+	event.Depositor = common.BytesToAddress(log.Topics[1].Bytes())
+
+	// Decode the non-indexed parameters
+	err := s.arbDepositor.BoundContract.UnpackLog(&event, "Deposit", log)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unpack log: %w", err)
+	}
+
+	return &DepositEvent{
+		Depositor:   event.Depositor,
+		Amount:      event.Amount,
+		DepositId:   event.DepositId,
+		Currency:    CurrencyType(event.Currency),
+		BlockNumber: log.BlockNumber,
+	}, nil
+}
+
+// GetTransactionByDepositID retrieves transaction details by deposit ID
+func (s *BridgeService) GetTransactionByDepositID(ctx context.Context, depositID *big.Int) (*database.Transaction, error) {
+	// Check cache first
+	cacheKey := depositID.String()
+	s.txCacheMutex.RLock()
+	cachedTx, exists := s.txCache[cacheKey]
+	s.txCacheMutex.RUnlock()
+
+	// If transaction is in cache and not pending, return it
+	if exists && cachedTx.Status != database.StatusPending {
+		return cachedTx, nil
+	}
+
+	// Query the database for the transaction
+	tx, err := s.db.GetTransactionByDepositID(depositID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get transaction from database: %w", err)
+	}
+
+	// Cache the transaction if it's not pending
+	if tx.Status != database.StatusPending {
+		s.txCacheMutex.Lock()
+		s.txCache[cacheKey] = tx
+		s.txCacheMutex.Unlock()
+
+		// Start a goroutine to remove the transaction from cache after expiration
+		go func(key string, expiration time.Duration) {
+			time.Sleep(expiration)
+			s.txCacheMutex.Lock()
+			delete(s.txCache, key)
+			s.txCacheMutex.Unlock()
+		}(cacheKey, s.txCacheExpiration)
+	}
+
+	return tx, nil
+}
+
+// UpdateTransactionStatus updates the status of a transaction
+func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *big.Int, status, txHash string) error {
+	// Update the transaction in the database
+	err := s.db.UpdateTransactionStatus(depositID, status, txHash)
+	if err != nil {
+		return fmt.Errorf("failed to update transaction status in database: %w", err)
+	}
+
+	// Clear the cache for this transaction
+	s.clearTransactionCache(depositID.String())
+
+	return nil
+}
+
+// clearTransactionCache removes a transaction from the cache
+func (s *BridgeService) clearTransactionCache(depositID string) {
+	s.txCacheMutex.Lock()
+	delete(s.txCache, depositID)
+	s.txCacheMutex.Unlock()
+}
+
+// CheckDatabaseConnection verifies the database connection is working
+func (s *BridgeService) CheckDatabaseConnection() error {
+	// Simple ping to verify database connection
+	return s.db.Ping()
+}
+
+// CheckBlockchainConnections verifies connections to blockchain nodes
+func (s *BridgeService) CheckBlockchainConnections() error {
+	// Check Arbitrum connection by attempting to get the latest block number
+	arbClient := s.arbDepositor.client
+	if _, err := arbClient.BlockNumber(context.Background()); err != nil {
+		return fmt.Errorf("arbitrum connection failed: %w", err)
+	}
+
+	// Check Monad connection by attempting to get the latest block number
+	monadClient := s.monadDistributor.client
+	if _, err := monadClient.BlockNumber(context.Background()); err != nil {
+		return fmt.Errorf("monad connection failed: %w", err)
+	}
+
+	return nil
+}
+
+// GracefulShutdown waits for in-progress operations to complete
+func (s *BridgeService) GracefulShutdown(ctx context.Context) {
+	// Signal that we're shutting down
+	s.cancel()
+
+	// Create a channel to signal completion
+	done := make(chan struct{})
+
+	// Wait for processing to complete in a goroutine
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	// Wait for processing to complete or context to timeout
+	select {
+	case <-done:
+		// Processing completed normally
+		logger.Info("All in-progress transactions completed")
+	case <-ctx.Done():
+		// Timeout occurred
+		logger.Warn("Shutdown timed out, some transactions may not have completed")
+	}
+}
+
+// GetTransactionCounts returns counts of transactions by status
+func (s *BridgeService) GetTransactionCounts() (pending, completed, failed, refunded int, err error) {
+	// Query the database for transaction counts by status
+	rows, err := s.db.Query(`
+		SELECT status, COUNT(*) 
+		FROM transaction_history 
+		GROUP BY status
+	`)
+	if err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("failed to query transaction counts: %w", err)
+	}
+	defer rows.Close()
+
+	// Process the results
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return 0, 0, 0, 0, fmt.Errorf("failed to scan transaction count row: %w", err)
+		}
+
+		// Increment the appropriate counter
+		switch status {
+		case database.StatusPending:
+			pending = count
+		case database.StatusCompleted:
+			completed = count
+		case database.StatusFailed:
+			failed = count
+		case database.StatusRefunded:
+			refunded = count
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("error iterating transaction count rows: %w", err)
+	}
+
+	return pending, completed, failed, refunded, nil
+}
+
+// GetCacheSize returns the current size of the transaction cache
+func (s *BridgeService) GetCacheSize() int {
+	s.txCacheMutex.RLock()
+	defer s.txCacheMutex.RUnlock()
+	return len(s.txCache)
 }
