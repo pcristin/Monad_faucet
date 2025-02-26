@@ -32,6 +32,15 @@ func UpdateWalletLimitPercentage(newPercentage int64) error {
 
 	WalletLimitPercentage = newPercentage
 	logger.Info("Wallet limit percentage updated to %d%%", newPercentage)
+
+	// Update the database if available
+	if dbInstance != nil {
+		if err := dbInstance.SetIntSetting("wallet_limit_percentage", int(newPercentage)); err != nil {
+			logger.Error("Failed to update wallet limit percentage in database: %v", err)
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -59,6 +68,10 @@ func NewBridgeService(
 	db *database.DB,
 ) *BridgeService {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Set the database instance for the contracts package
+	SetDatabase(db)
+
 	return &BridgeService{
 		arbDepositor:      arbDepositor,
 		monadDistributor:  monadDistributor,

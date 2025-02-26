@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
@@ -69,11 +70,51 @@ var initialMonUsdRatio = new(big.Int).Exp(big.NewInt(1), big.NewInt(17), nil) //
 
 // Create global ratio instance
 var globalMonUsdRatio = NewMonUsdRatio(initialMonUsdRatio)
+var dbInstance *database.DB
+
+// SetDatabase sets the database instance for persistence
+func SetDatabase(db *database.DB) {
+	dbInstance = db
+
+	// Load settings from the database
+	loadSettingsFromDB()
+}
+
+// loadSettingsFromDB loads settings from the database if available
+func loadSettingsFromDB() {
+	if dbInstance == nil {
+		return
+	}
+
+	// Load MON/USD ratio
+	ratio, err := dbInstance.GetBigIntSetting("mon_usd_ratio")
+	if err == nil && ratio != nil {
+		// Update the in-memory value without updating the database again
+		globalMonUsdRatio.Set(ratio)
+		log.Printf("Loaded MON/USD ratio from database: %s", ratio.String())
+	}
+
+	// Load wallet limit percentage
+	limitPercentage, err := dbInstance.GetIntSetting("wallet_limit_percentage")
+	if err == nil {
+		// Update the in-memory value without updating the database again
+		WalletLimitPercentage = int64(limitPercentage)
+		log.Printf("Loaded wallet limit percentage from database: %d%%", limitPercentage)
+	}
+}
 
 // UpdateMonUsdRatio updates the global MON/USD ratio
 func UpdateMonUsdRatio(newRatio *big.Int) {
+	// Update the in-memory value
 	globalMonUsdRatio.Set(newRatio)
 	log.Printf("MON/USD ratio updated to: %s", newRatio.String())
+
+	// Update the database if available
+	if dbInstance != nil {
+		if err := dbInstance.SetBigIntSetting("mon_usd_ratio", newRatio); err != nil {
+			log.Printf("Error updating MON/USD ratio in database: %v", err)
+		}
+	}
 }
 
 // GetMonUsdRatio returns the current MON/USD ratio
