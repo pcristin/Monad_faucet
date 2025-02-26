@@ -181,18 +181,52 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 		return fmt.Errorf("failed to get contract state: %v", err)
 	}
 
+	// Create a pending transaction record in the database
+	monAmount := calculateMonAmount(event.Amount, state.SwapRatios[event.Currency])
+	txRecord := &database.Transaction{
+		DepositID:     event.DepositId,
+		WalletAddress: event.Depositor,
+		Amount:        event.Amount,
+		Currency:      database.CurrencyType(event.Currency),
+		MonAmount:     monAmount,
+		Status:        database.StatusPending,
+		TxHash:        event.TxHash, // Arbitrum transaction hash
+	}
+
+	if err := s.db.CreateTransaction(txRecord); err != nil {
+		logger.Error("Failed to create transaction record: %v", err)
+		// Continue processing even if DB record creation fails
+	}
+
 	if err := s.validateDeposit(state, event); err != nil {
+		// Update transaction status to failed
+		if err2 := s.db.UpdateTransactionStatus(event.DepositId, database.StatusFailed, event.TxHash); err2 != nil {
+			logger.Error("Failed to update transaction status to failed: %v", err2)
+		}
 		return fmt.Errorf("deposit validation failed: %v", err)
 	}
 
-	monAmount := calculateMonAmount(event.Amount, state.SwapRatios[event.Currency])
-
 	if err := s.waitForConfirmations(ctx, event.BlockNumber, 10); err != nil {
+		// Update transaction status to failed
+		if err2 := s.db.UpdateTransactionStatus(event.DepositId, database.StatusFailed, event.TxHash); err2 != nil {
+			logger.Error("Failed to update transaction status to failed: %v", err2)
+		}
 		return fmt.Errorf("failed to wait for confirmations: %v", err)
 	}
 
-	if err := s.mintTokens(ctx, event.Depositor, monAmount, event.DepositId); err != nil {
+	// Attempt to mint tokens
+	monadTxHash, err := s.mintTokens(ctx, event.Depositor, monAmount, event.DepositId)
+	if err != nil {
+		// Update transaction status to failed
+		if err2 := s.db.UpdateTransactionStatus(event.DepositId, database.StatusFailed, event.TxHash); err2 != nil {
+			logger.Error("Failed to update transaction status to failed: %v", err2)
+		}
 		return fmt.Errorf("failed to mint tokens: %v", err)
+	}
+
+	// Update transaction status to completed with the Monad transaction hash
+	if err := s.db.UpdateTransactionStatus(event.DepositId, database.StatusCompleted, monadTxHash); err != nil {
+		logger.Error("Failed to update transaction status to completed: %v", err)
 	}
 
 	// Update wallet usage after successful mint
@@ -275,7 +309,7 @@ func (s *BridgeService) waitForConfirmations(ctx context.Context, blockNumber ui
 	}
 }
 
-func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address, amount *big.Int, depositId *big.Int) error {
+func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address, amount *big.Int, depositId *big.Int) (string, error) {
 	transfer := []struct {
 		Recipient common.Address `abi:"recipient"`
 		Amount    *big.Int       `abi:"amount"`
@@ -290,21 +324,21 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 
 	opts, err := s.monadDistributor.GetTransactOpts(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get transaction options: %v", err)
+		return "", fmt.Errorf("failed to get transaction options: %v", err)
 	}
 
 	tx, err := s.monadDistributor.BoundContract.Transact(opts, "distributeFunds", transfer)
 	if err != nil {
-		return fmt.Errorf("failed to distribute funds: %v", err)
+		return "", fmt.Errorf("failed to distribute funds: %v", err)
 	}
 
 	receipt, err := bind.WaitMined(ctx, s.monadDistributor.client, tx)
 	if err != nil {
-		return fmt.Errorf("failed to wait for distribution transaction: %v", err)
+		return "", fmt.Errorf("failed to wait for distribution transaction: %v", err)
 	}
 
 	if receipt.Status == 0 {
-		return fmt.Errorf("distribution transaction failed")
+		return "", fmt.Errorf("distribution transaction failed")
 	}
 
 	logger.Info("✅ Distributed %s MON to %s (tx: %s)",
@@ -315,7 +349,7 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		recipient.Hex(),
 		tx.Hash().Hex(),
 	)
-	return nil
+	return tx.Hash().Hex(), nil
 }
 
 func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int) *big.Int {
