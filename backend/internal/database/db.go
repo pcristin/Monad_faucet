@@ -12,7 +12,7 @@ import (
 
 const (
 	// Schema version for migrations
-	schemaVersion = 1
+	schemaVersion = 2
 )
 
 // DB represents the database connection

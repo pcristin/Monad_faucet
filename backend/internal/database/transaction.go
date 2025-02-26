@@ -123,6 +123,70 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 	return &tx, nil
 }
 
+// GetTransactionByArbitrumTxHash retrieves a transaction by its Arbitrum transaction hash
+func (db *DB) GetTransactionByArbitrumTxHash(txHash string) (*Transaction, error) {
+	// First, check if we have a transaction with this hash as the tx_hash
+	var (
+		tx                                                      Transaction
+		depositIDStr, walletAddressStr, amountStr, monAmountStr string
+		currencyInt                                             int
+	)
+
+	err := db.QueryRow(
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, created_at, updated_at 
+		FROM transaction_history 
+		WHERE tx_hash = $1`,
+		txHash,
+	).Scan(
+		&tx.ID,
+		&depositIDStr,
+		&walletAddressStr,
+		&amountStr,
+		&currencyInt,
+		&monAmountStr,
+		&tx.Status,
+		&tx.TxHash,
+		&tx.CreatedAt,
+		&tx.UpdatedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// Try to find it in the transaction_metadata table if it exists
+			var depositIDStr string
+			err = db.QueryRow(
+				`SELECT deposit_id FROM transaction_metadata 
+				WHERE key = 'arbitrum_tx_hash' AND value = $1`,
+				txHash,
+			).Scan(&depositIDStr)
+
+			if err != nil {
+				if err == sql.ErrNoRows {
+					return nil, fmt.Errorf("transaction not found for Arbitrum tx hash: %s", txHash)
+				}
+				return nil, fmt.Errorf("failed to query transaction metadata: %w", err)
+			}
+
+			// Now get the transaction by deposit ID
+			depositID, ok := new(big.Int).SetString(depositIDStr, 10)
+			if !ok {
+				return nil, fmt.Errorf("invalid deposit ID format in metadata: %s", depositIDStr)
+			}
+
+			return db.GetTransactionByDepositID(depositID)
+		}
+		return nil, fmt.Errorf("failed to get transaction: %w", err)
+	}
+
+	// Convert strings to appropriate types
+	tx.DepositID, _ = new(big.Int).SetString(depositIDStr, 10)
+	tx.WalletAddress = common.HexToAddress(walletAddressStr)
+	tx.Amount, _ = new(big.Int).SetString(amountStr, 10)
+	tx.Currency = CurrencyType(currencyInt)
+	tx.MonAmount, _ = new(big.Int).SetString(monAmountStr, 10)
+
+	return &tx, nil
+}
+
 // GetTransactionsByWallet retrieves all transactions for a wallet
 func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) ([]*Transaction, error) {
 	rows, err := db.Query(
@@ -273,4 +337,72 @@ func (db *DB) CreateIndexes() error {
 func (db *DB) Ping() error {
 	// For SQL databases, we can use the Ping method
 	return db.DB.Ping()
+}
+
+// StoreArbitrumTransactionTime stores the timestamp of an Arbitrum transaction
+func (db *DB) StoreArbitrumTransactionTime(txHash string, timestamp time.Time) error {
+	// First, try to get the deposit ID from the transaction history
+	var depositID string
+	err := db.QueryRow(
+		`SELECT deposit_id FROM transaction_history WHERE tx_hash = $1`,
+		txHash,
+	).Scan(&depositID)
+
+	// If not found in transaction history, use a placeholder
+	if err != nil {
+		if err == sql.ErrNoRows {
+			depositID = "unknown"
+		} else {
+			return fmt.Errorf("failed to query transaction history: %w", err)
+		}
+	}
+
+	// Store the transaction timestamp
+	_, err = db.Exec(
+		`INSERT INTO arbitrum_tx_timestamps (tx_hash, deposit_id, timestamp) 
+		VALUES ($1, $2, $3)
+		ON CONFLICT(tx_hash) DO UPDATE SET 
+		deposit_id = $2, timestamp = $3`,
+		txHash, depositID, timestamp,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to store Arbitrum transaction timestamp: %w", err)
+	}
+
+	return nil
+}
+
+// GetArbitrumTransactionByDepositID retrieves the Arbitrum transaction details by deposit ID
+func (db *DB) GetArbitrumTransactionByDepositID(depositID *big.Int) (string, *time.Time, error) {
+	var txHash string
+	var timestamp time.Time
+
+	err := db.QueryRow(
+		`SELECT tx_hash, timestamp FROM arbitrum_tx_timestamps WHERE deposit_id = $1 ORDER BY timestamp DESC LIMIT 1`,
+		depositID.String(),
+	).Scan(&txHash, &timestamp)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil, fmt.Errorf("no Arbitrum transaction found for deposit ID: %s", depositID.String())
+		}
+		return "", nil, fmt.Errorf("failed to query Arbitrum transaction: %w", err)
+	}
+
+	return txHash, &timestamp, nil
+}
+
+// UpdateDepositIDForTransaction updates the deposit ID for a transaction in the timestamps table
+func (db *DB) UpdateDepositIDForTransaction(txHash string, depositID *big.Int) error {
+	_, err := db.Exec(
+		`UPDATE arbitrum_tx_timestamps SET deposit_id = $1 WHERE tx_hash = $2`,
+		depositID.String(), txHash,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to update deposit ID for transaction: %w", err)
+	}
+
+	return nil
 }

@@ -10,9 +10,9 @@ import (
 
 // Setting keys
 const (
-	SettingFaucetEnabled    = "faucet_enabled"
-	SettingDailyWalletLimit = "daily_wallet_limit"
-	SettingMaxMonAmount     = "max_mon_amount"
+	SettingFaucetEnabled = "faucet_enabled"
+	SettingTxLimit       = "tx_limit"
+	SettingMaxMonAmount  = "max_mon_amount"
 )
 
 // GetSetting retrieves a setting value from the database
@@ -107,15 +107,15 @@ func (db *DB) InitDefaultSettings() error {
 		}
 	}
 
-	// Check if daily_wallet_limit exists
-	_, err = db.GetSetting(SettingDailyWalletLimit)
+	// Check if tx_limit exists
+	_, err = db.GetSetting(SettingTxLimit)
 	if err != nil {
-		// Set default to 5 MON (5 * 10^18)
+		// Set default to 0 MON = no limit per tx
 		defaultLimit := new(big.Int).Mul(
-			big.NewInt(5),
+			big.NewInt(0),
 			new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil),
 		)
-		if err := db.SetBigIntSetting(SettingDailyWalletLimit, defaultLimit); err != nil {
+		if err := db.SetBigIntSetting(SettingTxLimit, defaultLimit); err != nil {
 			return err
 		}
 	}
