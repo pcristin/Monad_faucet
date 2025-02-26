@@ -322,11 +322,19 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 	monBalance := new(big.Float).SetInt(state.MonBalance)
 	monBalance = new(big.Float).Quo(monBalance, divisor)
 
-	// Calculate wallet limit (30% of total MON balance)
-	walletLimitBig := new(big.Int).Mul(state.MonBalance, big.NewInt(blockchain.WalletLimitPercentage))
-	walletLimitBig = new(big.Int).Div(walletLimitBig, big.NewInt(100))
-	walletLimit := new(big.Float).SetInt(walletLimitBig)
-	walletLimit = new(big.Float).Quo(walletLimit, divisor)
+	// Calculate wallet limit (percentage of total MON balance)
+	var walletLimitText string
+	var walletLimit *big.Float
+
+	if blockchain.WalletLimitPercentage == 0 {
+		walletLimitText = "No limit"
+	} else {
+		walletLimitBig := new(big.Int).Mul(state.MonBalance, big.NewInt(blockchain.WalletLimitPercentage))
+		walletLimitBig = new(big.Int).Div(walletLimitBig, big.NewInt(100))
+		walletLimit = new(big.Float).SetInt(walletLimitBig)
+		walletLimit = new(big.Float).Quo(walletLimit, divisor)
+		walletLimitText = walletLimit.Text('f', 6)
+	}
 
 	// Convert swap ratios to exchange rates
 	exchangeRates := make(map[string]string)
@@ -351,11 +359,11 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"faucetWorking":    !state.IsPaused,
-		"faucetReserve":    monBalance.Text('f', 6),
-		"exchangeRate":     exchangeRates,
-		"walletDailyLimit": walletLimit.Text('f', 6),
-		"limitDuration":    "24 hours",
+		"faucetWorking": !state.IsPaused,
+		"faucetReserve": monBalance.Text('f', 6),
+		"exchangeRate":  exchangeRates,
+		"walletLimit":   walletLimitText,
+		"limitType":     "per transaction",
 	})
 }
 

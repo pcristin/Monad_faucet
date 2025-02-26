@@ -13,10 +13,11 @@ const (
 	CurrencyUSDT
 )
 
-// WalletUsage tracks the MON tokens distributed to a wallet
+// WalletUsage struct is kept for compatibility but no longer used for tracking limits
+// since limits are now per-transaction instead of time-based
 type WalletUsage struct {
-	TotalAmount *big.Int  // Total MON tokens distributed to this wallet
-	LastUpdated time.Time // Time of last distribution
+	TotalAmount *big.Int  // Total MON tokens distributed to this wallet (no longer used)
+	LastUpdated time.Time // Time of last distribution (no longer used)
 }
 
 // CurrencyTypeToString converts a CurrencyType to its string representation

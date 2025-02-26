@@ -99,8 +99,8 @@ Response:
     "USDC": "1.000000",
     "USDT": "1.000000"
   },
-  "walletDailyLimit": "1.371815",
-  "limitDuration": "24 hours"
+  "walletLimit": "1.371815",
+  "limitType": "per transaction"
 }
 ```
 
@@ -199,6 +199,8 @@ Response:
 }
 ```
 
+> Note: Setting `limit_percentage` to 0 disables the wallet limit entirely.
+
 ## Price Calculation
 
 The service calculates token swap ratios based on:
@@ -295,23 +297,26 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 The service implements wallet-based distribution limits to prevent abuse:
 
 1. **Limit Calculation**:
-   - Each wallet is limited to a configurable percentage of the total MON balance in a 24-hour period
+   - Each wallet is limited to a configurable percentage of the total MON balance per transaction
    - Default: 30% of total MON balance
-   - Configurable via admin API (1-100%)
+   - Configurable via admin API (0-100%, where 0 means no limit)
 
-2. **Limit Duration**:
-   - Limits reset after 24 hours from the last distribution
-   - Usage is tracked per wallet address
+2. **Per-Transaction Basis**:
+   - Limits are applied on a per-transaction basis
+   - No time-based tracking of wallet usage
+   - Each transaction is evaluated independently
 
 3. **Validation**:
    - Deposits are validated against wallet limits before processing
    - If a wallet exceeds its limit, the deposit is rejected and refunded
-   - Detailed error messages indicate remaining allowance
+   - Detailed error messages indicate the maximum allowed amount
 
 4. **Admin Control**:
    - Administrators can adjust the limit percentage via API
+   - Setting the limit to 0 disables the limit entirely
    - Useful for promotional periods or adjusting to demand
 
 5. **Transparency**:
    - Current wallet limit is included in the `/api/info` endpoint
-   - Frontend can display this information to users 
+   - Frontend can display this information to users
+   - When limits are disabled, the API returns "No limit" for the wallet limit 
