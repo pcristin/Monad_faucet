@@ -182,7 +182,7 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 	}
 
 	// Create a pending transaction record in the database
-	monAmount := calculateMonAmount(event.Amount, state.SwapRatios[event.Currency])
+	monAmount := calculateMonAmount(event.Amount, state.SwapRatios[event.Currency], event.Currency)
 	txRecord := &database.Transaction{
 		DepositID:     event.DepositId,
 		WalletAddress: event.Depositor,
@@ -241,7 +241,7 @@ func (s *BridgeService) validateDeposit(state *ContractState, event DepositEvent
 		return fmt.Errorf("bridge is paused")
 	}
 
-	monAmount := calculateMonAmount(event.Amount, state.SwapRatios[event.Currency])
+	monAmount := calculateMonAmount(event.Amount, state.SwapRatios[event.Currency], event.Currency)
 	if state.MonBalance.Cmp(monAmount) < 0 {
 		return fmt.Errorf("insufficient MON balance in distributor (required: %s MON, available: %s MON)",
 			new(big.Float).Quo(
@@ -352,9 +352,24 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 	return tx.Hash().Hex(), nil
 }
 
-func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int) *big.Int {
+func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType CurrencyType) *big.Int {
+	// Determine if this is a stablecoin based on the currency type
+	isStablecoin := currencyType == CurrencyUSDC || currencyType == CurrencyUSDT
+
 	result := new(big.Int).Mul(depositAmount, swapRatio)
+
+	if isStablecoin {
+		// For stablecoins (USDC/USDT), we need to adjust for the decimal difference (18-6=12)
+		// Multiply by 10^12 to convert from 6 decimals to 18 decimals
+		result = new(big.Int).Mul(result, new(big.Int).Exp(big.NewInt(10), big.NewInt(12), nil))
+		logger.Info("Stablecoin deposit detected: Adjusting calculation for decimal difference (6 to 18)")
+	}
+
 	result = new(big.Int).Div(result, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+
+	// Log the calculation details for debugging
+	logger.Info("MON amount calculation: depositAmount=%s, swapRatio=%s, isStablecoin=%v, result=%s",
+		depositAmount.String(), swapRatio.String(), isStablecoin, result.String())
 
 	// Ensure minimum amount (1 wei)
 	// If the calculation results in zero due to tiny input or rounding,
