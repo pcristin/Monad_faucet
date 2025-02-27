@@ -344,7 +344,7 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 	logger.Info("✅ Distributed %s MON to %s (tx: %s)",
 		new(big.Float).Quo(
 			new(big.Float).SetInt(amount),
-			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))),
+			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))).Text('f', 9),
 		recipient.Hex(),
 		tx.Hash().Hex(),
 	)
@@ -452,8 +452,14 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 
 	// Convert result to big.Int (truncating any fractional part)
 	monWeiInt := new(big.Int)
-	monAmount.Num().Div(monAmount.Num(), monAmount.Denom())
-	monWeiInt.Set(monAmount.Num())
+
+	// To avoid truncation to zero for small values, round up instead of truncating down
+	// First, add 1/2 to the rational for proper rounding
+	monAmountRounded := new(big.Rat).Add(monAmount, new(big.Rat).SetFrac(big.NewInt(1), big.NewInt(2)))
+
+	// Then convert to big.Int
+	monAmountRounded.Num().Div(monAmountRounded.Num(), monAmountRounded.Denom())
+	monWeiInt.Set(monAmountRounded.Num())
 
 	// For logging, convert to human-readable floats
 	ethUsdPriceFloat, _ := ethUsdPriceUSD.Float64()
@@ -462,7 +468,7 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 	monUsdRatioFloatValue, _ := monUsdRatioFloat.Float64()
 
 	// Log detailed calculation for debugging
-	logger.Info("ETH to MON calculation (detailed): %s ETH ≈ $%.6f USD (ETH price: $%.2f) / $%.6f per MON = %.6f MON (result: %s wei)",
+	logger.Info("ETH to MON calculation (detailed): %s ETH ≈ $%.6f USD (ETH price: $%.6f) / $%.6f per MON = %.6f MON (result: %s wei)",
 		depositEthFloat.Text('f', 18),
 		usdValueFloat,
 		ethUsdPriceFloat,
