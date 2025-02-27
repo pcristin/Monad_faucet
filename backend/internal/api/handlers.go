@@ -631,22 +631,19 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		c.Next()
 	})
 
+	bridge := r.Group("/bridge")
 	// Add health check endpoint
-	r.GET("/health", h.HealthCheck)
+	bridge.GET("/health", h.HealthCheck)
 
 	// Add metrics endpoint
-	r.GET("/metrics", h.GetMetrics)
-
-	api := r.Group("/api")
+	bridge.GET("/metrics", h.GetMetrics)
+	api := bridge.Group("/api")
 	{
-		api.GET("/info", h.GetFaucetInfo)
-
-		// Transaction status endpoints
-		api.POST("/tx-status", h.GetTransactionStatus) // Keep for backward compatibility
 
 		v1 := api.Group("/v1")
 		{
 			v1.POST("/transaction/status", h.GetTransactionStatus)
+			v1.GET("/info", h.GetFaucetInfo)
 		}
 
 		// Admin endpoints
@@ -654,5 +651,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		api.POST("/admin/pause", h.PauseDeposits)
 		api.POST("/admin/resume", h.ResumeDeposits)
 		api.POST("/admin/wallet-limit", h.AdminUpdateWalletLimit)
+
+		// Deprecated endpoints
+		api.GET("/info", h.GetFaucetInfo)
+		api.POST("/tx-status", h.GetTransactionStatus) // Keep for backward compatibility
 	}
 }
