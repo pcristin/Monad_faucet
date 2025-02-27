@@ -369,17 +369,78 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 		result := new(big.Int).Mul(adjustedDepositAmount, swapRatio)
 		result = new(big.Int).Div(result, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 
+		// Convert to human-readable values for logging and additional calculations
+		depositValueFloat := new(big.Float).Quo(
+			new(big.Float).SetInt(depositAmount),
+			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)), // 6 decimals for stablecoins
+		)
+
+		resultFloat := new(big.Float).Quo(
+			new(big.Float).SetInt(result),
+			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)), // 18 decimals for MON
+		)
+
+		depositValue, _ := depositValueFloat.Float64() // USD value
+		resultValue, _ := resultFloat.Float64()        // MON value
+
 		// Log the calculation
-		logger.Info("Stablecoin to MON calculation: %s units, adjusted=%s, swapRatio=%s, result=%s MON wei",
+		logger.Info("Stablecoin to MON calculation: %s units ($%.6f), adjusted=%s, swapRatio=%s, result=%s MON wei (%.6f MON)",
 			depositAmount.String(),
+			depositValue,
 			adjustedDepositAmount.String(),
 			swapRatio.String(),
-			result.String())
+			result.String(),
+			resultValue)
 
-		// Ensure minimum amount (1 wei)
-		if result.Sign() <= 0 && depositAmount.Sign() > 0 {
-			logger.Warn("Calculated MON amount for stablecoin is zero, setting to minimum (1 wei)")
-			return big.NewInt(1)
+		// Handle small deposits (when calculated MON is very low or zero)
+		if (result.Sign() <= 0 && depositAmount.Sign() > 0) || resultValue < 0.00001 {
+			// For stablecoins, the USD value is directly the deposit amount
+			// We'll apply the same 10x multiplier for small deposits
+
+			// Base minimum MON amount (in wei) for any valid deposit
+			minMonWei := big.NewInt(1000000000000000) // 0.001 MON (10^15 wei)
+
+			// Scale MON amount based on USD value for better proportionality
+			// Target ratio: $0.01 USD → 0.1 MON (10x multiplier)
+			targetRatio := 10.0
+
+			scaledMon := new(big.Float).Mul(
+				depositValueFloat,
+				new(big.Float).SetFloat64(targetRatio),
+			)
+
+			// Convert to wei (multiply by 10^18)
+			scaledMonWei := new(big.Float).Mul(
+				scaledMon,
+				new(big.Float).SetFloat64(1e18),
+			)
+
+			// Convert to integer with proper rounding
+			scaledMonWeiInt, _ := scaledMonWei.Int(nil)
+
+			// Ensure we provide at least the minimum MON amount for any valid deposit
+			if scaledMonWeiInt.Cmp(minMonWei) < 0 {
+				scaledMonWeiInt = new(big.Int).Set(minMonWei)
+			}
+
+			// For very small deposits (under $0.001), ensure they still get something if valid
+			if depositValue < 0.001 && depositAmount.Sign() > 0 {
+				// Ensure minimum amount of MON wei for extremely small deposits
+				microMon := big.NewInt(10000000000000) // 0.00001 MON (10^13 wei)
+				if scaledMonWeiInt.Cmp(microMon) < 0 {
+					scaledMonWeiInt = microMon
+				}
+			}
+
+			humanReadableMon := new(big.Float).Quo(
+				new(big.Float).SetInt(scaledMonWeiInt),
+				new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			).Text('f', 6)
+
+			logger.Info("Small stablecoin deposit ($%.6f), allocating %s MON (%s wei)",
+				depositValue, humanReadableMon, scaledMonWeiInt.String())
+
+			return scaledMonWeiInt
 		}
 
 		return result
