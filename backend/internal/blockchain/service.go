@@ -384,7 +384,7 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 	}
 
 	// For ETH deposits, we need a more accurate calculation that preserves precision
-	// The swap ratio gives MON wei per ETH wei when we divide 10^36 by it
+	// The ETH/USD price from Chainlink has 8 decimals, e.g. 238464500000 = $2,384.645
 
 	// Get the MON/USD ratio directly from the blockchain
 	monUsdRatio := GetMonUsdRatio()
@@ -405,49 +405,70 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 	// Create big.Rat values for the calculation
 	depositRat := new(big.Rat).SetInt(depositAmount)
 
-	// 10^36 (numerator for the eth price calculation using swap ratio)
-	tenPow36 := new(big.Int).Exp(big.NewInt(10), big.NewInt(36), nil)
-	tenPow36Rat := new(big.Rat).SetInt(tenPow36)
+	// Note: swapRatio for ETH is directly the ETH/MON ratio calculated from:
+	// ETH/USD price (from Chainlink with 8 decimals) * 10^10 (to get 18 decimals) * (1/MON/USD ratio)
+	// So we don't need to recalculate it, it's already passed in.
 
-	// Swap ratio as a rational
+	// However, for proper logging, we want to extract the ETH/USD price
+
+	// Get ETH/USD price with 8 decimals (Chainlink format)
+	// This is based on the relationship between swap ratio and prices:
+	// swapRatio = ethUsdPrice * 10^10 * usdTokenRatio
+	// where usdTokenRatio = 10^18 / monUsdRatio
+	// So: ethUsdPrice = swapRatio * monUsdRatio / 10^28
+
+	// For calculating ETH/USD price for logging
+	// First, create rationals for the calculations
 	swapRatioRat := new(big.Rat).SetInt(swapRatio)
-
-	// MON/USD ratio as a rational
 	monUsdRatioRat := new(big.Rat).SetInt(monUsdRatio)
+	tenPow28 := new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(28), nil))
+
+	// Calculate ETH/USD price with 8 decimals (Chainlink format)
+	ethUsdPrice := new(big.Rat).Mul(swapRatioRat, monUsdRatioRat)
+	ethUsdPrice = new(big.Rat).Quo(ethUsdPrice, tenPow28)
+
+	// Convert ETH/USD price to standard USD format for logging (divide by 10^8)
+	ethUsdPriceUSD := new(big.Rat).Quo(
+		ethUsdPrice,
+		new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil)),
+	)
 
 	// 10^18 for wei conversion
 	tenPow18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 	tenPow18Rat := new(big.Rat).SetInt(tenPow18)
 
-	// STEP 1: Calculate ETH/USD price
-	// ethUsdPrice = 10^36 / (swapRatio * monUsdRatio * 10^18)
-	denominator := new(big.Rat).Mul(swapRatioRat, monUsdRatioRat)
-	denominator = new(big.Rat).Mul(denominator, tenPow18Rat)
-	ethUsdPrice := new(big.Rat).Quo(tenPow36Rat, denominator)
+	// STEP 1: Calculate USD value of the deposit
+	// We need to convert ETH/USD price to have 18 decimals for calculation
+	ethUsdPrice18Decimals := new(big.Rat).Mul(ethUsdPrice, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(10), nil)))
 
-	// STEP 2: Calculate USD value of the deposit
-	// usdValue = depositAmount * ethUsdPrice / 10^18 (convert from wei)
-	usdValue := new(big.Rat).Mul(depositRat, ethUsdPrice)
+	// usdValue = depositAmount * ethUsdPrice18Decimals / 10^18
+	usdValue := new(big.Rat).Mul(depositRat, ethUsdPrice18Decimals)
 	usdValue = new(big.Rat).Quo(usdValue, tenPow18Rat)
 
-	// STEP 3: Calculate MON amount
+	// STEP 2: Calculate MON amount
 	// monAmount = usdValue / monUsdRatio * 10^18
 	monAmount := new(big.Rat).Quo(usdValue, monUsdRatioRat)
 	monAmount = new(big.Rat).Mul(monAmount, tenPow18Rat)
 
 	// Convert result to big.Int (truncating any fractional part)
-	// The correct way to convert from big.Rat to big.Int
 	monWeiInt := new(big.Int)
 	monAmount.Num().Div(monAmount.Num(), monAmount.Denom())
 	monWeiInt.Set(monAmount.Num())
 
 	// For logging, convert to human-readable floats
-	ethUsdPriceFloat, _ := ethUsdPrice.Float64()
+	ethUsdPriceFloat, _ := ethUsdPriceUSD.Float64()
 	usdValueFloat, _ := usdValue.Float64()
 	monAmountFloat, _ := new(big.Rat).Quo(monAmount, tenPow18Rat).Float64()
+	monUsdRatioFloatValue, _ := monUsdRatioFloat.Float64()
 
 	// Log detailed calculation for debugging
-	logger.Info("ETH to MON calculation (detailed): %s ETH ≈ $%.6f USD (ETH price: $%.2f) / $%.6f per MON = %.6f MON (result: %s wei)", depositEthFloat.Text('f', 18), usdValueFloat, ethUsdPriceFloat, monUsdRatioFloat, monAmountFloat, monWeiInt.String())
+	logger.Info("ETH to MON calculation (detailed): %s ETH ≈ $%.6f USD (ETH price: $%.2f) / $%.6f per MON = %.6f MON (result: %s wei)",
+		depositEthFloat.Text('f', 18),
+		usdValueFloat,
+		ethUsdPriceFloat,
+		monUsdRatioFloatValue,
+		monAmountFloat,
+		monWeiInt.String())
 
 	// Ensure the calculation is correct by validating against expected results
 	// For example, at ETH=$2400 and MON=$0.1:
