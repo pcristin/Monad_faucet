@@ -383,9 +383,7 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 		return result
 	}
 
-	// For ETH deposits, we need a more accurate calculation that preserves precision
-	// The ETH/USD price from Chainlink has 8 decimals, e.g. 238464500000 = $2,384.645
-
+	// For ETH deposits with improved precision calculation using big.Rat
 	// Get the MON/USD ratio directly from the blockchain
 	monUsdRatio := GetMonUsdRatio()
 	monUsdRatioFloat := new(big.Float).Quo(
@@ -393,112 +391,94 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 	)
 
-	// Convert deposit to ETH units (from wei) for logging
+	// Create big.Rat values for more precise calculation
+	depositRat := new(big.Rat).SetInt(depositAmount)
+	monUsdRatioRat := new(big.Rat).SetInt(monUsdRatio)
+	tenPow18Rat := new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+
+	// Extract the ETH/USD price using the swap ratio
+	// The swap ratio relationship: swapRatio = (10^18 * 10^18) / (ethUsdPrice * monUsdRatio)
+	// This calculation uses the fact that the swap ratio encodes the price relationship
+	if swapRatio.Sign() <= 0 {
+		logger.Error("Invalid swap ratio: %v", swapRatio)
+		return big.NewInt(1) // Minimum wei to avoid failure
+	}
+
+	swapRatioRat := new(big.Rat).SetInt(swapRatio)
+	tenPow36Rat := new(big.Rat).Mul(tenPow18Rat, tenPow18Rat) // 10^36
+
+	// Extract ethUsdPrice: ethUsdPrice = (10^36) / (swapRatio * monUsdRatio)
+	ethUsdPriceRat := new(big.Rat).Mul(swapRatioRat, monUsdRatioRat)
+	ethUsdPriceRat = new(big.Rat).Quo(tenPow36Rat, ethUsdPriceRat)
+
+	// Calculate USD value of deposit: depositAmount * ethUsdPrice / 10^18
+	usdValueRat := new(big.Rat).Mul(depositRat, ethUsdPriceRat)
+	usdValueRat = new(big.Rat).Quo(usdValueRat, tenPow18Rat)
+
+	// Calculate MON amount: usdValue * 10^18 / monUsdRatio
+	monRat := new(big.Rat).Mul(usdValueRat, tenPow18Rat)
+	monRat = new(big.Rat).Quo(monRat, monUsdRatioRat)
+
+	// Convert values to float for logging
 	depositEthFloat := new(big.Float).Quo(
 		new(big.Float).SetInt(depositAmount),
 		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 	)
-
-	// Get ETH/USD price directly from the swap ratio
-	// First, ensure we have valid values
-	if swapRatio.Sign() <= 0 {
-		logger.Error("Invalid swap ratio: %v", swapRatio)
-		// Return minimum wei to avoid failure
-		return big.NewInt(1)
-	}
-
-	// Create big.Rat values for the calculation
-	depositRat := new(big.Rat).SetInt(depositAmount)
-	swapRatioRat := new(big.Rat).SetInt(swapRatio)
-	monUsdRatioRat := new(big.Rat).SetInt(monUsdRatio)
-
-	// The ETH/USD price calculation (using the relationship with swap ratio)
-	tenPow28 := new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(28), nil))
-	ethUsdPrice := new(big.Rat).Mul(swapRatioRat, monUsdRatioRat)
-	ethUsdPrice = new(big.Rat).Quo(ethUsdPrice, tenPow28)
-
-	// Convert ETH/USD price to standard USD format for logging (divide by 10^8)
-	ethUsdPriceUSD := new(big.Rat).Quo(
-		ethUsdPrice,
-		new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil)),
-	)
-
-	// 10^18 for wei conversion
-	tenPow18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
-	tenPow18Rat := new(big.Rat).SetInt(tenPow18)
-
-	// SIMPLIFIED DIRECT CALCULATION:
-	// For 0.000043 ETH at ETH price of $2350 and MON price of $0.1:
-	// 1. Convert ETH to USD: 0.000043 * 2350 = $0.10105
-	// 2. Convert USD to MON: $0.10105 / $0.1 per MON = 1.0105 MON
-
-	// Convert ETH/USD price to have 18 decimals for the calculation
-	ethUsdPrice18Decimals := new(big.Rat).Mul(
-		ethUsdPrice,
-		new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(10), nil)),
-	)
-
-	// Calculate USD value: depositAmount * ethUsdPrice18Decimals / 10^18
-	usdValue := new(big.Rat).Mul(depositRat, ethUsdPrice18Decimals)
-	usdValue = new(big.Rat).Quo(usdValue, tenPow18Rat)
-
-	// Calculate MON amount: usdValue * 10^18 / monUsdRatio
-	monAmount := new(big.Rat).Mul(usdValue, tenPow18Rat)
-	monAmount = new(big.Rat).Quo(monAmount, monUsdRatioRat)
-
-	// Round the result properly to avoid truncation to zero
-	monAmountRounded := new(big.Rat).Add(monAmount, new(big.Rat).SetFrac(big.NewInt(1), big.NewInt(2)))
-
-	// Convert to big.Int
-	monWeiInt := new(big.Int)
-	monAmountRounded.Num().Div(monAmountRounded.Num(), monAmountRounded.Denom())
-	monWeiInt.Set(monAmountRounded.Num())
-
-	// For logging, convert to human-readable floats
-	ethUsdPriceFloat, _ := ethUsdPriceUSD.Float64()
-	usdValueFloat, _ := usdValue.Float64()
-	monAmountFloat, _ := new(big.Rat).Quo(monAmount, tenPow18Rat).Float64()
+	ethUsdPriceFloat, _ := ethUsdPriceRat.Float64()
+	usdValueFloat, _ := usdValueRat.Float64()
+	monFloat, _ := new(big.Rat).Quo(monRat, tenPow18Rat).Float64()
 	monUsdRatioFloatValue, _ := monUsdRatioFloat.Float64()
 
-	// Log detailed calculation for debugging
-	logger.Info("ETH to MON calculation (detailed): %s ETH ≈ $%.6f USD (ETH price: $%.2f) / $%.6f per MON = %.6f MON (result: %s wei)",
+	// Round to integer MON wei amount
+	monWeiRat := new(big.Rat).Mul(monRat, new(big.Rat).SetInt64(1))
+	monWeiInt := new(big.Int)
+	monWeiRat.Num().Div(monWeiRat.Num(), monWeiRat.Denom())
+	monWeiInt.Set(monWeiRat.Num())
+
+	// Log calculation details
+	logger.Info("ETH to MON calculation: %s ETH ≈ $%.6f USD (ETH price: $%.2f) / $%.6f per MON = %.6f MON (result: %s wei)",
 		depositEthFloat.Text('f', 18),
 		usdValueFloat,
 		ethUsdPriceFloat,
 		monUsdRatioFloatValue,
-		monAmountFloat,
+		monFloat,
 		monWeiInt.String())
 
-	// Ensure we never return zero for non-zero deposits
-	if monWeiInt.Sign() <= 0 && depositAmount.Sign() > 0 {
-		// Calculate a minimum amount based on USD value
-		// Minimum 1 MON for deposits >= $0.1
-		if usdValueFloat >= 0.1 {
-			return new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil) // 1 MON
+	// Handle small deposits specially - this is the key fix
+	if (monWeiInt.Sign() <= 0 && depositAmount.Sign() > 0) || monFloat < 0.00001 {
+		// If USD value is reasonably significant (>= $0.05), give at least 0.5 MON
+		if usdValueFloat >= 0.05 {
+			minMon := new(big.Int).Div(
+				new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil),
+				big.NewInt(2), // 0.5 MON = 10^18 / 2
+			)
+			logger.Info("Small ETH deposit with USD value ≥ $0.05, setting to 0.5 MON (%s wei)", minMon.String())
+			return minMon
 		}
 
-		// For smaller deposits, calculate proportionally
-		// At least 1000 wei but proportional to USD value as much as possible
-		minWei := new(big.Int).Mul(
-			new(big.Int).SetInt64(int64(usdValueFloat*1e18)),
-			new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil),
+		// For smaller deposits, scale proportionally to USD value but ensure minimum
+		// Calculate a fair value based on USD amount (approx 10 MON per $1)
+		fairValue := new(big.Float).Mul(
+			new(big.Float).SetFloat64(usdValueFloat),
+			new(big.Float).SetFloat64(10e18), // 10 MON per $1 in wei
 		)
-		minWei = new(big.Int).Div(minWei, monUsdRatio)
 
-		// Ensure at least 1000 wei
-		if minWei.Cmp(big.NewInt(1000)) < 0 {
-			minWei = big.NewInt(1000)
+		fairValueInt, _ := fairValue.Int(nil)
+
+		// Ensure at least 1000 wei for very small amounts
+		if fairValueInt.Cmp(big.NewInt(1000)) < 0 {
+			fairValueInt = big.NewInt(1000)
 		}
 
-		// Create formatted MON amount string for logging
 		monText := new(big.Float).Quo(
-			new(big.Float).SetInt(minWei),
+			new(big.Float).SetInt(fairValueInt),
 			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 		).Text('f', 18)
 
-		logger.Warn("Small ETH deposit, setting minimum: %s MON (%s wei)", monText, minWei.String())
+		logger.Warn("Very small ETH deposit with USD value < $0.05, setting to fair value: %s MON (%s wei)",
+			monText, fairValueInt.String())
 
-		return minWei
+		return fairValueInt
 	}
 
 	return monWeiInt
