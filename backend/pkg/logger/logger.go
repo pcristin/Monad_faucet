@@ -10,6 +10,7 @@ var (
 	InfoLogger   *log.Logger
 	WarnLogger   *log.Logger
 	ErrorLogger  *log.Logger
+	DebugLogger  *log.Logger
 	isProduction bool
 )
 
@@ -19,6 +20,7 @@ func init() {
 	InfoLogger = log.New(os.Stdout, "INFO: ", flags)
 	WarnLogger = log.New(os.Stdout, "WARN: ", flags)
 	ErrorLogger = log.New(os.Stderr, "ERROR: ", flags)
+	DebugLogger = log.New(os.Stdout, "DEBUG: ", flags)
 
 	// Check if we're running in production (Render)
 	isProduction = os.Getenv("RENDER") == "true"
@@ -49,4 +51,12 @@ func Error(format string, v ...interface{}) {
 
 func Fatal(format string, v ...interface{}) {
 	ErrorLogger.Fatalf(format, v...)
+}
+
+// Debug logs debug messages
+// In production mode, debug messages are suppressed
+func Debug(format string, v ...interface{}) {
+	if !isProduction {
+		DebugLogger.Printf(format, v...)
+	}
 }

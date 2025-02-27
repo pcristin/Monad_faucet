@@ -2,7 +2,7 @@ import http from 'k6/http';
 import { sleep, check } from 'k6';
 
 // Configuration
-const BASE_URL = 'https://YOUR-RENDER-URL.onrender.com'; // Replace with your actual URL
+const BASE_URL = 'http://localhost:8080'; // Replace with your actual URL
 const API_ENDPOINT = '/api/info'; // Use a lightweight endpoint for maximum RPS testing
 
 // Test scenarios

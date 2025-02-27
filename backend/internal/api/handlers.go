@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
+	"github.com/patrickmn/go-cache"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 	"golang.org/x/time/rate"
@@ -71,6 +72,7 @@ type Handler struct {
 	adminAPIKey    string
 	requestCounter atomic.Int64
 	baseGoroutines int
+	responseCache  *cache.Cache // New cache field for responses
 }
 
 // NewHandler creates a new API handler
@@ -81,12 +83,16 @@ func NewHandler(bridgeService *blockchain.BridgeService) *Handler {
 	// Record the base number of goroutines at startup
 	baseGoroutines := runtime.NumGoroutine()
 
+	// Create a cache with 5-second default expiration and 10-second cleanup interval
+	responseCache := cache.New(5*time.Second, 10*time.Second)
+
 	return &Handler{
 		bridgeService:  bridgeService,
 		rateLimiter:    rateLimiter,
 		startTime:      time.Now(),
 		adminAPIKey:    os.Getenv("ADMIN_API_KEY"),
 		baseGoroutines: baseGoroutines,
+		responseCache:  responseCache,
 	}
 }
 
@@ -224,6 +230,17 @@ func (h *Handler) ResumeDeposits(c *gin.Context) {
 
 // GetFaucetInfo returns simplified faucet information
 func (h *Handler) GetFaucetInfo(c *gin.Context) {
+	// Try to get cached response first
+	cacheKey := "faucetInfo" // Using a simple cache key as this data is the same for all users
+
+	if cachedResponse, found := h.responseCache.Get(cacheKey); found {
+		logger.Debug("Using cached faucet info response")
+		c.JSON(http.StatusOK, cachedResponse)
+		return
+	}
+
+	logger.Debug("Cache miss for faucet info, fetching fresh data")
+
 	state, err := h.bridgeService.GetState(c.Request.Context())
 	if err != nil {
 		logger.Error("Failed to get faucet info: %v", err)
@@ -309,13 +326,19 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	// Create the response
+	response := gin.H{
 		"faucetWorking": !state.IsPaused,
 		"faucetReserve": monBalance.Text('f', 6),
 		"exchangeRate":  exchangeRates,
 		"walletLimit":   walletLimitText,
 		"limitType":     "per transaction",
-	})
+	}
+
+	// Store in cache for future requests
+	h.responseCache.Set(cacheKey, response, cache.DefaultExpiration)
+
+	c.JSON(http.StatusOK, response)
 }
 
 // AdminUpdateWalletLimitRequest represents the request to update wallet limit percentage
