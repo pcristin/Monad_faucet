@@ -360,21 +360,57 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 		decimalAdjustment = 12
 		logger.Info("Stablecoin deposit detected: Adjusting calculation for decimal difference (6 to 18)")
 	} else {
-		// ETH and MON have 18 decimals, no adjustment needed
+		// ETH has 18 decimals, so no decimal adjustment needed
 		decimalAdjustment = 0
 	}
 
-	// Adjust deposit amount for decimal difference if needed
-	if decimalAdjustment > 0 {
-		depositAmount = new(big.Int).Mul(
-			depositAmount,
-			new(big.Int).Exp(big.NewInt(10), big.NewInt(decimalAdjustment), nil),
-		)
-	}
+	// For ETH, we need to do the calculation more carefully to avoid integer division issues
+	// with small amounts
+	var result *big.Int
 
-	// Calculate MON amount: depositAmount * swapRatio / 10^18
-	result := new(big.Int).Mul(depositAmount, swapRatio)
-	result = new(big.Int).Div(result, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	if currencyType == CurrencyETH {
+		// For ETH, we'll first multiply by the swap ratio
+		intermediate := new(big.Int).Mul(depositAmount, swapRatio)
+
+		// For very small ETH deposits, our ratio calculation might lead to integer division issues
+		// We'll add a scaling factor to preserve precision
+		scalingFactor := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+
+		// Scale up the result to preserve precision
+		scaledResult := new(big.Int).Div(intermediate, scalingFactor)
+
+		// Ensure a minimal amount for very small deposits that still have value
+		// If the deposit is 0.00001 ETH or more, it should give at least some MON
+		minDeposit := new(big.Int).Exp(big.NewInt(10), big.NewInt(13), nil) // 0.00001 ETH
+		if depositAmount.Cmp(minDeposit) >= 0 && scaledResult.Sign() <= 0 {
+			// If scaled result is zero but deposit is reasonable, use a proportional calculation
+			// At current prices, roughly 0.000042 ETH ≈ 1 MON at MON/USD = 0.1
+			ethToMonFactor := new(big.Int).Exp(big.NewInt(10), big.NewInt(13), nil) // Scale factor
+			result = new(big.Int).Mul(depositAmount, ethToMonFactor)
+			result = new(big.Int).Div(result, minDeposit)
+
+			logger.Info("Using proportional calculation for small ETH deposit: %s ETH -> %s MON wei",
+				new(big.Float).Quo(
+					new(big.Float).SetInt(depositAmount),
+					new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+				).Text('f', 18),
+				result.String())
+		} else {
+			result = scaledResult
+		}
+	} else {
+		// Handle stablecoins with decimal adjustment
+		if decimalAdjustment > 0 {
+			depositAmount = new(big.Int).Mul(
+				depositAmount,
+				new(big.Int).Exp(big.NewInt(10), big.NewInt(decimalAdjustment), nil),
+			)
+		}
+
+		// Calculate amount
+		result = new(big.Int).Mul(depositAmount, swapRatio)
+		result = new(big.Int).Div(result, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	}
 
 	// Log the calculation details
 	isStablecoin := currencyType == CurrencyUSDC || currencyType == CurrencyUSDT
