@@ -369,34 +369,88 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 	var result *big.Int
 
 	if currencyType == CurrencyETH {
-		// For ETH, we'll first multiply by the swap ratio
+		// Get ETH/USD price from the swap ratio
+		// The swap ratio gives us MON wei per ETH wei
+		// We know that 1 MON = 0.1 USD (MON/USD ratio)
+		// So we can calculate: ETH/USD = (MON wei per ETH wei) * (MON/USD ratio) / 10^18
+
+		// For ETH deposits:
+		// 1. Get the ETH value in USD using the swap ratio and MON/USD ratio
+		// 2. Convert USD value to MON
+
+		// At current ETH price ~$2,362, to convert 0.000042 ETH to MON:
+		// - 0.000042 ETH = 0.000042 * $2,362 = ~$0.099 USD
+		// - $0.099 / $0.1 per MON = ~0.99 MON (almost 1 MON)
+
+		// To calculate MON amount:
+		// MON = ETH * (ETH/USD price) / (MON/USD price)
+		// MON = ETH * swapRatio / 10^18
+
+		// First, multiply depositAmount by swap ratio
 		intermediate := new(big.Int).Mul(depositAmount, swapRatio)
 
-		// For very small ETH deposits, our ratio calculation might lead to integer division issues
-		// We'll add a scaling factor to preserve precision
-		scalingFactor := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+		// Divide by 10^18 to get the final MON amount
+		result = new(big.Int).Div(intermediate, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 
-		// Scale up the result to preserve precision
-		scaledResult := new(big.Int).Div(intermediate, scalingFactor)
+		// Log the calculation details
+		logger.Info("ETH to MON calculation: %s ETH, swapRatio=%s, result=%s MON wei",
+			new(big.Float).Quo(
+				new(big.Float).SetInt(depositAmount),
+				new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			).Text('f', 18),
+			swapRatio.String(),
+			result.String())
 
-		// Ensure a minimal amount for very small deposits that still have value
-		// If the deposit is 0.00001 ETH or more, it should give at least some MON
-		minDeposit := new(big.Int).Exp(big.NewInt(10), big.NewInt(13), nil) // 0.00001 ETH
-		if depositAmount.Cmp(minDeposit) >= 0 && scaledResult.Sign() <= 0 {
-			// If scaled result is zero but deposit is reasonable, use a proportional calculation
-			// At current prices, roughly 0.000042 ETH ≈ 1 MON at MON/USD = 0.1
-			ethToMonFactor := new(big.Int).Exp(big.NewInt(10), big.NewInt(13), nil) // Scale factor
-			result = new(big.Int).Mul(depositAmount, ethToMonFactor)
-			result = new(big.Int).Div(result, minDeposit)
+		// If result is 0 but deposit is reasonable, use the swap ratio differently
+		// This is needed because integer division might round down to 0 for small amounts
+		if result.Sign() <= 0 && depositAmount.Sign() > 0 {
+			// Recalculate using floating-point for better precision on small numbers
+			depositAmountFloat := new(big.Float).SetInt(depositAmount)
 
-			logger.Info("Using proportional calculation for small ETH deposit: %s ETH -> %s MON wei",
-				new(big.Float).Quo(
-					new(big.Float).SetInt(depositAmount),
-					new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-				).Text('f', 18),
-				result.String())
-		} else {
-			result = scaledResult
+			// Convert to ETH units for easier calculation
+			depositAmountEth := new(big.Float).Quo(
+				depositAmountFloat,
+				new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			)
+
+			// Calculate MON amount based on the current ETH price and MON/USD ratio
+			// Using the provided swap ratio which already includes the current price data
+			// The swap ratio gives us MON wei per ETH wei
+			swapRatioFloat := new(big.Float).SetInt(swapRatio)
+
+			// Get the MON/USD ratio (e.g., 0.1 * 10^18 for 0.1 USD per MON)
+			monUsdRatio := GetMonUsdRatio()
+
+			// Direct calculation using the swap ratio:
+			// For ETH: MON amount = ETH amount * swap ratio / 10^18
+			monAmountFloat := new(big.Float).Mul(depositAmountEth, swapRatioFloat)
+			monAmountFloat = new(big.Float).Quo(
+				monAmountFloat,
+				new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			)
+
+			// Convert to wei (18 decimals)
+			monWei := new(big.Float).Mul(
+				monAmountFloat,
+				new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			)
+
+			// Convert float to big.Int
+			resultInt, _ := monWei.Int(nil)
+			result = resultInt
+
+			// Calculate approximate USD value for logging
+			// USD value = ETH amount * (10^36 / swap ratio / monUsdRatio)
+			tenPow36 := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(36), nil))
+			approxEthUsdPrice := new(big.Float).Quo(tenPow36, new(big.Float).Mul(swapRatioFloat, new(big.Float).SetInt(monUsdRatio)))
+			approxEthUsdPrice = new(big.Float).Quo(approxEthUsdPrice, new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)))
+			approxUsdValue := new(big.Float).Mul(depositAmountEth, approxEthUsdPrice)
+
+			logger.Info("Recalculated small ETH deposit using swap ratio: %s ETH ≈ $%s USD ≈ %s MON (swap ratio: %s)",
+				depositAmountEth.Text('f', 18),
+				approxUsdValue.Text('f', 6),
+				monAmountFloat.Text('f', 6),
+				swapRatio.String())
 		}
 	} else {
 		// Handle stablecoins with decimal adjustment
