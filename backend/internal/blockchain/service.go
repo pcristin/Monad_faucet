@@ -353,27 +353,35 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 }
 
 func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType CurrencyType) *big.Int {
-	// Determine if this is a stablecoin based on the currency type
-	isStablecoin := currencyType == CurrencyUSDC || currencyType == CurrencyUSDT
-
-	result := new(big.Int).Mul(depositAmount, swapRatio)
-
-	if isStablecoin {
-		// For stablecoins (USDC/USDT), we need to adjust for the decimal difference (18-6=12)
-		// Multiply by 10^12 to convert from 6 decimals to 18 decimals
-		result = new(big.Int).Mul(result, new(big.Int).Exp(big.NewInt(10), big.NewInt(12), nil))
+	// Get decimal adjustment based on currency type
+	var decimalAdjustment int64
+	if currencyType == CurrencyUSDC || currencyType == CurrencyUSDT {
+		// Stablecoins have 6 decimals, need to adjust by 12 (18-6)
+		decimalAdjustment = 12
 		logger.Info("Stablecoin deposit detected: Adjusting calculation for decimal difference (6 to 18)")
+	} else {
+		// ETH and MON have 18 decimals, no adjustment needed
+		decimalAdjustment = 0
 	}
 
+	// Adjust deposit amount for decimal difference if needed
+	if decimalAdjustment > 0 {
+		depositAmount = new(big.Int).Mul(
+			depositAmount,
+			new(big.Int).Exp(big.NewInt(10), big.NewInt(decimalAdjustment), nil),
+		)
+	}
+
+	// Calculate MON amount: depositAmount * swapRatio / 10^18
+	result := new(big.Int).Mul(depositAmount, swapRatio)
 	result = new(big.Int).Div(result, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 
-	// Log the calculation details for debugging
+	// Log the calculation details
+	isStablecoin := currencyType == CurrencyUSDC || currencyType == CurrencyUSDT
 	logger.Info("MON amount calculation: depositAmount=%s, swapRatio=%s, isStablecoin=%v, result=%s",
 		depositAmount.String(), swapRatio.String(), isStablecoin, result.String())
 
 	// Ensure minimum amount (1 wei)
-	// If the calculation results in zero due to tiny input or rounding,
-	// return at least 1 wei to avoid the "Transfer amount must be greater than zero" error
 	if result.Sign() <= 0 {
 		logger.Warn("Calculated MON amount is zero, setting to minimum (1 wei)")
 		return big.NewInt(1) // Minimum of 1 wei
