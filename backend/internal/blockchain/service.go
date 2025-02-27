@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -383,105 +385,193 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 		return result
 	}
 
-	// For ETH deposits with improved precision calculation using big.Rat
-	// Get the MON/USD ratio directly from the blockchain
+	// For ETH deposits, we need to:
+	// 1. Get ETH/USD price directly from Chainlink (8 decimal precision)
+	// 2. Get MON/USD ratio (18 decimal precision)
+	// 3. Calculate: depositAmount * ethUsdPrice / monUsdRatio (with proper decimal adjustments)
+
+	// Get direct ETH/USD price from Chainlink (8 decimal precision)
+	ethUsdPrice := GetEthUsdPrice() // This should return the Chainlink price feed value
+
+	// Get MON/USD ratio with 18 decimal precision
 	monUsdRatio := GetMonUsdRatio()
+
+	// Convert to human-readable values for logging
+	depositEthFloat := new(big.Float).Quo(
+		new(big.Float).SetInt(depositAmount),
+		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+	)
+
+	ethUsdPriceFloat := new(big.Float).Quo(
+		new(big.Float).SetInt(ethUsdPrice),
+		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil)), // 8 decimals for Chainlink
+	)
+
 	monUsdRatioFloat := new(big.Float).Quo(
 		new(big.Float).SetInt(monUsdRatio),
 		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 	)
 
-	// Create big.Rat values for more precise calculation
+	// Calculate USD value: depositAmount * ethUsdPrice / 10^(18+8-18) = depositAmount * ethUsdPrice / 10^8
+	// Using big.Rat for precise calculation
 	depositRat := new(big.Rat).SetInt(depositAmount)
-	monUsdRatioRat := new(big.Rat).SetInt(monUsdRatio)
-	tenPow18Rat := new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
-
-	// Extract the ETH/USD price using the swap ratio
-	// The swap ratio relationship: swapRatio = (10^18 * 10^18) / (ethUsdPrice * monUsdRatio)
-	// This calculation uses the fact that the swap ratio encodes the price relationship
-	if swapRatio.Sign() <= 0 {
-		logger.Error("Invalid swap ratio: %v", swapRatio)
-		return big.NewInt(1) // Minimum wei to avoid failure
-	}
-
-	swapRatioRat := new(big.Rat).SetInt(swapRatio)
-	tenPow36Rat := new(big.Rat).Mul(tenPow18Rat, tenPow18Rat) // 10^36
-
-	// Extract ethUsdPrice: ethUsdPrice = (10^36) / (swapRatio * monUsdRatio)
-	ethUsdPriceRat := new(big.Rat).Mul(swapRatioRat, monUsdRatioRat)
-	ethUsdPriceRat = new(big.Rat).Quo(tenPow36Rat, ethUsdPriceRat)
-
-	// Calculate USD value of deposit: depositAmount * ethUsdPrice / 10^18
+	ethUsdPriceRat := new(big.Rat).SetInt(ethUsdPrice)
 	usdValueRat := new(big.Rat).Mul(depositRat, ethUsdPriceRat)
-	usdValueRat = new(big.Rat).Quo(usdValueRat, tenPow18Rat)
+	// Adjust for Chainlink decimals (8)
+	usdValueRat = new(big.Rat).Quo(usdValueRat, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil)))
+	// Further adjust for ETH decimals (18)
+	usdValueRat = new(big.Rat).Quo(usdValueRat, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)))
 
 	// Calculate MON amount: usdValue * 10^18 / monUsdRatio
-	monRat := new(big.Rat).Mul(usdValueRat, tenPow18Rat)
-	monRat = new(big.Rat).Quo(monRat, monUsdRatioRat)
+	monAmountRat := new(big.Rat).Mul(usdValueRat, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)))
+	monAmountRat = new(big.Rat).Quo(monAmountRat, new(big.Rat).SetInt(monUsdRatio))
 
-	// Convert values to float for logging
-	depositEthFloat := new(big.Float).Quo(
-		new(big.Float).SetInt(depositAmount),
-		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-	)
-	ethUsdPriceFloat, _ := ethUsdPriceRat.Float64()
+	// Convert to floats for logging
 	usdValueFloat, _ := usdValueRat.Float64()
-	monFloat, _ := new(big.Rat).Quo(monRat, tenPow18Rat).Float64()
-	monUsdRatioFloatValue, _ := monUsdRatioFloat.Float64()
+	monAmountFloat, _ := new(big.Rat).Quo(monAmountRat, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))).Float64()
 
-	// Round to integer MON wei amount
-	monWeiRat := new(big.Rat).Mul(monRat, new(big.Rat).SetInt64(1))
+	// Calculate final MON wei amount (rounding properly)
+	monWeiRat := new(big.Rat).Add(monAmountRat, new(big.Rat).SetFrac(big.NewInt(1), big.NewInt(2))) // Add 0.5 for rounding
 	monWeiInt := new(big.Int)
 	monWeiRat.Num().Div(monWeiRat.Num(), monWeiRat.Denom())
 	monWeiInt.Set(monWeiRat.Num())
 
-	// Log calculation details
+	// Log the calculation
+	ethUsdPriceValue, _ := ethUsdPriceFloat.Float64()
+	monUsdRatioValue, _ := monUsdRatioFloat.Float64()
+
 	logger.Info("ETH to MON calculation: %s ETH ≈ $%.6f USD (ETH price: $%.2f) / $%.6f per MON = %.6f MON (result: %s wei)",
 		depositEthFloat.Text('f', 18),
 		usdValueFloat,
-		ethUsdPriceFloat,
-		monUsdRatioFloatValue,
-		monFloat,
+		ethUsdPriceValue,
+		monUsdRatioValue,
+		monAmountFloat,
 		monWeiInt.String())
 
-	// Handle small deposits specially - this is the key fix
-	if (monWeiInt.Sign() <= 0 && depositAmount.Sign() > 0) || monFloat < 0.00001 {
-		// If USD value is reasonably significant (>= $0.05), give at least 0.5 MON
-		if usdValueFloat >= 0.05 {
-			minMon := new(big.Int).Div(
-				new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil),
-				big.NewInt(2), // 0.5 MON = 10^18 / 2
-			)
-			logger.Info("Small ETH deposit with USD value ≥ $0.05, setting to 0.5 MON (%s wei)", minMon.String())
-			return minMon
-		}
+	// Handle small deposits (when calculated MON is very low or zero)
+	if (monWeiInt.Sign() <= 0 && depositAmount.Sign() > 0) || monAmountFloat < 0.00001 {
+		// Base minimum MON amount (in wei) for any valid deposit
+		minMonWei := big.NewInt(1000000000000000) // 0.001 MON (10^15 wei)
 
-		// For smaller deposits, scale proportionally to USD value but ensure minimum
-		// Calculate a fair value based on USD amount (approx 10 MON per $1)
-		fairValue := new(big.Float).Mul(
+		// Scale MON amount based on USD value for better proportionality
+		// Target ratio: $0.01 USD → 0.1 MON (10x multiplier)
+		targetRatio := 10.0
+
+		scaledMon := new(big.Float).Mul(
 			new(big.Float).SetFloat64(usdValueFloat),
-			new(big.Float).SetFloat64(10e18), // 10 MON per $1 in wei
+			new(big.Float).SetFloat64(targetRatio),
 		)
 
-		fairValueInt, _ := fairValue.Int(nil)
+		// Convert to wei (multiply by 10^18)
+		scaledMonWei := new(big.Float).Mul(
+			scaledMon,
+			new(big.Float).SetFloat64(1e18),
+		)
 
-		// Ensure at least 1000 wei for very small amounts
-		if fairValueInt.Cmp(big.NewInt(1000)) < 0 {
-			fairValueInt = big.NewInt(1000)
+		// Convert to integer with proper rounding
+		scaledMonWeiInt, _ := scaledMonWei.Int(nil)
+
+		// Ensure we provide at least the minimum MON amount for any valid deposit
+		if scaledMonWeiInt.Cmp(minMonWei) < 0 {
+			scaledMonWeiInt = new(big.Int).Set(minMonWei)
 		}
 
-		monText := new(big.Float).Quo(
-			new(big.Float).SetInt(fairValueInt),
+		// For very small deposits (under $0.001), ensure they still get something if valid
+		if usdValueFloat < 0.001 && depositAmount.Sign() > 0 {
+			// Ensure minimum amount of MON wei for extremely small deposits
+			microMon := big.NewInt(10000000000000) // 0.00001 MON (10^13 wei)
+			if scaledMonWeiInt.Cmp(microMon) < 0 {
+				scaledMonWeiInt = microMon
+			}
+		}
+
+		humanReadableMon := new(big.Float).Quo(
+			new(big.Float).SetInt(scaledMonWeiInt),
 			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-		).Text('f', 18)
+		).Text('f', 6)
 
-		logger.Warn("Very small ETH deposit with USD value < $0.05, setting to fair value: %s MON (%s wei)",
-			monText, fairValueInt.String())
+		logger.Info("Small deposit with USD value $%.6f, allocating %s MON (%s wei)",
+			usdValueFloat, humanReadableMon, scaledMonWeiInt.String())
 
-		return fairValueInt
+		return scaledMonWeiInt
 	}
 
 	return monWeiInt
+}
+
+// GetEthUsdPrice returns the current ETH/USD price from Chainlink oracle
+// This price is in 8 decimal precision as per Chainlink standard
+func GetEthUsdPrice() *big.Int {
+	// Use the Chainlink ETH/USD price feed
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Parse the Chainlink price feed ABI
+	priceFeedAbi, err := abi.JSON(strings.NewReader(PriceFeedABI))
+	if err != nil {
+		logger.Error("Failed to parse price feed ABI: %v", err)
+		// Return fallback value
+		return new(big.Int).Mul(big.NewInt(3000), big.NewInt(100000000)) // ~$3000 with 8 decimals
+	}
+
+	// Get a client to use for the price feed
+	// We'll use the ArbitrumDepositor's client if available, or create a temporary one if needed
+	var client *ethclient.Client
+
+	// Try to get a client from a globally available service
+	clients := getAvailableClients()
+	if len(clients) > 0 {
+		client = clients[0]
+	} else {
+		// No clients available, log the error and return default
+		logger.Error("No Ethereum clients available for Chainlink price feed")
+		return new(big.Int).Mul(big.NewInt(3000), big.NewInt(100000000)) // ~$3000 with 8 decimals
+	}
+
+	// Create a price feed contract binding
+	priceFeed := bind.NewBoundContract(common.HexToAddress(ChainlinkEthUsdFeed), priceFeedAbi, client, client, client)
+
+	// Call the latestRoundData function
+	var out []interface{}
+	err = priceFeed.Call(&bind.CallOpts{Context: ctx}, &out, "latestRoundData")
+	if err != nil {
+		logger.Error("Failed to get ETH/USD price from Chainlink: %v", err)
+		// Return fallback value
+		return new(big.Int).Mul(big.NewInt(3000), big.NewInt(100000000)) // ~$3000 with 8 decimals
+	}
+
+	// Extract the price value (second return value, index 1)
+	ethUsdPrice := out[1].(*big.Int)
+
+	// Log the price for debugging
+	ethUsdPriceFloat := new(big.Float).Quo(
+		new(big.Float).SetInt(ethUsdPrice),
+		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil)),
+	)
+	ethUsdPriceValue, _ := ethUsdPriceFloat.Float64()
+	logger.Info("Current ETH/USD price from Chainlink: $%.2f", ethUsdPriceValue)
+
+	return ethUsdPrice
+}
+
+// getAvailableClients returns available ethclient.Client instances
+// This is a helper function to get any available client for price feed queries
+func getAvailableClients() []*ethclient.Client {
+	var clients []*ethclient.Client
+
+	// Get global variables or singletons that might have clients
+	// This is a placeholder - in a real implementation, you would access
+	// your application's client pool or global client instances
+
+	// For now, let's create a temporary client
+	rpcURL := "https://arb1.arbitrum.io/rpc" // Arbitrum One RPC URL
+	client, err := ethclient.Dial(rpcURL)
+	if err == nil && client != nil {
+		clients = append(clients, client)
+	}
+
+	return clients
 }
 
 // PauseDeposits pauses deposit functionality
