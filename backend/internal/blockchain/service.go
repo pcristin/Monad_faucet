@@ -204,7 +204,7 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 
 	if err := s.validateDepositWithAmount(state, event, monAmount); err != nil {
 		// Update transaction status to failed
-		if err2 := s.db.UpdateTransactionStatus(event.DepositId, database.StatusFailed, event.TxHash); err2 != nil {
+		if err2 := s.db.UpdateTransactionStatus(event.DepositId, database.StatusFailed, ""); err2 != nil {
 			logger.Error("Failed to update transaction status to failed: %v", err2)
 		}
 		return fmt.Errorf("deposit validation failed: %v", err)
@@ -212,7 +212,7 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 
 	if err := s.waitForConfirmations(ctx, event.BlockNumber, 10); err != nil {
 		// Update transaction status to failed
-		if err2 := s.db.UpdateTransactionStatus(event.DepositId, database.StatusFailed, event.TxHash); err2 != nil {
+		if err2 := s.db.UpdateTransactionStatus(event.DepositId, database.StatusFailed, ""); err2 != nil {
 			logger.Error("Failed to update transaction status to failed: %v", err2)
 		}
 		return fmt.Errorf("failed to wait for confirmations: %v", err)
@@ -222,7 +222,7 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 	monadTxHash, err := s.mintTokens(ctx, event.Depositor, monAmount, event.DepositId)
 	if err != nil {
 		// Update transaction status to failed
-		if err2 := s.db.UpdateTransactionStatus(event.DepositId, database.StatusFailed, event.TxHash); err2 != nil {
+		if err2 := s.db.UpdateTransactionStatus(event.DepositId, database.StatusFailed, ""); err2 != nil {
 			logger.Error("Failed to update transaction status to failed: %v", err2)
 		}
 		return fmt.Errorf("failed to mint tokens: %v", err)

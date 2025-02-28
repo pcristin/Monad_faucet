@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
+	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 	"golang.org/x/time/rate"
 )
@@ -479,9 +480,12 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 
 	// Prepare the response structure
 	response := struct {
-		Status  string            `json:"status"`
-		Message string            `json:"message"`
-		Txs     map[string]string `json:"txs,omitempty"`
+		Status         string            `json:"status"`
+		Message        string            `json:"message"`
+		Txs            map[string]string `json:"txs,omitempty"`
+		DepositID      string            `json:"deposit_id,omitempty"`
+		ArbitrumTxHash string            `json:"arbitrum_tx_hash,omitempty"`
+		MonadTxHash    string            `json:"monad_tx_hash,omitempty"`
 	}{
 		Txs: make(map[string]string),
 	}
@@ -491,10 +495,13 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 	if err == nil && tx != nil {
 		// We found a transaction in our database
 		response.Txs["Arbitrum"] = txHash
+		response.ArbitrumTxHash = txHash
+		response.DepositID = tx.DepositID.String()
 
 		// Add Monad transaction hash if available
 		if tx.MonadTxHash != "" {
 			response.Txs["Monad"] = tx.MonadTxHash
+			response.MonadTxHash = tx.MonadTxHash
 		}
 
 		// Return the appropriate status
@@ -505,6 +512,15 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		case "completed":
 			response.Status = "success"
 			response.Message = "MON tokens have been distributed to your wallet"
+			// If we have a success status but no Monad hash, try to find it
+			if response.MonadTxHash == "" {
+				// Try to find the Monad transaction through the bridge service
+				monadTxHash, _, err := h.bridgeService.FindMonadTransactionByDepositID(c.Request.Context(), tx.DepositID)
+				if err == nil && monadTxHash != "" {
+					response.MonadTxHash = monadTxHash
+					response.Txs["Monad"] = monadTxHash
+				}
+			}
 		case "failed":
 			response.Status = "error"
 			response.Message = "Transaction execution has reverted"
@@ -519,6 +535,72 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		// Return the response
 		c.JSON(http.StatusOK, response)
 		return
+	}
+
+	// Try to look up by Monad transaction hash as well
+	if strings.HasPrefix(txHash, "0x") {
+		// This might be a Monad transaction hash - try to find the transaction
+		rows, err := h.bridgeService.GetDB().Query(
+			"SELECT * FROM transaction_history WHERE monad_tx_hash = $1 LIMIT 1",
+			txHash,
+		)
+		if err == nil {
+			defer rows.Close()
+
+			if rows.Next() {
+				var tx database.Transaction
+				var depositIDStr, walletAddressStr, amountStr, monAmountStr string
+				var currencyInt int
+
+				err := rows.Scan(
+					&tx.ID,
+					&depositIDStr,
+					&walletAddressStr,
+					&amountStr,
+					&currencyInt,
+					&monAmountStr,
+					&tx.Status,
+					&tx.TxHash,
+					&tx.MonadTxHash,
+					&tx.CreatedAt,
+					&tx.UpdatedAt,
+				)
+
+				if err == nil {
+					// Convert the deposit ID string to a big.Int
+					_, ok := new(big.Int).SetString(depositIDStr, 10)
+					if ok {
+						response.DepositID = depositIDStr
+						response.ArbitrumTxHash = tx.TxHash
+						response.MonadTxHash = txHash
+						response.Txs["Arbitrum"] = tx.TxHash
+						response.Txs["Monad"] = txHash
+
+						// Set the appropriate status
+						switch tx.Status {
+						case "completed":
+							response.Status = "success"
+							response.Message = "MON tokens have been distributed to your wallet"
+						case "pending":
+							response.Status = "pending"
+							response.Message = "Transaction is pending"
+						case "failed":
+							response.Status = "error"
+							response.Message = "Transaction execution has reverted"
+						case "refunded":
+							response.Status = "refunded"
+							response.Message = "Your deposit was refunded"
+						default:
+							response.Status = "unknown"
+							response.Message = "Transaction status is unknown"
+						}
+
+						c.JSON(http.StatusOK, response)
+						return
+					}
+				}
+			}
+		}
 	}
 
 	// Transaction not found in our database
