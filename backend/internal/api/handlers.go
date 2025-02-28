@@ -15,7 +15,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
-	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 	"golang.org/x/time/rate"
 )
@@ -437,9 +436,9 @@ func validateTxHash(txHash string) error {
 func (h *Handler) GetTransactionStatus(c *gin.Context) {
 	// Decode the request
 	var req struct {
-		TxHash         string `json:"tx_hash"`
-		ArbitrumTxHash string `json:"arbitrum_tx_hash"`
-		DepositID      string `json:"deposit_id"` // Add support for deposit ID lookup
+		TxHash         string `json:"tx_hash,omitempty"`
+		ArbitrumTxHash string `json:"arbitrum_tx_hash,omitempty"`
+		DepositID      string `json:"deposit_id,omitempty"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -449,21 +448,16 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		return
 	}
 
-	// Use arbitrum_tx_hash if provided, otherwise fall back to tx_hash
-	txHash := req.ArbitrumTxHash
-	if txHash == "" {
-		txHash = req.TxHash
-	}
-
-	// Log the transaction status request
+	// Log the transaction status request with client IP and user agent for diagnostic purposes
+	clientIP := c.ClientIP()
+	userAgent := c.Request.UserAgent()
 	logger.Info("Transaction status request: tx_hash=%s, deposit_id=%s, client_ip=%s, user_agent=%s",
-		txHash, req.DepositID, c.ClientIP(), c.Request.UserAgent())
+		req.TxHash, req.DepositID, clientIP, userAgent)
 
-	// Check if we have a deposit ID instead of a tx hash
+	// Prioritize deposit ID if provided
 	if req.DepositID != "" {
-		// Convert deposit ID to big.Int
-		depositID, success := new(big.Int).SetString(req.DepositID, 10)
-		if !success {
+		depositID, ok := new(big.Int).SetString(req.DepositID, 10)
+		if !ok {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":   "Invalid deposit ID format",
 				"status":  "error",
@@ -472,10 +466,106 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 			return
 		}
 
-		// Try to get transaction by deposit ID
-		tx, err := h.bridgeService.GetTransactionByDepositID(c.Request.Context(), depositID)
+		status, txHash, err := h.bridgeService.FindMonadTransactionByDepositID(c.Request.Context(), depositID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "Failed to get transaction status",
+				"message": err.Error(),
+			})
+			return
+		}
+
+		response := struct {
+			Status            string            `json:"status"`
+			Message           string            `json:"message"`
+			Txs               map[string]string `json:"txs,omitempty"`
+			DepositID         string            `json:"deposit_id,omitempty"`
+			ArbitrumTxHash    string            `json:"arbitrum_tx_hash,omitempty"`
+			MonadTxHash       string            `json:"monad_tx_hash,omitempty"`
+			RefundTxHash      string            `json:"refund_tx_hash,omitempty"`
+			RefundDestination string            `json:"refund_destination,omitempty"`
+		}{
+			Txs: make(map[string]string),
+		}
+
+		response.DepositID = depositID.String()
+		response.ArbitrumTxHash = txHash
+		response.Txs["Arbitrum"] = txHash
+		response.Status = status
+		response.Message = "Transaction status retrieved successfully"
+
+		if status != "" {
+			response.Txs["Monad"] = txHash
+			response.MonadTxHash = txHash
+		}
+
+		c.JSON(http.StatusOK, response)
+		return
+	}
+
+	// Check if tx_hash or arbitrum_tx_hash is provided
+	txHash := req.TxHash
+	if txHash == "" {
+		txHash = req.ArbitrumTxHash
+	}
+
+	if txHash == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Must provide either tx_hash, arbitrum_tx_hash, or deposit_id",
+			"status":  "error",
+			"message": "Please provide a valid transaction hash or deposit ID",
+		})
+		return
+	}
+
+	// Validate the transaction hash format
+	if err := validateTxHash(txHash); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   fmt.Sprintf("Invalid transaction hash: %v", err),
+			"status":  "error",
+			"message": "Please provide a valid transaction hash",
+		})
+		return
+	}
+
+	// First, try to look up by Arbitrum hash to get the Monad transaction
+	if req.ArbitrumTxHash != "" {
+		status, monadTxHash, err := h.bridgeService.GetMonadTxHashFromArbitrumTxHash(c.Request.Context(), req.ArbitrumTxHash)
+		if err == nil && (status != "" || monadTxHash != "") {
+			response := struct {
+				Status            string            `json:"status"`
+				Message           string            `json:"message"`
+				Txs               map[string]string `json:"txs,omitempty"`
+				DepositID         string            `json:"deposit_id,omitempty"`
+				ArbitrumTxHash    string            `json:"arbitrum_tx_hash,omitempty"`
+				MonadTxHash       string            `json:"monad_tx_hash,omitempty"`
+				RefundTxHash      string            `json:"refund_tx_hash,omitempty"`
+				RefundDestination string            `json:"refund_destination,omitempty"`
+			}{
+				Txs: make(map[string]string),
+			}
+
+			response.DepositID = req.ArbitrumTxHash
+			response.ArbitrumTxHash = req.ArbitrumTxHash
+			response.Txs["Arbitrum"] = req.ArbitrumTxHash
+			response.Status = status
+			response.Message = "Transaction status retrieved successfully"
+
+			if status != "" {
+				response.Txs["Monad"] = monadTxHash
+				response.MonadTxHash = monadTxHash
+			}
+
+			c.JSON(http.StatusOK, response)
+			return
+		}
+		// If not found by Arbitrum hash, continue with regular flow
+	}
+
+	// If tx_hash is provided (and not already checked as arbitrum_tx_hash), try to look up by Monad hash
+	if req.TxHash != "" && req.TxHash != req.ArbitrumTxHash {
+		tx, err := h.bridgeService.GetDB().GetTransactionByMonadTxHash(req.TxHash)
 		if err == nil && tx != nil {
-			// We found a transaction by deposit ID
 			response := struct {
 				Status            string            `json:"status"`
 				Message           string            `json:"message"`
@@ -491,42 +581,59 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 
 			response.DepositID = tx.DepositID.String()
 			response.ArbitrumTxHash = tx.TxHash
-			if tx.TxHash != "" {
-				response.Txs["Arbitrum"] = tx.TxHash
-			}
-			if tx.MonadTxHash != "" {
-				response.Txs["Monad"] = tx.MonadTxHash
-				response.MonadTxHash = tx.MonadTxHash
-			}
+			response.MonadTxHash = tx.MonadTxHash
+			response.Txs["Arbitrum"] = tx.TxHash
+			response.Txs["Monad"] = tx.MonadTxHash
+			response.Status = tx.Status
+			response.Message = "Transaction status retrieved successfully"
 
-			// Process the status
-			processTransactionStatus(tx, &response, h.bridgeService, c)
 			c.JSON(http.StatusOK, response)
 			return
 		}
 	}
 
-	// If no deposit ID or deposit ID lookup failed, check for empty tx_hash
-	if txHash == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "Transaction hash cannot be empty",
-			"status":  "error",
-			"message": "Please provide a valid transaction hash or deposit ID",
-		})
-		return
+	// Try to find by Arbitrum hash one more time using the database directly
+	if req.TxHash != "" || req.ArbitrumTxHash != "" {
+		hashToCheck := req.TxHash
+		if req.ArbitrumTxHash != "" {
+			hashToCheck = req.ArbitrumTxHash
+		}
+
+		tx, err := h.bridgeService.GetDB().GetTransactionByArbitrumTxHash(hashToCheck)
+		if err == nil && tx != nil {
+			response := struct {
+				Status            string            `json:"status"`
+				Message           string            `json:"message"`
+				Txs               map[string]string `json:"txs,omitempty"`
+				DepositID         string            `json:"deposit_id,omitempty"`
+				ArbitrumTxHash    string            `json:"arbitrum_tx_hash,omitempty"`
+				MonadTxHash       string            `json:"monad_tx_hash,omitempty"`
+				RefundTxHash      string            `json:"refund_tx_hash,omitempty"`
+				RefundDestination string            `json:"refund_destination,omitempty"`
+			}{
+				Txs: make(map[string]string),
+			}
+
+			response.DepositID = tx.DepositID.String()
+			response.ArbitrumTxHash = tx.TxHash
+			response.Txs["Arbitrum"] = tx.TxHash
+			response.Status = tx.Status
+			response.Message = "Transaction status retrieved successfully"
+
+			if tx.MonadTxHash != "" {
+				response.Txs["Monad"] = tx.MonadTxHash
+				response.MonadTxHash = tx.MonadTxHash
+			}
+
+			c.JSON(http.StatusOK, response)
+			return
+		}
 	}
 
-	// Validate transaction hash format
-	if err := validateTxHash(txHash); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   fmt.Sprintf("Invalid transaction hash: %v", err),
-			"status":  "error",
-			"message": "Please provide a valid transaction hash",
-		})
-		return
-	}
+	// Check if it's a refund transaction
+	// This would need to be implemented if refunds are tracked separately
 
-	// Prepare the response structure
+	// If we got here, the transaction is not found
 	response := struct {
 		Status            string            `json:"status"`
 		Message           string            `json:"message"`
@@ -540,117 +647,13 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		Txs: make(map[string]string),
 	}
 
-	// First try to find by Arbitrum tx hash
-	tx, err := h.bridgeService.GetDB().GetTransactionByArbitrumTxHash(txHash)
-	if err == nil && tx != nil {
-		// We found a transaction in our database by Arbitrum hash
-		response.Txs["Arbitrum"] = txHash
-		response.ArbitrumTxHash = txHash
-		response.DepositID = tx.DepositID.String()
-
-		// Add Monad transaction hash if available
-		if tx.MonadTxHash != "" {
-			response.Txs["Monad"] = tx.MonadTxHash
-			response.MonadTxHash = tx.MonadTxHash
-		}
-
-		// Return the appropriate status
-		processTransactionStatus(tx, &response, h.bridgeService, c)
-		c.JSON(http.StatusOK, response)
-		return
-	}
-
-	// Try to look up by Monad transaction hash
-	if strings.HasPrefix(txHash, "0x") {
-		tx, err := h.bridgeService.GetDB().GetTransactionByMonadTxHash(txHash)
-		if err == nil && tx != nil {
-			response.DepositID = tx.DepositID.String()
-			response.ArbitrumTxHash = tx.TxHash
-			response.MonadTxHash = txHash
-			response.Txs["Arbitrum"] = tx.TxHash
-			response.Txs["Monad"] = txHash
-
-			// Process the status
-			processTransactionStatus(tx, &response, h.bridgeService, c)
-			c.JSON(http.StatusOK, response)
-			return
-		}
-	}
-
-	// If we have an Arbitrum hash but no transaction was found directly,
-	// try to extract deposit ID from this transaction on the Arbitrum chain
-	if strings.HasPrefix(txHash, "0x") {
-		// Try to get deposit ID from the Arbitrum transaction
-		depositID, err := h.bridgeService.GetDepositIDFromTxHash(c.Request.Context(), txHash)
-		if err == nil && depositID != nil {
-			// Found a deposit ID, now look up the transaction
-			tx, err := h.bridgeService.GetTransactionByDepositID(c.Request.Context(), depositID)
-			if err == nil && tx != nil {
-				// We found a transaction by deposit ID
-				response.DepositID = depositID.String()
-				response.ArbitrumTxHash = txHash
-				if tx.MonadTxHash != "" {
-					response.Txs["Monad"] = tx.MonadTxHash
-					response.MonadTxHash = tx.MonadTxHash
-				}
-				response.Txs["Arbitrum"] = txHash
-
-				// Process the status
-				processTransactionStatus(tx, &response, h.bridgeService, c)
-				c.JSON(http.StatusOK, response)
-				return
-			}
-		}
-	}
-
-	// Check if this is a refund transaction
-	// Note: This would require additional code to track refund transactions
-
-	// Transaction not found in our database
 	response.Status = "not_found"
 	response.Message = "Transaction not found in our system"
+	response.DepositID = req.ArbitrumTxHash
+	response.ArbitrumTxHash = req.ArbitrumTxHash
+	response.Txs["Arbitrum"] = req.ArbitrumTxHash
+
 	c.JSON(http.StatusOK, response)
-}
-
-// Helper function to process transaction status
-func processTransactionStatus(tx *database.Transaction, response *struct {
-	Status            string            `json:"status"`
-	Message           string            `json:"message"`
-	Txs               map[string]string `json:"txs,omitempty"`
-	DepositID         string            `json:"deposit_id,omitempty"`
-	ArbitrumTxHash    string            `json:"arbitrum_tx_hash,omitempty"`
-	MonadTxHash       string            `json:"monad_tx_hash,omitempty"`
-	RefundTxHash      string            `json:"refund_tx_hash,omitempty"`
-	RefundDestination string            `json:"refund_destination,omitempty"`
-}, bridgeService *blockchain.BridgeService, c *gin.Context) {
-
-	switch tx.Status {
-	case database.StatusPending:
-		response.Status = "pending"
-		response.Message = "Transaction is being processed"
-	case database.StatusCompleted:
-		response.Status = "success"
-		response.Message = "MON tokens have been distributed to your wallet"
-		// If we have a success status but no Monad hash, try to find it
-		if response.MonadTxHash == "" {
-			// Try to find the Monad transaction through the bridge service
-			monadTxHash, _, err := bridgeService.FindMonadTransactionByDepositID(c.Request.Context(), tx.DepositID)
-			if err == nil && monadTxHash != "" {
-				response.MonadTxHash = monadTxHash
-				response.Txs["Monad"] = monadTxHash
-			}
-		}
-	case database.StatusFailed:
-		response.Status = "error"
-		response.Message = "Transaction execution has failed"
-	case database.StatusRefunded:
-		response.Status = "refunded"
-		response.Message = "Your deposit was refunded to your original wallet"
-		// Add refund transaction details if available (would need to be tracked separately)
-	default:
-		response.Status = "unknown"
-		response.Message = "Transaction status is unknown"
-	}
 }
 
 // HealthCheck handles health check requests

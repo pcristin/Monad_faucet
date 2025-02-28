@@ -1361,41 +1361,91 @@ func (s *BridgeService) GetArbitrumContractAddress() common.Address {
 	return s.arbDepositor.address
 }
 
-// FindMonadTransactionByDepositID looks for a transaction on the Monad blockchain by deposit ID
-// Returns the transaction hash, status, and any error that occurred
+// FindMonadTransactionByDepositID attempts to find a Monad transaction hash for a given deposit ID
 func (s *BridgeService) FindMonadTransactionByDepositID(ctx context.Context, depositID *big.Int) (string, string, error) {
-	logger.Info("Looking for Monad transaction with deposit ID: %s", depositID.String())
-
-	// Try looking in the database as a first option
+	// First check the database for a transaction with this deposit ID
 	tx, err := s.db.GetTransactionByDepositID(depositID)
-	if err == nil && tx != nil {
-		logger.Info("Found transaction in database: deposit_id=%s, status=%s, monad_tx_hash=%s",
-			depositID.String(), tx.Status, tx.MonadTxHash)
-
-		// If status is completed, return the hash and success status
-		if tx.Status == database.StatusCompleted {
-			logger.Info("Transaction marked as completed in database: %s, returning hash: %s",
-				depositID.String(), tx.MonadTxHash)
-			return tx.MonadTxHash, "success", nil
-		}
-
-		// For other statuses with a hash, return the hash and status
-		if tx.MonadTxHash != "" {
-			return tx.MonadTxHash, string(tx.Status), nil
-		}
-
-		// Return the status without a hash for other cases
-		return "", string(tx.Status), nil
+	if err != nil {
+		logger.Error("Error finding transaction by deposit ID: %v", err)
+		return "", "", err
 	}
 
-	// Not found in database
-	logger.Info("No Monad transaction found for deposit ID: %s", depositID.String())
-	return "", "", nil
+	// If the transaction exists and has a Monad tx hash, return it
+	if tx.MonadTxHash != "" {
+		// Return both the status and the Monad transaction hash
+		logger.Info("Found existing Monad transaction hash %s for deposit ID %s with status %s",
+			tx.MonadTxHash, depositID.String(), tx.Status)
+		return tx.Status, tx.MonadTxHash, nil
+	}
+
+	// If there's no Monad tx hash but there is a status, at least return the status
+	if tx.Status != "" {
+		logger.Info("Found transaction for deposit ID %s with status %s but no Monad tx hash",
+			depositID.String(), tx.Status)
+		return tx.Status, "", nil
+	}
+
+	// If we get here, the transaction exists but doesn't have a Monad tx hash or status
+	logger.Warn("Transaction for deposit ID %s exists but has no Monad tx hash or status", depositID.String())
+	return "", "", fmt.Errorf("transaction found but has no Monad tx hash or status")
 }
 
-func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) error {
-	logger.Info("Delegating refund of deposit ID %s to ArbitrumDepositor", depositId.String())
-	return s.arbDepositor.RefundDeposit(ctx, depositId)
+// GetDepositIDFromArbitrumTxHash attempts to find a deposit ID from an Arbitrum tx hash
+func (s *BridgeService) GetDepositIDFromArbitrumTxHash(ctx context.Context, txHash string) (*big.Int, error) {
+	// First try to get the transaction by Arbitrum tx hash
+	tx, err := s.db.GetTransactionByArbitrumTxHash(txHash)
+	if err == nil && tx != nil {
+		logger.Info("Found deposit ID %s for Arbitrum tx hash %s", tx.DepositID.String(), txHash)
+		return tx.DepositID, nil
+	}
+
+	// If we couldn't find it in the transaction table, try to get the deposit ID from the contract
+	depositID, err := s.GetDepositIDFromTxHash(ctx, txHash)
+	if err != nil {
+		logger.Error("Error getting deposit ID from tx hash: %v", err)
+		return nil, err
+	}
+
+	// If we found a deposit ID, save the mapping for future lookups
+	if depositID != nil && depositID.Cmp(big.NewInt(0)) > 0 {
+		logger.Info("Found deposit ID %s from contract for Arbitrum tx hash %s", depositID.String(), txHash)
+
+		// Try to get the transaction first to see if it exists
+		existingTx, _ := s.db.GetTransactionByDepositID(depositID)
+		if existingTx != nil {
+			// Update the tx hash if needed
+			if existingTx.TxHash == "" || existingTx.TxHash != txHash {
+				if err := s.db.UpdateTransactionHash(depositID, txHash); err != nil {
+					logger.Error("Failed to update transaction hash: %v", err)
+				} else {
+					logger.Info("Updated Arbitrum tx hash for deposit ID %s", depositID.String())
+				}
+			}
+		}
+
+		return depositID, nil
+	}
+
+	return nil, fmt.Errorf("could not find deposit ID for tx hash")
+}
+
+// GetMonadTxHashFromArbitrumTxHash attempts to find a Monad tx hash from an Arbitrum tx hash
+func (s *BridgeService) GetMonadTxHashFromArbitrumTxHash(ctx context.Context, txHash string) (string, string, error) {
+	// First try to get the deposit ID from the Arbitrum tx hash
+	depositID, err := s.GetDepositIDFromArbitrumTxHash(ctx, txHash)
+	if err != nil {
+		logger.Error("Error getting deposit ID from Arbitrum tx hash: %v", err)
+		return "", "", err
+	}
+
+	// Then try to get the Monad tx hash from the deposit ID
+	status, monadTxHash, err := s.FindMonadTransactionByDepositID(ctx, depositID)
+	if err != nil {
+		logger.Error("Error finding Monad tx hash by deposit ID: %v", err)
+		return "", "", err
+	}
+
+	return status, monadTxHash, nil
 }
 
 // formatMonAmount formats a MON amount in wei to a human-readable string
@@ -1543,4 +1593,10 @@ func (s *BridgeService) recoverStuckTransactionsPeriodically() {
 			cancel()
 		}
 	}
+}
+
+// refundDeposit delegates the refund operation to the Arbitrum depositor
+func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) error {
+	logger.Info("Delegating refund of deposit ID %s to ArbitrumDepositor", depositId.String())
+	return s.arbDepositor.RefundDeposit(ctx, depositId)
 }
