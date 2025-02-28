@@ -1,10 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"os"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -410,23 +413,23 @@ type TransactionResponse struct {
 	Txs     map[string]string `json:"txs"`
 }
 
-// validateTxHash validates the format of a transaction hash
-func validateTxHash(txHash string) error {
-	// Check if the hash starts with 0x
-	if len(txHash) < 2 || txHash[:2] != "0x" {
+// validateTxHash checks if the provided transaction hash has a valid format
+func validateTxHash(hash string) error {
+	if !strings.HasPrefix(hash, "0x") {
 		return fmt.Errorf("transaction hash must start with 0x")
 	}
 
-	// Check if the hash has the correct length (0x + 64 hex chars)
-	if len(txHash) != 66 {
-		return fmt.Errorf("transaction hash must be 66 characters long (including 0x prefix)")
+	// Strip 0x prefix
+	hashWithoutPrefix := strings.TrimPrefix(hash, "0x")
+
+	// Check if it's a valid hex string
+	matched, err := regexp.MatchString("^[0-9a-fA-F]{64}$", hashWithoutPrefix)
+	if err != nil {
+		return fmt.Errorf("error validating transaction hash: %v", err)
 	}
 
-	// Check if the hash contains only hex characters
-	for _, c := range txHash[2:] {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return fmt.Errorf("transaction hash must contain only hexadecimal characters")
-		}
+	if !matched {
+		return fmt.Errorf("transaction hash must be 0x followed by 64 hex characters")
 	}
 
 	return nil
@@ -434,6 +437,13 @@ func validateTxHash(txHash string) error {
 
 // GetTransactionStatus retrieves the status of a transaction
 func (h *Handler) GetTransactionStatus(c *gin.Context) {
+	// First, log the raw request body for debugging
+	bodyBytes, _ := io.ReadAll(c.Request.Body)
+	// Restore the body for future use
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+	logger.Info("Raw transaction status request body: %s", string(bodyBytes))
+
 	// Decode the request
 	var req struct {
 		TxHash         string `json:"tx_hash,omitempty"`
@@ -442,6 +452,7 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
+		logger.Error("Failed to decode transaction status request: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "Invalid request format",
 		})
@@ -451,13 +462,22 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 	// Log the transaction status request with client IP and user agent for diagnostic purposes
 	clientIP := c.ClientIP()
 	userAgent := c.Request.UserAgent()
-	logger.Info("Transaction status request: tx_hash=%s, deposit_id=%s, client_ip=%s, user_agent=%s",
-		req.TxHash, req.DepositID, clientIP, userAgent)
+	logger.Info("Transaction status request: tx_hash=%s, arbitrum_tx_hash=%s, deposit_id=%s, client_ip=%s, user_agent=%s",
+		req.TxHash, req.ArbitrumTxHash, req.DepositID, clientIP, userAgent)
+
+	// Check if tx_hash or arbitrum_tx_hash is provided
+	txHash := req.TxHash
+	arbitrumTxHash := req.ArbitrumTxHash
+
+	// Log the actual values we're working with
+	logger.Info("Processing transaction lookup with tx_hash=%s, arbitrum_tx_hash=%s, deposit_id=%s",
+		txHash, arbitrumTxHash, req.DepositID)
 
 	// Prioritize deposit ID if provided
 	if req.DepositID != "" {
 		depositID, ok := new(big.Int).SetString(req.DepositID, 10)
 		if !ok {
+			logger.Error("Invalid deposit ID format: %s", req.DepositID)
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":   "Invalid deposit ID format",
 				"status":  "error",
@@ -466,8 +486,10 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 			return
 		}
 
-		status, txHash, err := h.bridgeService.FindMonadTransactionByDepositID(c.Request.Context(), depositID)
+		logger.Info("Looking up transaction by deposit ID: %s", depositID.String())
+		status, monadTxHash, err := h.bridgeService.FindMonadTransactionByDepositID(c.Request.Context(), depositID)
 		if err != nil {
+			logger.Error("Error fetching transaction by deposit ID %s: %v", depositID.String(), err)
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "Failed to get transaction status",
 				"message": err.Error(),
@@ -489,27 +511,27 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		}
 
 		response.DepositID = depositID.String()
-		response.ArbitrumTxHash = txHash
-		response.Txs["Arbitrum"] = txHash
 		response.Status = status
 		response.Message = "Transaction status retrieved successfully"
 
-		if status != "" {
-			response.Txs["Monad"] = txHash
-			response.MonadTxHash = txHash
+		if monadTxHash != "" {
+			response.Txs["Monad"] = monadTxHash
+			response.MonadTxHash = monadTxHash
+		}
+
+		// Try to get the Arbitrum tx hash if we don't have it
+		tx, _ := h.bridgeService.GetDB().GetTransactionByDepositID(depositID)
+		if tx != nil && tx.TxHash != "" {
+			response.ArbitrumTxHash = tx.TxHash
+			response.Txs["Arbitrum"] = tx.TxHash
 		}
 
 		c.JSON(http.StatusOK, response)
 		return
 	}
 
-	// Check if tx_hash or arbitrum_tx_hash is provided
-	txHash := req.TxHash
-	if txHash == "" {
-		txHash = req.ArbitrumTxHash
-	}
-
-	if txHash == "" {
+	if txHash == "" && arbitrumTxHash == "" {
+		logger.Error("Missing required parameters in transaction status request")
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "Must provide either tx_hash, arbitrum_tx_hash, or deposit_id",
 			"status":  "error",
@@ -518,20 +540,25 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		return
 	}
 
-	// Validate the transaction hash format
-	if err := validateTxHash(txHash); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   fmt.Sprintf("Invalid transaction hash: %v", err),
-			"status":  "error",
-			"message": "Please provide a valid transaction hash",
-		})
-		return
-	}
+	// If arbitrumTxHash is provided, explicitly validate it
+	if arbitrumTxHash != "" {
+		if err := validateTxHash(arbitrumTxHash); err != nil {
+			logger.Error("Invalid arbitrum_tx_hash format: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   fmt.Sprintf("Invalid arbitrum_tx_hash: %v", err),
+				"status":  "error",
+				"message": "Please provide a valid Arbitrum transaction hash",
+			})
+			return
+		}
 
-	// First, try to look up by Arbitrum hash to get the Monad transaction
-	if req.ArbitrumTxHash != "" {
-		status, monadTxHash, err := h.bridgeService.GetMonadTxHashFromArbitrumTxHash(c.Request.Context(), req.ArbitrumTxHash)
-		if err == nil && (status != "" || monadTxHash != "") {
+		// Try to find by Arbitrum hash
+		logger.Info("Looking up transaction by Arbitrum hash: %s", arbitrumTxHash)
+		status, monadTxHash, err := h.bridgeService.GetMonadTxHashFromArbitrumTxHash(c.Request.Context(), arbitrumTxHash)
+		if err != nil {
+			logger.Error("Error fetching Monad transaction for Arbitrum hash %s: %v", arbitrumTxHash, err)
+		} else if status != "" || monadTxHash != "" {
+			logger.Info("Found transaction by Arbitrum hash: status=%s, monad_tx_hash=%s", status, monadTxHash)
 			response := struct {
 				Status            string            `json:"status"`
 				Message           string            `json:"message"`
@@ -545,13 +572,12 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 				Txs: make(map[string]string),
 			}
 
-			response.DepositID = req.ArbitrumTxHash
-			response.ArbitrumTxHash = req.ArbitrumTxHash
-			response.Txs["Arbitrum"] = req.ArbitrumTxHash
+			response.ArbitrumTxHash = arbitrumTxHash
+			response.Txs["Arbitrum"] = arbitrumTxHash
 			response.Status = status
 			response.Message = "Transaction status retrieved successfully"
 
-			if status != "" {
+			if monadTxHash != "" {
 				response.Txs["Monad"] = monadTxHash
 				response.MonadTxHash = monadTxHash
 			}
@@ -559,13 +585,29 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 			c.JSON(http.StatusOK, response)
 			return
 		}
-		// If not found by Arbitrum hash, continue with regular flow
 	}
 
-	// If tx_hash is provided (and not already checked as arbitrum_tx_hash), try to look up by Monad hash
-	if req.TxHash != "" && req.TxHash != req.ArbitrumTxHash {
-		tx, err := h.bridgeService.GetDB().GetTransactionByMonadTxHash(req.TxHash)
-		if err == nil && tx != nil {
+	// If tx_hash is provided and validated, check it as Monad hash
+	if txHash != "" {
+		if err := validateTxHash(txHash); err != nil {
+			logger.Error("Invalid tx_hash format: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   fmt.Sprintf("Invalid tx_hash: %v", err),
+				"status":  "error",
+				"message": "Please provide a valid transaction hash",
+			})
+			return
+		}
+
+		// Try to look up by Monad hash
+		logger.Info("Looking up transaction by Monad hash: %s", txHash)
+		tx, err := h.bridgeService.GetDB().GetTransactionByMonadTxHash(txHash)
+		if err != nil {
+			logger.Error("Error fetching transaction by Monad hash %s: %v", txHash, err)
+		} else if tx != nil {
+			logger.Info("Found transaction by Monad hash: deposit_id=%s, status=%s",
+				tx.DepositID.String(), tx.Status)
+
 			response := struct {
 				Status            string            `json:"status"`
 				Message           string            `json:"message"`
@@ -592,15 +634,21 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		}
 	}
 
-	// Try to find by Arbitrum hash one more time using the database directly
-	if req.TxHash != "" || req.ArbitrumTxHash != "" {
-		hashToCheck := req.TxHash
-		if req.ArbitrumTxHash != "" {
-			hashToCheck = req.ArbitrumTxHash
-		}
+	// One final attempt - try direct DB lookup of Arbitrum hash
+	logger.Info("Attempting direct DB lookup for transaction")
+	hashToCheck := txHash
+	if arbitrumTxHash != "" {
+		hashToCheck = arbitrumTxHash
+	}
 
+	if hashToCheck != "" {
 		tx, err := h.bridgeService.GetDB().GetTransactionByArbitrumTxHash(hashToCheck)
-		if err == nil && tx != nil {
+		if err != nil {
+			logger.Error("Error in direct DB lookup for hash %s: %v", hashToCheck, err)
+		} else if tx != nil {
+			logger.Info("Found transaction via direct DB lookup: deposit_id=%s, status=%s",
+				tx.DepositID.String(), tx.Status)
+
 			response := struct {
 				Status            string            `json:"status"`
 				Message           string            `json:"message"`
@@ -634,6 +682,7 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 	// This would need to be implemented if refunds are tracked separately
 
 	// If we got here, the transaction is not found
+	logger.Info("Transaction not found after all lookup attempts")
 	response := struct {
 		Status            string            `json:"status"`
 		Message           string            `json:"message"`
@@ -649,9 +698,14 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 
 	response.Status = "not_found"
 	response.Message = "Transaction not found in our system"
-	response.DepositID = req.ArbitrumTxHash
-	response.ArbitrumTxHash = req.ArbitrumTxHash
-	response.Txs["Arbitrum"] = req.ArbitrumTxHash
+
+	if arbitrumTxHash != "" {
+		response.ArbitrumTxHash = arbitrumTxHash
+		response.Txs["Arbitrum"] = arbitrumTxHash
+	} else if txHash != "" {
+		response.MonadTxHash = txHash
+		response.Txs["Monad"] = txHash
+	}
 
 	c.JSON(http.StatusOK, response)
 }
