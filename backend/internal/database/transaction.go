@@ -178,28 +178,8 @@ func (db *DB) GetTransactionByArbitrumTxHash(txHash string) (*Transaction, error
 
 			if err != nil {
 				if err == sql.ErrNoRows {
-					// Try to find it in the transaction_metadata table if it exists
-					var depositIDStr string
-					err = db.QueryRow(
-						`SELECT deposit_id FROM transaction_metadata 
-						WHERE key = 'arbitrum_tx_hash' AND value = $1`,
-						txHash,
-					).Scan(&depositIDStr)
-
-					if err != nil {
-						if err == sql.ErrNoRows {
-							return nil, fmt.Errorf("transaction not found for Arbitrum tx hash: %s", txHash)
-						}
-						return nil, fmt.Errorf("failed to query transaction metadata: %w", err)
-					}
-
-					// Now get the transaction by deposit ID
-					depositID, ok := new(big.Int).SetString(depositIDStr, 10)
-					if !ok {
-						return nil, fmt.Errorf("invalid deposit ID format in metadata: %s", depositIDStr)
-					}
-
-					return db.GetTransactionByDepositID(depositID)
+					// No transaction found with this hash in any form
+					return nil, fmt.Errorf("transaction not found for Arbitrum tx hash: %s", txHash)
 				}
 				return nil, fmt.Errorf("failed to get transaction with flexible query: %w", err)
 			}
