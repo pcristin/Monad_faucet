@@ -320,9 +320,19 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 				)
 			}
 
-			exchangeRates[blockchain.CurrencyTypeToString(currency)] = currencyPerMon.Text('f', 6)
+			// For ETH, use 18 decimals of precision; for other currencies, use 6
+			decimals := 6
+			if currency == blockchain.CurrencyETH {
+				decimals = 18
+			}
+			exchangeRates[blockchain.CurrencyTypeToString(currency)] = currencyPerMon.Text('f', decimals)
 		} else {
-			exchangeRates[blockchain.CurrencyTypeToString(currency)] = "0.000000"
+			// For ETH, use 18 decimals of precision; for other currencies, use 6
+			if currency == blockchain.CurrencyETH {
+				exchangeRates[blockchain.CurrencyTypeToString(currency)] = "0.000000000000000000"
+			} else {
+				exchangeRates[blockchain.CurrencyTypeToString(currency)] = "0.000000"
+			}
 		}
 	}
 
