@@ -315,6 +315,25 @@ func (s *BridgeService) waitForConfirmations(ctx context.Context, blockNumber ui
 }
 
 func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address, amount *big.Int, depositId *big.Int) (string, error) {
+	// First check if we already have a successful or pending transaction for this deposit ID
+	existingTx, err := s.db.GetTransactionByDepositID(depositId)
+	if err == nil && existingTx != nil {
+		// If there's already a completed transaction for this deposit ID, return the existing hash
+		if existingTx.Status == database.StatusCompleted && existingTx.TxHash != "" {
+			logger.Warn("Skipping duplicate mint attempt for deposit ID %s - already processed with tx %s",
+				depositId.String(), existingTx.TxHash)
+			return existingTx.TxHash, nil
+		}
+
+		// If there's already a transaction in progress with a Monad tx hash, reject this duplicate attempt
+		if existingTx.Status == database.StatusPending && existingTx.TxHash != "" &&
+			!strings.HasPrefix(existingTx.TxHash, "0x408") { // Check if it's a Monad tx (not the Arbitrum tx)
+			logger.Warn("Rejecting duplicate mint attempt for deposit ID %s - already in progress",
+				depositId.String())
+			return "", fmt.Errorf("duplicate mint attempt for deposit ID %s", depositId.String())
+		}
+	}
+
 	transfer := []struct {
 		Recipient common.Address `abi:"recipient"`
 		Amount    *big.Int       `abi:"amount"`
