@@ -509,14 +509,6 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 	ethUsdPriceValue, _ := ethUsdPriceFloat.Float64()
 	monUsdRatioValue, _ := monUsdRatioFloat.Float64()
 
-	logger.Info("ETH to MON calculation: %s ETH ≈ $%.6f USD (ETH price: $%.2f) / $%.6f per MON = %.6f MON (result: %s wei)",
-		depositEthFloat.Text('f', 18),
-		usdValueFloat,
-		ethUsdPriceValue,
-		monUsdRatioValue,
-		monAmountFloat,
-		monWeiInt.String())
-
 	// Handle small deposits (when calculated MON is very low or zero)
 	if (monWeiInt.Sign() <= 0 && depositAmount.Sign() > 0) || monAmountFloat < 0.00001 {
 		// Base minimum MON amount (in wei) for any valid deposit
@@ -565,11 +557,24 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 		).Text('f', 6)
 
-		logger.Info("Small ETH deposit with USD value $%.6f (MON/USD ratio $%.6f), allocating %s MON (%s wei)",
-			usdValueFloat, monRatioValue, humanReadableMon, expectedMonWeiInt.String())
+		logger.Info("ETH to MON calculation: %s ETH ≈ $%.6f USD (ETH price: $%.2f) / $%.6f per MON = %s MON (%s wei)",
+			depositEthFloat.Text('f', 18),
+			usdValueFloat,
+			ethUsdPriceValue,
+			monRatioValue,
+			humanReadableMon,
+			expectedMonWeiInt.String())
 
 		return expectedMonWeiInt
 	}
+
+	logger.Info("ETH to MON calculation: %s ETH ≈ $%.6f USD (ETH price: $%.2f) / $%.6f per MON = %.6f MON (%s wei)",
+		depositEthFloat.Text('f', 18),
+		usdValueFloat,
+		ethUsdPriceValue,
+		monUsdRatioValue,
+		monAmountFloat,
+		monWeiInt.String())
 
 	return monWeiInt
 }
