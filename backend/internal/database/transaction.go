@@ -534,3 +534,115 @@ func (db *DB) GetTransactionByMonadTxHash(monadTxHash string) (*Transaction, err
 
 	return &transaction, nil
 }
+
+// AcquireProcessingLock tries to acquire a distributed lock for a deposit ID
+// Returns true if the lock was acquired, false if it already exists
+func (db *DB) AcquireProcessingLock(depositID *big.Int, instanceID string, duration time.Duration) (bool, error) {
+	// First, clean up any expired locks
+	_, err := db.Exec(`DELETE FROM processing_locks WHERE expires_at < NOW()`)
+	if err != nil {
+		return false, fmt.Errorf("failed to clean expired locks: %w", err)
+	}
+
+	// Try to insert a new lock record
+	result, err := db.Exec(`
+		INSERT INTO processing_locks (deposit_id, instance_id, expires_at)
+		VALUES ($1, $2, NOW() + $3::INTERVAL)
+		ON CONFLICT (deposit_id) DO NOTHING
+	`, depositID.String(), instanceID, fmt.Sprintf("%d seconds", int(duration.Seconds())))
+
+	if err != nil {
+		return false, fmt.Errorf("failed to acquire processing lock: %w", err)
+	}
+
+	// Check if we inserted a new row
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to get affected rows: %w", err)
+	}
+
+	return rowsAffected > 0, nil
+}
+
+// ReleaseProcessingLock releases a lock for a deposit ID held by a specific instance
+func (db *DB) ReleaseProcessingLock(depositID *big.Int, instanceID string) error {
+	_, err := db.Exec(`
+		DELETE FROM processing_locks
+		WHERE deposit_id = $1 AND instance_id = $2
+	`, depositID.String(), instanceID)
+
+	if err != nil {
+		return fmt.Errorf("failed to release processing lock: %w", err)
+	}
+
+	return nil
+}
+
+// RefreshProcessingLock extends the expiration time for an existing lock
+func (db *DB) RefreshProcessingLock(depositID *big.Int, instanceID string, duration time.Duration) (bool, error) {
+	result, err := db.Exec(`
+		UPDATE processing_locks
+		SET expires_at = NOW() + $3::INTERVAL
+		WHERE deposit_id = $1 AND instance_id = $2
+	`, depositID.String(), instanceID, fmt.Sprintf("%d seconds", int(duration.Seconds())))
+
+	if err != nil {
+		return false, fmt.Errorf("failed to refresh processing lock: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to get affected rows: %w", err)
+	}
+
+	return rowsAffected > 0, nil
+}
+
+// UpdateTransactionStatusWithTx updates the status of a transaction within an existing database transaction
+func (db *DB) UpdateTransactionStatusWithTx(tx *sql.Tx, depositID *big.Int, status, txHash string) error {
+	_, err := tx.Exec(
+		`UPDATE transaction_history 
+		SET status = $1, monad_tx_hash = $2, updated_at = CURRENT_TIMESTAMP 
+		WHERE deposit_id = $3`,
+		status,
+		txHash,
+		depositID.String(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update transaction status in transaction: %w", err)
+	}
+	return nil
+}
+
+// GetLockedDeposits returns a list of deposit IDs that are currently locked
+func (db *DB) GetLockedDeposits() ([]*big.Int, error) {
+	rows, err := db.Query(`
+		SELECT deposit_id FROM processing_locks
+		WHERE expires_at > NOW()
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query locked deposits: %w", err)
+	}
+	defer rows.Close()
+
+	var deposits []*big.Int
+	for rows.Next() {
+		var depositIDStr string
+		if err := rows.Scan(&depositIDStr); err != nil {
+			return nil, fmt.Errorf("failed to scan deposit ID: %w", err)
+		}
+
+		depositID, success := new(big.Int).SetString(depositIDStr, 10)
+		if !success {
+			return nil, fmt.Errorf("invalid deposit ID format: %s", depositIDStr)
+		}
+
+		deposits = append(deposits, depositID)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating deposit rows: %w", err)
+	}
+
+	return deposits, nil
+}

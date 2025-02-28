@@ -49,21 +49,26 @@ func UpdateWalletLimitPercentage(newPercentage int64) error {
 
 // BridgeService handles the business logic for the bridge operations
 type BridgeService struct {
-	arbDepositor       *ArbitrumDepositor
-	monadDistributor   *MonadDistributor
-	depositChan        chan DepositEvent
-	refundChan         chan *big.Int
-	wg                 sync.WaitGroup
-	ctx                context.Context
-	cancel             context.CancelFunc
-	walletUsage        map[common.Address]*WalletUsage  // Track wallet usage
-	walletMutex        sync.RWMutex                     // Mutex for thread-safe access to walletUsage
-	db                 *database.DB                     // Database connection
-	txCache            map[string]*database.Transaction // Cache for transaction status
-	txCacheMutex       sync.RWMutex
-	txCacheExpiration  time.Duration
-	processingMutex    sync.Mutex      // Mutex for the processing map
-	processingDeposits map[string]bool // Track deposit IDs currently being processed
+	arbDepositor        *ArbitrumDepositor
+	monadDistributor    *MonadDistributor
+	depositChan         chan DepositEvent
+	refundChan          chan *big.Int
+	wg                  sync.WaitGroup
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	walletUsage         map[common.Address]*WalletUsage  // Track wallet usage
+	walletMutex         sync.RWMutex                     // Mutex for thread-safe access to walletUsage
+	db                  *database.DB                     // Database connection
+	txCache             map[string]*database.Transaction // Cache for transaction status
+	txCacheMutex        sync.RWMutex
+	txCacheExpiration   time.Duration
+	processingMutex     sync.Mutex                    // Mutex for the processing map
+	processingDeposits  map[string]bool               // Track deposit IDs currently being processed
+	instanceID          string                        // Unique ID for this service instance
+	lockDuration        time.Duration                 // How long to hold distributed locks
+	lockRefreshInterval time.Duration                 // How often to refresh distributed locks
+	lockRefreshers      map[string]context.CancelFunc // Map of running lock refreshers
+	lockRefreshersMutex sync.Mutex                    // Mutex for the lock refreshers map
 }
 
 // NewBridgeService creates a new instance of BridgeService
@@ -77,20 +82,27 @@ func NewBridgeService(
 	// Set the database instance for the contracts package
 	SetDatabase(db)
 
+	// Generate a unique instance ID
+	instanceID := fmt.Sprintf("instance-%d", time.Now().UnixNano())
+
 	return &BridgeService{
-		arbDepositor:       arbDepositor,
-		monadDistributor:   monadDistributor,
-		depositChan:        make(chan DepositEvent, 100),
-		refundChan:         make(chan *big.Int, 100),
-		wg:                 sync.WaitGroup{},
-		ctx:                ctx,
-		cancel:             cancel,
-		walletUsage:        make(map[common.Address]*WalletUsage),
-		walletMutex:        sync.RWMutex{},
-		db:                 db,
-		txCache:            make(map[string]*database.Transaction),
-		txCacheExpiration:  time.Hour * 24,
-		processingDeposits: make(map[string]bool),
+		arbDepositor:        arbDepositor,
+		monadDistributor:    monadDistributor,
+		depositChan:         make(chan DepositEvent, 100),
+		refundChan:          make(chan *big.Int, 100),
+		wg:                  sync.WaitGroup{},
+		ctx:                 ctx,
+		cancel:              cancel,
+		walletUsage:         make(map[common.Address]*WalletUsage),
+		walletMutex:         sync.RWMutex{},
+		db:                  db,
+		txCache:             make(map[string]*database.Transaction),
+		txCacheExpiration:   time.Hour * 24,
+		processingDeposits:  make(map[string]bool),
+		instanceID:          instanceID,
+		lockDuration:        time.Minute * 5, // 5 minute lock by default
+		lockRefreshInterval: time.Minute * 1, // Refresh lock every minute
+		lockRefreshers:      make(map[string]context.CancelFunc),
 	}
 }
 
@@ -184,34 +196,116 @@ func (s *BridgeService) processRefunds() {
 }
 
 // isProcessingDeposit checks if a deposit is already being processed and marks it as processing if not
+// Now with distributed locking support
 func (s *BridgeService) isProcessingDeposit(depositID *big.Int) bool {
 	s.processingMutex.Lock()
 	defer s.processingMutex.Unlock()
 
-	// Check if this deposit is already being processed
+	// Check if this deposit is already being processed locally
 	depositIDStr := depositID.String()
 	if s.processingDeposits[depositIDStr] {
-		log.Printf("⚠️ Deposit ID %s is already being processed, skipping duplicate attempt", depositIDStr)
+		logger.Warn("⚠️ Deposit ID %s is already being processed locally, skipping duplicate attempt", depositIDStr)
 		return true
 	}
 
-	// Mark this deposit as processing
+	// Try to acquire a distributed lock
+	lockAcquired, err := s.db.AcquireProcessingLock(depositID, s.instanceID, s.lockDuration)
+	if err != nil {
+		logger.Error("Failed to check distributed lock: %v", err)
+		// Fall back to local locking in case of database errors
+	} else if !lockAcquired {
+		logger.Warn("⚠️ Deposit ID %s is locked by another instance, skipping duplicate attempt", depositIDStr)
+		return true
+	} else {
+		// Start a goroutine to refresh the lock periodically
+		s.startLockRefresher(depositID)
+	}
+
+	// Mark this deposit as processing locally
 	s.processingDeposits[depositIDStr] = true
+	logger.Info("🔒 Acquired processing lock for deposit ID %s", depositIDStr)
 	return false
+}
+
+// startLockRefresher starts a goroutine that periodically refreshes the lock
+func (s *BridgeService) startLockRefresher(depositID *big.Int) {
+	depositIDStr := depositID.String()
+
+	// Create a new context for this refresher
+	refreshCtx, cancel := context.WithCancel(s.ctx)
+
+	s.lockRefreshersMutex.Lock()
+	// Cancel any existing refresher for this deposit ID
+	if existingCancel, exists := s.lockRefreshers[depositIDStr]; exists {
+		existingCancel()
+	}
+	// Store the new cancel function
+	s.lockRefreshers[depositIDStr] = cancel
+	s.lockRefreshersMutex.Unlock()
+
+	// Start the refresher goroutine
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(s.lockRefreshInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-refreshCtx.Done():
+				return
+			case <-ticker.C:
+				refreshed, err := s.db.RefreshProcessingLock(depositID, s.instanceID, s.lockDuration)
+				if err != nil {
+					logger.Error("Failed to refresh lock for deposit ID %s: %v", depositIDStr, err)
+				} else if !refreshed {
+					logger.Warn("Lock for deposit ID %s could not be refreshed, may have been lost", depositIDStr)
+					// The lock was lost, we should stop refreshing
+					return
+				} else {
+					logger.Debug("Refreshed lock for deposit ID %s", depositIDStr)
+				}
+			}
+		}
+	}()
 }
 
 // finishProcessingDeposit marks a deposit as no longer being processed
 func (s *BridgeService) finishProcessingDeposit(depositID *big.Int) {
-	s.processingMutex.Lock()
-	defer s.processingMutex.Unlock()
-
 	depositIDStr := depositID.String()
+
+	// Stop the lock refresher
+	s.lockRefreshersMutex.Lock()
+	if cancel, exists := s.lockRefreshers[depositIDStr]; exists {
+		cancel()
+		delete(s.lockRefreshers, depositIDStr)
+	}
+	s.lockRefreshersMutex.Unlock()
+
+	// Release the distributed lock
+	if err := s.db.ReleaseProcessingLock(depositID, s.instanceID); err != nil {
+		logger.Error("Failed to release distributed lock for deposit ID %s: %v", depositIDStr, err)
+	} else {
+		logger.Info("🔓 Released processing lock for deposit ID %s", depositIDStr)
+	}
+
+	// Release the local lock
+	s.processingMutex.Lock()
 	delete(s.processingDeposits, depositIDStr)
+	s.processingMutex.Unlock()
 }
 
 // processDeposit processes a deposit
 func (s *BridgeService) processDeposit(event DepositEvent) error {
 	startTime := time.Now()
+
+	// Double-check if this transaction was already completed
+	existingTx, err := s.GetTransactionByDepositID(context.Background(), event.DepositId)
+	if err == nil && existingTx != nil && existingTx.Status == database.StatusCompleted {
+		logger.Info("✅ Transaction for deposit ID %s was already completed with Monad tx hash %s",
+			event.DepositId.String(), existingTx.MonadTxHash)
+		return nil
+	}
 
 	// Check if this deposit is already being processed to prevent parallel processing
 	if s.isProcessingDeposit(event.DepositId) {
@@ -222,7 +316,7 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 	// Always mark the deposit as finished processing when we're done
 	defer s.finishProcessingDeposit(event.DepositId)
 
-	log.Printf("Processing deposit %s", event)
+	logger.Info("Processing deposit %s", event)
 
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
 	defer cancel()
@@ -244,20 +338,29 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 	// Early log of MON amount calculation for debugging purposes
 	logMonCalculation(event, monAmount)
 
-	// Create a pending transaction record in the database
-	txRecord := &database.Transaction{
-		DepositID:     event.DepositId,
-		WalletAddress: event.Depositor,
-		Amount:        event.Amount,
-		Currency:      database.CurrencyType(event.Currency),
-		MonAmount:     monAmount,
-		Status:        database.StatusPending,
-		TxHash:        event.TxHash, // Arbitrum transaction hash
-	}
+	// Check if a transaction record already exists
+	existingTx, err = s.GetTransactionByDepositID(ctx, event.DepositId)
+	if err != nil || existingTx == nil {
+		// Create a pending transaction record in the database
+		txRecord := &database.Transaction{
+			DepositID:     event.DepositId,
+			WalletAddress: event.Depositor,
+			Amount:        event.Amount,
+			Currency:      database.CurrencyType(event.Currency),
+			MonAmount:     monAmount,
+			Status:        database.StatusPending,
+			TxHash:        event.TxHash, // Arbitrum transaction hash
+		}
 
-	if err := s.db.CreateTransaction(txRecord); err != nil {
-		logger.Error("Failed to create transaction record: %v", err)
-		// Continue processing even if DB record creation fails
+		if err := s.db.CreateTransaction(txRecord); err != nil {
+			logger.Error("Failed to create transaction record: %v", err)
+			// Continue processing even if DB record creation fails
+		}
+	} else if existingTx.Status == database.StatusCompleted {
+		// Double check again to avoid race conditions
+		logger.Info("✅ Transaction for deposit ID %s was already completed with Monad tx hash %s",
+			event.DepositId.String(), existingTx.MonadTxHash)
+		return nil
 	}
 
 	// Validate the deposit with the pre-calculated MON amount
@@ -298,7 +401,7 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 			strings.Contains(err.Error(), "duplicate mint attempt") {
 			logger.Warn("Skipping refund for duplicate transaction attempt: %v", err)
 			// Don't update status to failed or queue a refund for duplicate attempts
-			return nil
+			return fmt.Errorf("duplicate mint attempt: %w", err)
 		}
 
 		// For other errors, update status and queue a refund
@@ -325,7 +428,7 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 			event.DepositId.String(), txHash)
 	} else {
 		// Verify the update was successful by querying the database
-		tx, err := s.GetTransactionByDepositID(ctx, event.DepositId)
+		tx, err := s.db.GetTransactionByDepositID(event.DepositId)
 		if err != nil {
 			logger.Error("Failed to verify transaction update: %v", err)
 		} else {
@@ -348,11 +451,7 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 	}
 	s.txCacheMutex.Unlock()
 
-	// Update wallet usage after successful mint
-	s.updateWalletUsage(event.Depositor, monAmount)
-
-	logger.Info("Successfully processed deposit %s", event.String())
-	log.Printf("Processing time: %s", time.Since(startTime))
+	logger.Info("✅ Processing completed for deposit ID %s in %v", event.DepositId.String(), time.Since(startTime))
 	return nil
 }
 
@@ -1053,14 +1152,47 @@ func (s *BridgeService) GetTransactionByDepositID(ctx context.Context, depositID
 
 // UpdateTransactionStatus updates the status of a transaction
 func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *big.Int, status, txHash string) error {
-	// Update the transaction in the database
-	err := s.db.UpdateTransactionStatus(depositID, status, txHash)
+	// Begin a database transaction for atomic operations
+	dbTx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
+	// Use deferred function to ensure we either commit or rollback
+	defer func() {
+		if err != nil {
+			// If we have an error, roll back the transaction
+			rollbackErr := dbTx.Rollback()
+			if rollbackErr != nil {
+				logger.Error("Failed to rollback transaction: %v", rollbackErr)
+			}
+		}
+	}()
+
+	// Update the transaction status within the database transaction
+	err = s.db.UpdateTransactionStatusWithTx(dbTx, depositID, status, txHash)
 	if err != nil {
 		return fmt.Errorf("failed to update transaction status in database: %w", err)
 	}
 
-	// Clear the cache for this transaction
-	s.clearTransactionCache(depositID.String())
+	// Commit the database transaction
+	if err = dbTx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// Successfully committed, now update the cache
+	if status == database.StatusCompleted {
+		s.txCacheMutex.Lock()
+		s.txCache[depositID.String()] = &database.Transaction{
+			DepositID:   depositID,
+			Status:      status,
+			MonadTxHash: txHash,
+		}
+		s.txCacheMutex.Unlock()
+	} else {
+		// For other statuses, just clear the cache
+		s.clearTransactionCache(depositID.String())
+	}
 
 	return nil
 }
