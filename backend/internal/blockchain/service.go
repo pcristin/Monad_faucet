@@ -183,8 +183,10 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 		return fmt.Errorf("failed to get contract state: %v", err)
 	}
 
-	// Create a pending transaction record in the database
+	// Calculate MON amount once and reuse it throughout the function
 	monAmount := calculateMonAmount(event.Amount, state.SwapRatios[event.Currency], event.Currency)
+
+	// Create a pending transaction record in the database
 	txRecord := &database.Transaction{
 		DepositID:     event.DepositId,
 		WalletAddress: event.Depositor,
@@ -200,7 +202,7 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 		// Continue processing even if DB record creation fails
 	}
 
-	if err := s.validateDeposit(state, event); err != nil {
+	if err := s.validateDepositWithAmount(state, event, monAmount); err != nil {
 		// Update transaction status to failed
 		if err2 := s.db.UpdateTransactionStatus(event.DepositId, database.StatusFailed, event.TxHash); err2 != nil {
 			logger.Error("Failed to update transaction status to failed: %v", err2)
@@ -244,6 +246,57 @@ func (s *BridgeService) validateDeposit(state *ContractState, event DepositEvent
 	}
 
 	monAmount := calculateMonAmount(event.Amount, state.SwapRatios[event.Currency], event.Currency)
+	if state.MonBalance.Cmp(monAmount) < 0 {
+		return fmt.Errorf("insufficient MON balance in distributor (required: %s MON, available: %s MON)",
+			new(big.Float).Quo(
+				new(big.Float).SetInt(monAmount),
+				new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			).Text('f', 6),
+			new(big.Float).Quo(
+				new(big.Float).SetInt(state.MonBalance),
+				new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+			).Text('f', 6),
+		)
+	}
+
+	// Check wallet limit
+	if err := s.checkWalletLimit(monAmount, state.MonBalance); err != nil {
+		return err
+	}
+
+	var out []interface{}
+	var method string
+	switch event.Currency {
+	case CurrencyETH:
+		method = "minEthDeposit"
+	case CurrencyUSDC:
+		method = "minUsdcDeposit"
+	case CurrencyUSDT:
+		method = "minUsdtDeposit"
+	default:
+		return fmt.Errorf("unsupported currency type")
+	}
+
+	err := s.arbDepositor.BoundContract.Call(&bind.CallOpts{Context: s.ctx}, &out, method)
+	if err != nil {
+		return fmt.Errorf("failed to get min amount for %s: %v", CurrencyTypeToString(event.Currency), err)
+	}
+
+	minAmount := out[0].(*big.Int)
+	if event.Amount.Cmp(minAmount) < 0 {
+		return fmt.Errorf("deposit amount below minimum for %s", CurrencyTypeToString(event.Currency))
+	}
+
+	return nil
+}
+
+// validateDepositWithAmount is a variant of validateDeposit that accepts a precalculated monAmount
+// to avoid redundant calculations
+func (s *BridgeService) validateDepositWithAmount(state *ContractState, event DepositEvent, monAmount *big.Int) error {
+	if state.IsPaused {
+		return fmt.Errorf("bridge is paused")
+	}
+
 	if state.MonBalance.Cmp(monAmount) < 0 {
 		return fmt.Errorf("insufficient MON balance in distributor (required: %s MON, available: %s MON)",
 			new(big.Float).Quo(
