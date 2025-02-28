@@ -49,19 +49,21 @@ func UpdateWalletLimitPercentage(newPercentage int64) error {
 
 // BridgeService handles the business logic for the bridge operations
 type BridgeService struct {
-	arbDepositor      *ArbitrumDepositor
-	monadDistributor  *MonadDistributor
-	depositChan       chan DepositEvent
-	refundChan        chan *big.Int
-	wg                sync.WaitGroup
-	ctx               context.Context
-	cancel            context.CancelFunc
-	walletUsage       map[common.Address]*WalletUsage  // Track wallet usage
-	walletMutex       sync.RWMutex                     // Mutex for thread-safe access to walletUsage
-	db                *database.DB                     // Database connection
-	txCache           map[string]*database.Transaction // Cache for transaction status
-	txCacheMutex      sync.RWMutex
-	txCacheExpiration time.Duration
+	arbDepositor       *ArbitrumDepositor
+	monadDistributor   *MonadDistributor
+	depositChan        chan DepositEvent
+	refundChan         chan *big.Int
+	wg                 sync.WaitGroup
+	ctx                context.Context
+	cancel             context.CancelFunc
+	walletUsage        map[common.Address]*WalletUsage  // Track wallet usage
+	walletMutex        sync.RWMutex                     // Mutex for thread-safe access to walletUsage
+	db                 *database.DB                     // Database connection
+	txCache            map[string]*database.Transaction // Cache for transaction status
+	txCacheMutex       sync.RWMutex
+	txCacheExpiration  time.Duration
+	processingMutex    sync.Mutex      // Mutex for the processing map
+	processingDeposits map[string]bool // Track deposit IDs currently being processed
 }
 
 // NewBridgeService creates a new instance of BridgeService
@@ -76,18 +78,19 @@ func NewBridgeService(
 	SetDatabase(db)
 
 	return &BridgeService{
-		arbDepositor:      arbDepositor,
-		monadDistributor:  monadDistributor,
-		depositChan:       make(chan DepositEvent),
-		refundChan:        make(chan *big.Int),
-		wg:                sync.WaitGroup{},
-		ctx:               ctx,
-		cancel:            cancel,
-		walletUsage:       make(map[common.Address]*WalletUsage),
-		walletMutex:       sync.RWMutex{},
-		db:                db,
-		txCache:           make(map[string]*database.Transaction),
-		txCacheExpiration: 5 * time.Minute, // Cache transactions for 5 minutes
+		arbDepositor:       arbDepositor,
+		monadDistributor:   monadDistributor,
+		depositChan:        make(chan DepositEvent, 100),
+		refundChan:         make(chan *big.Int, 100),
+		wg:                 sync.WaitGroup{},
+		ctx:                ctx,
+		cancel:             cancel,
+		walletUsage:        make(map[common.Address]*WalletUsage),
+		walletMutex:        sync.RWMutex{},
+		db:                 db,
+		txCache:            make(map[string]*database.Transaction),
+		txCacheExpiration:  time.Hour * 24,
+		processingDeposits: make(map[string]bool),
 	}
 }
 
@@ -180,17 +183,66 @@ func (s *BridgeService) processRefunds() {
 	}
 }
 
+// isProcessingDeposit checks if a deposit is already being processed and marks it as processing if not
+func (s *BridgeService) isProcessingDeposit(depositID *big.Int) bool {
+	s.processingMutex.Lock()
+	defer s.processingMutex.Unlock()
+
+	// Check if this deposit is already being processed
+	depositIDStr := depositID.String()
+	if s.processingDeposits[depositIDStr] {
+		log.Printf("⚠️ Deposit ID %s is already being processed, skipping duplicate attempt", depositIDStr)
+		return true
+	}
+
+	// Mark this deposit as processing
+	s.processingDeposits[depositIDStr] = true
+	return false
+}
+
+// finishProcessingDeposit marks a deposit as no longer being processed
+func (s *BridgeService) finishProcessingDeposit(depositID *big.Int) {
+	s.processingMutex.Lock()
+	defer s.processingMutex.Unlock()
+
+	depositIDStr := depositID.String()
+	delete(s.processingDeposits, depositIDStr)
+}
+
+// processDeposit processes a deposit
 func (s *BridgeService) processDeposit(event DepositEvent) error {
+	startTime := time.Now()
+
+	// Check if this deposit is already being processed to prevent parallel processing
+	if s.isProcessingDeposit(event.DepositId) {
+		// This is a duplicate attempt, just return without error
+		return nil
+	}
+
+	// Always mark the deposit as finished processing when we're done
+	defer s.finishProcessingDeposit(event.DepositId)
+
+	log.Printf("Processing deposit %s", event)
+
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
 	defer cancel()
 
+	// Get current state of the bridge
 	state, err := s.GetState(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get contract state: %v", err)
+		return fmt.Errorf("failed to get bridge state: %w", err)
 	}
 
-	// Calculate MON amount once and reuse it throughout the function
+	// Check if bridge is paused
+	if state.IsPaused {
+		return fmt.Errorf("bridge is currently paused")
+	}
+
+	// Process the deposit
 	monAmount := calculateMonAmount(event.Amount, state.SwapRatios[event.Currency], event.Currency)
+
+	// Early log of MON amount calculation for debugging purposes
+	logMonCalculation(event, monAmount)
 
 	// Create a pending transaction record in the database
 	txRecord := &database.Transaction{
@@ -208,34 +260,62 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 		// Continue processing even if DB record creation fails
 	}
 
+	// Validate the deposit with the pre-calculated MON amount
 	if err := s.validateDepositWithAmount(state, event, monAmount); err != nil {
-		// Update transaction status to failed
-		if err2 := s.db.UpdateTransactionStatus(event.DepositId, database.StatusFailed, ""); err2 != nil {
-			logger.Error("Failed to update transaction status to failed: %v", err2)
+		// Update status to failed
+		updateErr := s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusFailed, "")
+		if updateErr != nil {
+			logger.Error("Failed to update transaction status: %v", updateErr)
 		}
-		return fmt.Errorf("deposit validation failed: %v", err)
+
+		// Queue a refund
+		s.QueueRefund(event.DepositId)
+
+		return fmt.Errorf("invalid deposit: %w", err)
 	}
 
+	// Wait for confirmations
 	if err := s.waitForConfirmations(ctx, event.BlockNumber, 10); err != nil {
 		// Update transaction status to failed
-		if err2 := s.db.UpdateTransactionStatus(event.DepositId, database.StatusFailed, ""); err2 != nil {
-			logger.Error("Failed to update transaction status to failed: %v", err2)
+		updateErr := s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusFailed, "")
+		if updateErr != nil {
+			logger.Error("Failed to update transaction status: %v", updateErr)
 		}
-		return fmt.Errorf("failed to wait for confirmations: %v", err)
+
+		// Queue a refund
+		s.QueueRefund(event.DepositId)
+
+		return fmt.Errorf("failed to wait for confirmations: %w", err)
 	}
 
-	// Attempt to mint tokens
-	monadTxHash, err := s.mintTokens(ctx, event.Depositor, monAmount, event.DepositId)
+	// Mint tokens on Monad
+	logger.Info("Minting %s MON tokens for wallet %s", formatMonAmount(monAmount), event.Depositor.Hex())
+	txHash, err := s.mintTokens(ctx, event.Depositor, monAmount, event.DepositId)
 	if err != nil {
-		// Update transaction status to failed
-		if err2 := s.db.UpdateTransactionStatus(event.DepositId, database.StatusFailed, ""); err2 != nil {
-			logger.Error("Failed to update transaction status to failed: %v", err2)
+		// Check if this is a duplicate transaction error
+		if strings.Contains(err.Error(), "already completed") ||
+			strings.Contains(err.Error(), "already in progress") ||
+			strings.Contains(err.Error(), "duplicate mint attempt") {
+			logger.Warn("Skipping refund for duplicate transaction attempt: %v", err)
+			// Don't update status to failed or queue a refund for duplicate attempts
+			return nil
 		}
-		return fmt.Errorf("failed to mint tokens: %v", err)
+
+		// For other errors, update status and queue a refund
+		logger.Error("Failed to mint tokens: %v", err)
+		updateErr := s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusFailed, "")
+		if updateErr != nil {
+			logger.Error("Failed to update transaction status: %v", updateErr)
+		}
+
+		// Queue a refund
+		s.QueueRefund(event.DepositId)
+
+		return fmt.Errorf("failed to mint tokens: %w", err)
 	}
 
 	// Update transaction status to completed with the Monad transaction hash
-	if err := s.db.UpdateTransactionStatus(event.DepositId, database.StatusCompleted, monadTxHash); err != nil {
+	if err := s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusCompleted, txHash); err != nil {
 		logger.Error("Failed to update transaction status to completed: %v", err)
 	}
 
@@ -243,6 +323,7 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 	s.updateWalletUsage(event.Depositor, monAmount)
 
 	logger.Info("Successfully processed deposit %s", event.String())
+	log.Printf("Processing time: %s", time.Since(startTime))
 	return nil
 }
 
@@ -320,23 +401,33 @@ func (s *BridgeService) waitForConfirmations(ctx context.Context, blockNumber ui
 	}
 }
 
+// mintTokens mints MON tokens on the Monad blockchain
 func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address, amount *big.Int, depositId *big.Int) (string, error) {
-	// First check if we already have a successful or pending transaction for this deposit ID
-	existingTx, err := s.db.GetTransactionByDepositID(depositId)
+	// Additional safeguard: check if there are any existing transactions (completed or pending) for this deposit ID
+	existingTx, err := s.GetTransactionByDepositID(ctx, depositId)
 	if err == nil && existingTx != nil {
-		// If there's already a completed transaction for this deposit ID, return the existing hash
 		if existingTx.Status == database.StatusCompleted && existingTx.MonadTxHash != "" {
-			logger.Warn("Skipping duplicate mint attempt for deposit ID %s - already completed with tx %s",
+			log.Printf("⚠️ DUPLICATE PREVENTION: Deposit ID %s already has a completed transaction with Monad hash %s",
 				depositId.String(), existingTx.MonadTxHash)
-			return existingTx.MonadTxHash, nil
+			return existingTx.MonadTxHash, fmt.Errorf("transaction already completed for deposit ID %s", depositId.String())
 		}
 
-		// If there's already a transaction in progress with a Monad tx hash, provide a specific error
-		if existingTx.Status == database.StatusPending && existingTx.MonadTxHash != "" {
-			logger.Warn("Rejecting duplicate mint attempt for deposit ID %s - already in progress with tx %s",
-				depositId.String(), existingTx.MonadTxHash)
-			return "", fmt.Errorf("duplicate mint attempt for deposit ID %s - distribution already in progress", depositId.String())
+		if existingTx.Status == database.StatusPending {
+			log.Printf("⚠️ DUPLICATE PREVENTION: Deposit ID %s is already being processed with a pending transaction",
+				depositId.String())
+			return "", fmt.Errorf("another transaction for deposit ID %s is already in progress", depositId.String())
 		}
+	}
+
+	// Normal transaction lookup that was added in previous fix
+	// See if we've already processed this transaction to prevent duplicate mints
+	txLookupKey := depositId.String()
+	s.txCacheMutex.RLock()
+	cachedTx, found := s.txCache[txLookupKey]
+	s.txCacheMutex.RUnlock()
+
+	if found && cachedTx.Status != database.StatusPending {
+		return cachedTx.MonadTxHash, nil
 	}
 
 	transfer := []struct {
@@ -1094,4 +1185,76 @@ func (s *BridgeService) FindMonadTransactionByDepositID(ctx context.Context, dep
 func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) error {
 	logger.Info("Delegating refund of deposit ID %s to ArbitrumDepositor", depositId.String())
 	return s.arbDepositor.RefundDeposit(ctx, depositId)
+}
+
+// formatMonAmount formats a MON amount in wei to a human-readable string
+func formatMonAmount(amount *big.Int) string {
+	f := new(big.Float).SetInt(amount)
+	f = new(big.Float).Quo(f, new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)))
+	return f.Text('f', 6)
+}
+
+// logMonCalculation logs the MON amount calculation for debugging purposes
+func logMonCalculation(event DepositEvent, monAmount *big.Int) {
+	// Get current ETH/USD price for reference
+	ethUsdPrice := GetEthUsdPrice()
+	ethUsdPriceFloat := new(big.Float).Quo(
+		new(big.Float).SetInt(ethUsdPrice),
+		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil)),
+	)
+
+	// Convert deposit amount to ETH (assuming wei/satoshi/etc)
+	var decimals int64
+	var currencySymbol string
+	switch event.Currency {
+	case CurrencyETH:
+		decimals = 18
+		currencySymbol = "ETH"
+	case CurrencyUSDC, CurrencyUSDT:
+		decimals = 6
+		currencySymbol = CurrencyTypeToString(event.Currency)
+	default:
+		decimals = 18
+		currencySymbol = "UNKNOWN"
+	}
+
+	// Format deposit amount as human-readable
+	depositAmountFloat := new(big.Float).Quo(
+		new(big.Float).SetInt(event.Amount),
+		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(decimals), nil)),
+	)
+	depositAmountStr := depositAmountFloat.Text('f', 12)
+
+	// Calculate USD value of deposit
+	usdValue := new(big.Float).Mul(depositAmountFloat, ethUsdPriceFloat)
+
+	// Calculate MON/USD ratio
+	monUsdRatio := GetMonUsdRatio()
+	monUsdRatioFloat := new(big.Float).Quo(
+		new(big.Float).SetInt(monUsdRatio),
+		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+	)
+
+	// Log the calculation
+	if event.Currency == CurrencyETH {
+		logger.Info("%s to MON calculation: %s %s ≈ $%s USD (ETH price: $%s) / $%s per MON = %s MON (%s wei)",
+			currencySymbol,
+			depositAmountStr,
+			currencySymbol,
+			usdValue.Text('f', 6),
+			ethUsdPriceFloat.Text('f', 2),
+			monUsdRatioFloat.Text('f', 6),
+			formatMonAmount(monAmount),
+			monAmount.String(),
+		)
+	} else {
+		logger.Info("%s to MON calculation: %s %s / $%s per MON = %s MON (%s wei)",
+			currencySymbol,
+			depositAmountStr,
+			currencySymbol,
+			monUsdRatioFloat.Text('f', 6),
+			formatMonAmount(monAmount),
+			monAmount.String(),
+		)
+	}
 }
