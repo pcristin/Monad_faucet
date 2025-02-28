@@ -3,7 +3,6 @@ package blockchain
 import (
 	"context"
 	"crypto/ecdsa"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"math/big"
@@ -549,17 +548,41 @@ func (s *BridgeService) waitForConfirmations(ctx context.Context, blockNumber ui
 
 // mintTokens mints MON tokens on the Monad blockchain
 func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address, amount *big.Int, depositId *big.Int) (string, error) {
-	// First check if this transaction is already completed in database
+	// We need to be extremely careful about duplicate transactions
+	// Use a distributed lock based on deposit ID to prevent concurrent processing of the same deposit
+	depositIDStr := depositId.String()
+	logger.Info("🔒 Attempting to acquire lock for deposit ID %s", depositIDStr)
+
+	// Try to acquire a distributed lock for 5 minutes
+	acquired, err := s.db.AcquireProcessingLock(depositId, s.instanceID, 5*time.Minute)
+	if err != nil {
+		logger.Error("Error trying to acquire processing lock: %v", err)
+		// Continue despite lock error - we'll catch duplicates in other ways
+	} else if !acquired {
+		logger.Warn("⚠️ Another instance appears to be processing deposit ID %s", depositIDStr)
+		// DO NOT stop processing - we need extra checks to handle the case when the lock fails
+	} else {
+		// Don't forget to release the lock when we're done
+		defer func() {
+			if releaseErr := s.db.ReleaseProcessingLock(depositId, s.instanceID); releaseErr != nil {
+				logger.Error("Failed to release processing lock: %v", releaseErr)
+			} else {
+				logger.Info("Released processing lock for deposit ID %s", depositIDStr)
+			}
+		}()
+	}
+
+	// FIRST DEFENSE: Check if this transaction is already completed in database
 	existingTx, err := s.GetTransactionByDepositID(ctx, depositId)
 	if err == nil && existingTx != nil && existingTx.Status == database.StatusCompleted && existingTx.MonadTxHash != "" {
 		logger.Info("⚠️ DUPLICATE PREVENTION: Deposit ID %s already has a completed transaction with Monad hash %s",
-			depositId.String(), existingTx.MonadTxHash)
+			depositIDStr, existingTx.MonadTxHash)
 		return existingTx.MonadTxHash, nil
 	}
 
-	// For pending transactions, actively check on the Monad blockchain if it's already been processed
+	// SECOND DEFENSE: Check if there's a pending transaction and verify on blockchain
 	if err == nil && existingTx != nil && existingTx.Status == database.StatusPending {
-		// Check Monad blockchain directly
+		// Check Monad blockchain directly by looking for Distribution events
 		monadTxHash, err := s.checkMonadBlockchainForTransaction(ctx, depositId)
 		if err == nil && monadTxHash != "" {
 			logger.Info("🔍 Found existing transaction on Monad blockchain: %s for deposit ID %s",
@@ -568,24 +591,46 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 			// Update database with Monad tx hash
 			if updateErr := s.UpdateTransactionStatus(ctx, depositId, database.StatusCompleted, monadTxHash); updateErr != nil {
 				logger.Error("Failed to update transaction status: %v", updateErr)
+			} else {
+				logger.Info("✅ Updated pending transaction to completed for deposit ID %s with Monad tx hash %s",
+					depositId.String(), monadTxHash)
 			}
 
 			return monadTxHash, nil
 		}
 
 		// If we get here, the transaction is actually pending and needs processing
-		// DO NOT throw an error - we need to process this transaction
 		logger.Info("Transaction for deposit ID %s is pending and needs processing", depositId.String())
 	}
 
-	// Check transaction cache as well
+	// THIRD DEFENSE: Check transaction cache as well
 	txLookupKey := depositId.String()
 	s.txCacheMutex.RLock()
 	cachedTx, found := s.txCache[txLookupKey]
 	s.txCacheMutex.RUnlock()
 
 	if found && cachedTx.Status == database.StatusCompleted && cachedTx.MonadTxHash != "" {
+		logger.Info("⚠️ DUPLICATE PREVENTION (CACHE): Using cached Monad hash %s for deposit ID %s",
+			cachedTx.MonadTxHash, depositId.String())
 		return cachedTx.MonadTxHash, nil
+	}
+
+	// FOURTH DEFENSE: One final check on the blockchain before proceeding
+	// This catches cases where the transaction exists but we don't have it in our DB
+	monadTxHash, err := s.checkMonadBlockchainForTransaction(ctx, depositId)
+	if err == nil && monadTxHash != "" {
+		logger.Info("🔍 FINAL CHECK: Found existing transaction on Monad blockchain: %s for deposit ID %s",
+			monadTxHash, depositId.String())
+
+		// Update database with Monad tx hash
+		if updateErr := s.UpdateTransactionStatus(ctx, depositId, database.StatusCompleted, monadTxHash); updateErr != nil {
+			logger.Error("Failed to update transaction status: %v", updateErr)
+		} else {
+			logger.Info("✅ Created/updated transaction record for deposit ID %s with Monad tx hash %s",
+				depositId.String(), monadTxHash)
+		}
+
+		return monadTxHash, nil
 	}
 
 	// Proceed with the regular minting process
@@ -638,23 +683,53 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		recipient.Hex(),
 		tx.Hash().Hex())
 
-	// CRITICAL: Immediately update the transaction status in database
-	if err := s.UpdateTransactionStatus(ctx, depositId, database.StatusCompleted, tx.Hash().Hex()); err != nil {
-		// Log the error but don't fail - tokens were still distributed
-		logger.Error("CRITICAL: Failed to update transaction status: %v", err)
-		logger.Error("IMPORTANT: Transaction status update failed, but tokens were minted! Deposit ID: %s, Monad tx hash: %s",
-			depositId.String(), tx.Hash().Hex())
-	} else {
-		// Verify the update
-		verifyTx, verifyErr := s.db.GetTransactionByDepositID(depositId)
-		if verifyErr != nil {
-			logger.Error("Failed to verify transaction update: %v", verifyErr)
-		} else if verifyTx.Status != database.StatusCompleted || verifyTx.MonadTxHash != tx.Hash().Hex() {
-			logger.Error("CRITICAL: Transaction verify failed - current status=%s, monad_tx_hash=%s",
-				verifyTx.Status, verifyTx.MonadTxHash)
+	// CRITICAL: Immediately update the transaction status in database using a transaction
+	txHash := tx.Hash().Hex()
+	for i := 0; i < 3; i++ { // Retry up to 3 times
+		if err := s.UpdateTransactionStatus(ctx, depositId, database.StatusCompleted, txHash); err != nil {
+			// Log the error but don't fail - tokens were still distributed
+			logger.Error("CRITICAL: Failed to update transaction status (attempt %d/3): %v", i+1, err)
+
+			if i < 2 {
+				// Wait a moment before retrying
+				time.Sleep(time.Second * 2)
+				continue
+			}
+
+			logger.Error("IMPORTANT: Transaction status update failed after 3 attempts, but tokens were minted! Deposit ID: %s, Monad tx hash: %s",
+				depositId.String(), txHash)
 		} else {
-			logger.Info("✅ Database update confirmed for deposit ID %s with Monad tx hash %s",
-				depositId.String(), tx.Hash().Hex())
+			// Verify the update
+			verifyTx, verifyErr := s.db.GetTransactionByDepositID(depositId)
+			if verifyErr != nil {
+				logger.Error("Failed to verify transaction update: %v", verifyErr)
+			} else if verifyTx.Status != database.StatusCompleted || verifyTx.MonadTxHash != txHash {
+				logger.Error("CRITICAL: Transaction verify failed - current status=%s, monad_tx_hash=%s",
+					verifyTx.Status, verifyTx.MonadTxHash)
+
+				if i < 2 {
+					// Try again if verification failed
+					logger.Info("Retrying transaction status update...")
+					time.Sleep(time.Second * 2)
+					continue
+				}
+			} else {
+				logger.Info("✅ Database update confirmed for deposit ID %s with Monad tx hash %s",
+					depositId.String(), txHash)
+
+				// Add to in-memory cache as an additional safeguard against race conditions
+				s.txCacheMutex.Lock()
+				s.txCache[depositId.String()] = &database.Transaction{
+					DepositID:     depositId,
+					WalletAddress: recipient,
+					MonAmount:     amount,
+					Status:        database.StatusCompleted,
+					MonadTxHash:   txHash,
+				}
+				s.txCacheMutex.Unlock()
+
+				break // Success, exit the retry loop
+			}
 		}
 	}
 
@@ -666,75 +741,327 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 func (s *BridgeService) checkMonadBlockchainForTransaction(ctx context.Context, depositId *big.Int) (string, error) {
 	client := s.monadDistributor.client
 
-	// First try to query recent events from the contract
-	// We'd ideally look for TransferSingle events from the ERC1155 contract
-	// or specific DistributeFunds events from our distributor contract
-
 	// Get current block number
 	currentBlock, err := client.BlockNumber(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get current block number: %w", err)
 	}
 
-	// Look back at most 500 blocks
+	// Look back a maximum of 50 blocks at a time to avoid RPC errors
 	// Adjust as needed based on your expected transaction volume and confirmation time
-	lookBackBlocks := uint64(500)
+	lookBackBlocks := uint64(50)
 	if currentBlock < lookBackBlocks {
 		lookBackBlocks = currentBlock
 	}
 
 	startBlock := currentBlock - lookBackBlocks
 
-	// Create a filter query
+	// Create a filter for the Distribution event specifically
+	// This event is emitted when funds are distributed via the distributeFunds function
+	distributionEventSignature := []byte("Distribution(address,uint256,uint256)")
+	distributionEventTopic := crypto.Keccak256Hash(distributionEventSignature)
+
+	// IMPORTANT: The depositId is the third parameter in the event but since the first is indexed,
+	// it appears as the third topic (index 2) in the event logs
+	depositIdBytes32 := common.BytesToHash(depositId.Bytes())
+
+	logger.Info("🔍 Looking for Distribution event with deposit ID %s (bytes32: %s)",
+		depositId.String(), depositIdBytes32.Hex())
+
+	// Create a filter query specifically for Distribution events with our deposit ID
 	filterQuery := ethereum.FilterQuery{
 		FromBlock: big.NewInt(int64(startBlock)),
 		ToBlock:   big.NewInt(int64(currentBlock)),
 		Addresses: []common.Address{s.monadDistributor.address},
+		Topics: [][]common.Hash{
+			{distributionEventTopic}, // Event signature
+			nil,                      // Any recipient address
+			nil,                      // Any amount
+			{depositIdBytes32},       // Our deposit ID
+		},
 	}
+
+	logger.Info("Searching for Distribution events with deposit ID %s between blocks %d and %d",
+		depositId.String(), startBlock, currentBlock)
 
 	logs, err := client.FilterLogs(ctx, filterQuery)
 	if err != nil {
 		logger.Error("Failed to filter logs: %v", err)
-		return "", err
+
+		// If we got a 'request entity too large' error, we need to try a smaller range
+		if strings.Contains(err.Error(), "Request Entity Too Large") ||
+			strings.Contains(err.Error(), "eth_getLogs is limited") {
+			// Reduce the block range and try again
+			lookBackBlocks = lookBackBlocks / 2
+			if lookBackBlocks < 10 {
+				lookBackBlocks = 10 // Minimum 10 blocks
+			}
+			logger.Info("Reducing block search range to %d blocks due to RPC limits", lookBackBlocks)
+
+			// Update the query with smaller range
+			startBlock = currentBlock - lookBackBlocks
+			filterQuery.FromBlock = big.NewInt(int64(startBlock))
+			filterQuery.ToBlock = big.NewInt(int64(currentBlock))
+
+			// Try again with smaller range
+			logs, err = client.FilterLogs(ctx, filterQuery)
+			if err != nil {
+				return "", err
+			}
+		} else {
+			return "", err
+		}
 	}
 
-	logger.Info("Searching %d logs for deposit ID %s", len(logs), depositId.String())
+	logger.Info("Found %d matching Distribution events for deposit ID %s", len(logs), depositId.String())
 
-	// Search logs for events involving our deposit ID
-	for _, log := range logs {
-		// Check if there's a transaction receipt
-		receipt, err := client.TransactionReceipt(ctx, log.TxHash)
-		if err != nil {
-			continue
+	// If we found matching events
+	if len(logs) > 0 {
+		// Return the hash of the most recent transaction
+		txHash := logs[len(logs)-1].TxHash.Hex()
+		logger.Info("🔍 Found existing Distribution event in transaction %s for deposit ID %s",
+			txHash, depositId.String())
+		return txHash, nil
+	}
+
+	// If no events found in the recent blocks, try a few more epochs
+	// going back in history (up to 8 more epochs with exponential backoff)
+	for i := 1; i <= 8; i++ {
+		newEndBlock := startBlock
+		newStartBlock := newEndBlock - lookBackBlocks
+		if newStartBlock < 0 {
+			newStartBlock = 0
 		}
 
-		// If the transaction was successful
-		if receipt.Status == 1 {
-			// Get the transaction
-			tx, _, err := client.TransactionByHash(ctx, log.TxHash)
-			if err != nil {
+		// Update the filter query with new block range
+		filterQuery.FromBlock = big.NewInt(int64(newStartBlock))
+		filterQuery.ToBlock = big.NewInt(int64(newEndBlock - 1))
+
+		logger.Info("Extending search to blocks %d-%d for deposit ID %s",
+			newStartBlock, newEndBlock-1, depositId.String())
+
+		logs, err := client.FilterLogs(ctx, filterQuery)
+		if err != nil {
+			logger.Error("Failed to filter logs in extended range: %v", err)
+
+			// If we get an RPC error, reduce the range by half
+			if strings.Contains(err.Error(), "Request Entity Too Large") ||
+				strings.Contains(err.Error(), "eth_getLogs is limited") {
+				lookBackBlocks = lookBackBlocks / 2
+				if lookBackBlocks < 10 {
+					// Give up if we're already down to 10 blocks
+					break
+				}
+				logger.Info("Reducing block search range to %d blocks due to RPC limits", lookBackBlocks)
+				// Restart the current iteration
+				i--
+				continue
+			} else {
+				// For other errors, just continue to the next range
 				continue
 			}
-
-			// Try to decode input data to see if it matches our deposit ID
-			// This is a simple approach that just checks for the presence of the deposit ID
-			// in the transaction data
-			data := tx.Data()
-			depositIdHex := fmt.Sprintf("%x", depositId)
-			if len(depositIdHex)%2 != 0 {
-				depositIdHex = "0" + depositIdHex
-			}
-
-			// Search for the deposit ID in the transaction data (with padding)
-			if strings.Contains(hex.EncodeToString(data), depositIdHex) {
-				logger.Info("Found matching transaction %s for deposit ID %s",
-					log.TxHash.Hex(), depositId.String())
-				return log.TxHash.Hex(), nil
-			}
 		}
+
+		if len(logs) > 0 {
+			// Return the hash of the most recent transaction
+			txHash := logs[len(logs)-1].TxHash.Hex()
+			logger.Info("🔍 Found existing Distribution event in transaction %s for deposit ID %s (extended search)",
+				txHash, depositId.String())
+			return txHash, nil
+		}
+
+		// Update for next iteration
+		startBlock = newStartBlock
+
+		// Increase the lookback window for each iteration to search further back
+		// but cap it to avoid RPC issues
+		lookBackBlocks = lookBackBlocks * 2
+		if lookBackBlocks > 200 {
+			lookBackBlocks = 200
+		}
+	}
+
+	// As a last resort, search for all Distribution events and decode them manually
+	// This is less efficient but can handle cases where the topic filtering is problematic
+	if err := s.searchAllDistributionEvents(ctx, depositId); err != nil {
+		logger.Error("Error during fallback search: %v", err)
 	}
 
 	return "", nil
+}
+
+// Custom context key type to avoid collisions
+type contextKey string
+
+// Define a constant for the fallback depth key
+const fallbackDepthKey contextKey = "fallbackDepth"
+
+// searchAllDistributionEvents scans recent Distribution events and manually checks for our deposit ID
+// This is a fallback mechanism when the topic filtering doesn't work
+func (s *BridgeService) searchAllDistributionEvents(ctx context.Context, targetDepositId *big.Int) error {
+	client := s.monadDistributor.client
+
+	// Get current block number
+	currentBlock, err := client.BlockNumber(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get current block number: %w", err)
+	}
+
+	// Look back a reasonable number of blocks (last day or so)
+	// Try to keep within RPC limits
+	lookBackBlocks := uint64(1000)
+	startBlock := currentBlock - lookBackBlocks
+	if startBlock < 0 {
+		startBlock = 0
+	}
+
+	logger.Info("🧠 FALLBACK SEARCH: Scanning all Distribution events between blocks %d and %d for deposit ID %s",
+		startBlock, currentBlock, targetDepositId.String())
+
+	// Create a filter for just the Distribution event
+	distributionEventSignature := []byte("Distribution(address,uint256,uint256)")
+	distributionEventTopic := crypto.Keccak256Hash(distributionEventSignature)
+
+	// Query without deposit ID filter - just get all Distribution events
+	filterQuery := ethereum.FilterQuery{
+		FromBlock: big.NewInt(int64(startBlock)),
+		ToBlock:   big.NewInt(int64(currentBlock)),
+		Addresses: []common.Address{s.monadDistributor.address},
+		Topics: [][]common.Hash{
+			{distributionEventTopic}, // Event signature only
+		},
+	}
+
+	logs, err := client.FilterLogs(ctx, filterQuery)
+	if err != nil {
+		// If we got a 'request entity too large' error, try with smaller range
+		if strings.Contains(err.Error(), "Request Entity Too Large") ||
+			strings.Contains(err.Error(), "eth_getLogs is limited") {
+			lookBackBlocks = lookBackBlocks / 5 // Try with much smaller range
+			startBlock = currentBlock - lookBackBlocks
+
+			// Update the query with smaller range
+			filterQuery.FromBlock = big.NewInt(int64(startBlock))
+			logger.Info("Reducing block search range to %d blocks due to RPC limits", lookBackBlocks)
+
+			// Try again with smaller range
+			logs, err = client.FilterLogs(ctx, filterQuery)
+			if err != nil {
+				return fmt.Errorf("failed to filter logs even with reduced range: %w", err)
+			}
+		} else {
+			return fmt.Errorf("failed to filter logs in fallback search: %w", err)
+		}
+	}
+
+	logger.Info("FALLBACK SEARCH: Found %d Distribution events to check for deposit ID %s",
+		len(logs), targetDepositId.String())
+
+	// Define the ABI for the Distribution event
+	// This exactly matches what's in the smart contract
+	distributionEventABI := `[{"anonymous":false,"inputs":[{"indexed":true,"name":"recipient","type":"address"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"id","type":"uint256"}],"name":"Distribution","type":"event"}]`
+	parsedABI, err := abi.JSON(strings.NewReader(distributionEventABI))
+	if err != nil {
+		return fmt.Errorf("failed to parse ABI: %w", err)
+	}
+
+	// Check each event
+	matchCount := 0
+	for _, log := range logs {
+		// First, verify this is indeed a Distribution event
+		if len(log.Topics) == 0 || log.Topics[0] != distributionEventTopic {
+			continue
+		}
+
+		// Try to decode the event data
+		// The event has: recipient (indexed), amount, id
+		// For indexed fields, we get them from Topics
+		// For non-indexed fields, they're in the Data field
+		if len(log.Data) == 0 {
+			continue // Skip events with no data
+		}
+
+		// Parse the non-indexed fields from data
+		// We expect two uint256 values: amount and id
+		var id *big.Int
+
+		// Try to decode the data
+		decoded, err := parsedABI.Unpack("Distribution", log.Data)
+		if err != nil {
+			logger.Debug("Failed to decode event data: %v", err)
+			continue
+		}
+
+		// Ensure we have 2 parameters (amount and id)
+		if len(decoded) != 2 {
+			logger.Debug("Unexpected number of parameters in event data: %v", decoded)
+			continue
+		}
+
+		// Extract the id parameter
+		id, ok := decoded[1].(*big.Int)
+		if !ok || id == nil {
+			logger.Debug("Failed to extract ID from event data")
+			continue
+		}
+
+		// Check if this event matches our deposit ID
+		if id.Cmp(targetDepositId) == 0 {
+			matchCount++
+			logger.Info("🔍 FALLBACK SEARCH: Found matching deposit ID %s in transaction %s (block %d)",
+				targetDepositId.String(), log.TxHash.Hex(), log.BlockNumber)
+
+			// Update the database
+			if updateErr := s.UpdateTransactionStatus(ctx, targetDepositId, database.StatusCompleted, log.TxHash.Hex()); updateErr != nil {
+				logger.Error("Failed to update transaction status: %v", updateErr)
+			} else {
+				logger.Info("✅ RECOVERY: Updated transaction for deposit ID %s with Monad tx hash %s",
+					targetDepositId.String(), log.TxHash.Hex())
+
+				// Update the cache as well
+				s.txCacheMutex.Lock()
+				s.txCache[targetDepositId.String()] = &database.Transaction{
+					DepositID:   targetDepositId,
+					Status:      database.StatusCompleted,
+					MonadTxHash: log.TxHash.Hex(),
+				}
+				s.txCacheMutex.Unlock()
+
+				// We found what we were looking for
+				return nil
+			}
+		}
+	}
+
+	// Try other date ranges if nothing found and time permits
+	if matchCount == 0 && currentBlock > lookBackBlocks*2 {
+		// Try an earlier time period
+		newEnd := startBlock
+		newStart := newEnd - lookBackBlocks
+		if newStart < 0 {
+			newStart = 0
+		}
+
+		logger.Info("FALLBACK SEARCH: Extending to blocks %d-%d for deposit ID %s",
+			newStart, newEnd, targetDepositId.String())
+
+		filterQuery.FromBlock = big.NewInt(int64(newStart))
+		filterQuery.ToBlock = big.NewInt(int64(newEnd))
+
+		// Recursively call to check earlier blocks
+		// But limit to 2 recursive calls
+		if ctx.Value(fallbackDepthKey) == nil {
+			newCtx := context.WithValue(ctx, fallbackDepthKey, 1)
+			return s.searchAllDistributionEvents(newCtx, targetDepositId)
+		} else if depth, ok := ctx.Value(fallbackDepthKey).(int); ok && depth < 2 {
+			newCtx := context.WithValue(ctx, fallbackDepthKey, depth+1)
+			return s.searchAllDistributionEvents(newCtx, targetDepositId)
+		}
+	}
+
+	logger.Info("FALLBACK SEARCH: No matching deposit ID %s found after checking %d events",
+		targetDepositId.String(), len(logs))
+	return nil
 }
 
 func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType CurrencyType) *big.Int {
