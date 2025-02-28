@@ -442,3 +442,68 @@ func (db *DB) UpdateMonadTransactionHash(depositID *big.Int, monadTxHash string)
 	}
 	return nil
 }
+
+// GetTransactionByMonadTxHash retrieves a transaction by Monad transaction hash
+func (db *DB) GetTransactionByMonadTxHash(monadTxHash string) (*Transaction, error) {
+	var transaction Transaction
+	var depositIDStr, walletAddressStr, amountStr, monAmountStr string
+	var currencyInt int
+
+	row := db.QueryRow(
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at
+		FROM transaction_history 
+		WHERE monad_tx_hash = $1 
+		LIMIT 1`,
+		monadTxHash,
+	)
+
+	err := row.Scan(
+		&transaction.ID,
+		&depositIDStr,
+		&walletAddressStr,
+		&amountStr,
+		&currencyInt,
+		&monAmountStr,
+		&transaction.Status,
+		&transaction.TxHash,
+		&transaction.MonadTxHash,
+		&transaction.CreatedAt,
+		&transaction.UpdatedAt,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to scan transaction: %w", err)
+	}
+
+	// Parse the big.Int fields
+	depositID, success := new(big.Int).SetString(depositIDStr, 10)
+	if !success {
+		return nil, fmt.Errorf("failed to parse deposit_id: %s", depositIDStr)
+	}
+	transaction.DepositID = depositID
+
+	// Parse wallet address
+	transaction.WalletAddress = common.HexToAddress(walletAddressStr)
+
+	// Parse amount
+	amount, success := new(big.Int).SetString(amountStr, 10)
+	if !success {
+		return nil, fmt.Errorf("failed to parse amount: %s", amountStr)
+	}
+	transaction.Amount = amount
+
+	// Set currency
+	transaction.Currency = CurrencyType(currencyInt)
+
+	// Parse MON amount
+	monAmount, success := new(big.Int).SetString(monAmountStr, 10)
+	if !success {
+		return nil, fmt.Errorf("failed to parse mon_amount: %s", monAmountStr)
+	}
+	transaction.MonAmount = monAmount
+
+	return &transaction, nil
+}

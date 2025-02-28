@@ -146,8 +146,14 @@ func (s *BridgeService) processDeposits() {
 		case event := <-s.depositChan:
 			start := time.Now()
 			if err := s.processDeposit(event); err != nil {
-				logger.Error("Error processing deposit: %v", err)
-				s.QueueRefund(event.DepositId)
+				// Check if this is a duplicate mint error, which shouldn't trigger a refund
+				if strings.Contains(err.Error(), "duplicate mint attempt") {
+					logger.Warn("Skipping refund for duplicate mint attempt: %v", err)
+				} else {
+					// Only queue a refund for non-duplicate errors
+					logger.Error("Error processing deposit: %v", err)
+					s.QueueRefund(event.DepositId)
+				}
 			}
 			logger.Info("Processing time: %v", time.Since(start))
 		}
@@ -319,18 +325,17 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 	existingTx, err := s.db.GetTransactionByDepositID(depositId)
 	if err == nil && existingTx != nil {
 		// If there's already a completed transaction for this deposit ID, return the existing hash
-		if existingTx.Status == database.StatusCompleted && existingTx.TxHash != "" {
-			logger.Warn("Skipping duplicate mint attempt for deposit ID %s - already processed with tx %s",
-				depositId.String(), existingTx.TxHash)
-			return existingTx.TxHash, nil
+		if existingTx.Status == database.StatusCompleted && existingTx.MonadTxHash != "" {
+			logger.Warn("Skipping duplicate mint attempt for deposit ID %s - already completed with tx %s",
+				depositId.String(), existingTx.MonadTxHash)
+			return existingTx.MonadTxHash, nil
 		}
 
-		// If there's already a transaction in progress with a Monad tx hash, reject this duplicate attempt
-		if existingTx.Status == database.StatusPending && existingTx.TxHash != "" &&
-			!strings.HasPrefix(existingTx.TxHash, "0x408") { // Check if it's a Monad tx (not the Arbitrum tx)
-			logger.Warn("Rejecting duplicate mint attempt for deposit ID %s - already in progress",
-				depositId.String())
-			return "", fmt.Errorf("duplicate mint attempt for deposit ID %s", depositId.String())
+		// If there's already a transaction in progress with a Monad tx hash, provide a specific error
+		if existingTx.Status == database.StatusPending && existingTx.MonadTxHash != "" {
+			logger.Warn("Rejecting duplicate mint attempt for deposit ID %s - already in progress with tx %s",
+				depositId.String(), existingTx.MonadTxHash)
+			return "", fmt.Errorf("duplicate mint attempt for deposit ID %s - distribution already in progress", depositId.String())
 		}
 	}
 
