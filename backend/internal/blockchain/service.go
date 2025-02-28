@@ -315,8 +315,19 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 	}
 
 	// Update transaction status to completed with the Monad transaction hash
+	logger.Info("🔄 Updating transaction status to completed for deposit ID %s with Monad tx hash %s",
+		event.DepositId.String(), txHash)
 	if err := s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusCompleted, txHash); err != nil {
 		logger.Error("Failed to update transaction status to completed: %v", err)
+	} else {
+		// Verify the update was successful
+		tx, err := s.GetTransactionByDepositID(ctx, event.DepositId)
+		if err != nil {
+			logger.Error("Failed to verify transaction update: %v", err)
+		} else {
+			logger.Info("✅ Transaction status updated successfully: deposit_id=%s, status=%s, monad_tx_hash=%s",
+				event.DepositId.String(), tx.Status, tx.MonadTxHash)
+		}
 	}
 
 	// Update wallet usage after successful mint
@@ -1173,7 +1184,7 @@ func (s *BridgeService) FindMonadTransactionByDepositID(ctx context.Context, dep
 		// If status is completed but no hash, it might be special handling
 		if tx.Status == database.StatusCompleted {
 			logger.Info("Transaction marked as completed in database: %s", depositID.String())
-			return "", "success", nil
+			return tx.MonadTxHash, "success", nil
 		}
 	}
 
