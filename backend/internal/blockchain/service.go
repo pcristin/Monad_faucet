@@ -113,6 +113,11 @@ func (s *BridgeService) Start() error {
 	go s.processDeposits()
 	s.wg.Add(1)
 	go s.processRefunds()
+
+	// Add recovery process
+	s.wg.Add(1)
+	go s.recoverStuckTransactionsPeriodically()
+
 	return nil
 }
 
@@ -299,6 +304,27 @@ func (s *BridgeService) finishProcessingDeposit(depositID *big.Int) {
 func (s *BridgeService) processDeposit(event DepositEvent) error {
 	startTime := time.Now()
 
+	// Acquire a distributed lock for this deposit
+	lockSuccess, lockErr := s.db.AcquireProcessingLock(event.DepositId, s.instanceID, s.lockDuration)
+	if lockErr != nil {
+		logger.Error("Failed to acquire processing lock: %v", lockErr)
+		return fmt.Errorf("failed to acquire processing lock: %w", lockErr)
+	}
+	if !lockSuccess {
+		logger.Warn("Unable to acquire processing lock for deposit ID %s, it may be processed by another instance", event.DepositId.String())
+		return fmt.Errorf("deposit already being processed by another instance")
+	}
+	logger.Info("🔒 Acquired processing lock for deposit ID %s", event.DepositId.String())
+
+	// Ensure we release the lock when done
+	defer func() {
+		if releaseErr := s.db.ReleaseProcessingLock(event.DepositId, s.instanceID); releaseErr != nil {
+			logger.Error("Failed to release processing lock: %v", releaseErr)
+		} else {
+			logger.Info("🔓 Released processing lock for deposit ID %s", event.DepositId.String())
+		}
+	}()
+
 	// Double-check if this transaction was already completed
 	existingTx, err := s.GetTransactionByDepositID(context.Background(), event.DepositId)
 	if err == nil && existingTx != nil && existingTx.Status == database.StatusCompleted {
@@ -400,12 +426,23 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 			strings.Contains(err.Error(), "already in progress") ||
 			strings.Contains(err.Error(), "duplicate mint attempt") {
 			logger.Warn("Skipping refund for duplicate transaction attempt: %v", err)
-			// Don't update status to failed or queue a refund for duplicate attempts
+
+			// Check if we got a txHash back despite the error - this means we found a completed transaction
+			if txHash != "" {
+				logger.Info("Found completed transaction with hash %s, updating status", txHash)
+				// Update status to completed if we have a valid transaction hash
+				updateErr := s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusCompleted, txHash)
+				if updateErr != nil {
+					logger.Error("Failed to update transaction status: %v", updateErr)
+				}
+			}
+
 			return fmt.Errorf("duplicate mint attempt: %w", err)
 		}
 
+		logger.Error("Mint tokens failed: %v. Deposit: %v", err, event)
+
 		// For other errors, update status and queue a refund
-		logger.Error("Failed to mint tokens: %v", err)
 		updateErr := s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusFailed, "")
 		if updateErr != nil {
 			logger.Error("Failed to update transaction status: %v", updateErr)
@@ -537,10 +574,19 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		if existingTx.Status == database.StatusCompleted && existingTx.MonadTxHash != "" {
 			log.Printf("⚠️ DUPLICATE PREVENTION: Deposit ID %s already has a completed transaction with Monad hash %s",
 				depositId.String(), existingTx.MonadTxHash)
-			return existingTx.MonadTxHash, fmt.Errorf("transaction already completed for deposit ID %s", depositId.String())
+			return existingTx.MonadTxHash, nil // Return the hash without error so status update proceeds
 		}
 
+		// For transactions in progress, check if there's a completed transaction on Monad
 		if existingTx.Status == database.StatusPending {
+			// Try to find if there's already a completed transaction on Monad
+			monadTxHash, status, err := s.FindMonadTransactionByDepositID(ctx, depositId)
+			if err == nil && monadTxHash != "" && status == "success" {
+				log.Printf("📌 Found existing Monad transaction %s for deposit ID %s",
+					monadTxHash, depositId.String())
+				return monadTxHash, nil // Return the hash without error so status update proceeds
+			}
+
 			log.Printf("⚠️ DUPLICATE PREVENTION: Deposit ID %s is already being processed with a pending transaction",
 				depositId.String())
 			return "", fmt.Errorf("another transaction for deposit ID %s is already in progress", depositId.String())
@@ -1421,5 +1467,80 @@ func logMonCalculation(event DepositEvent, monAmount *big.Int) {
 			formatMonAmount(monAmount),
 			monAmount.String(),
 		)
+	}
+}
+
+// RecoverStuckTransactions checks for transactions stuck in pending state
+// and updates them if they're actually completed on Monad
+func (s *BridgeService) RecoverStuckTransactions(ctx context.Context) error {
+	// Query all pending transactions
+	pendingTxs, err := s.db.GetTransactionsByStatus(database.StatusPending, 100, 0)
+	if err != nil {
+		return fmt.Errorf("failed to get pending transactions: %w", err)
+	}
+
+	logger.Info("Checking %d pending transactions for recovery", len(pendingTxs))
+
+	for _, tx := range pendingTxs {
+		// Skip very recent transactions (less than 5 minutes old)
+		if time.Since(tx.CreatedAt) < 5*time.Minute {
+			logger.Info("Skipping recent transaction for deposit ID %s (created %s ago)",
+				tx.DepositID.String(), time.Since(tx.CreatedAt).Round(time.Second))
+			continue
+		}
+
+		// Try to find if this transaction exists on Monad
+		monadTxHash, status, err := s.FindMonadTransactionByDepositID(ctx, tx.DepositID)
+		if err == nil && monadTxHash != "" && status == "success" {
+			logger.Info("📌 Recovering transaction: deposit ID %s has completed Monad transaction %s",
+				tx.DepositID.String(), monadTxHash)
+
+			// Update the transaction status
+			if updateErr := s.UpdateTransactionStatus(ctx, tx.DepositID, database.StatusCompleted, monadTxHash); updateErr != nil {
+				logger.Error("Failed to update recovered transaction: %v", updateErr)
+			} else {
+				logger.Info("✅ Successfully recovered transaction for deposit ID %s", tx.DepositID.String())
+			}
+			continue
+		}
+
+		// If it's been pending for more than 30 minutes, mark as failed
+		if time.Since(tx.CreatedAt) > 30*time.Minute {
+			logger.Warn("Transaction for deposit ID %s has been pending for more than 30 minutes, marking as failed",
+				tx.DepositID.String())
+			if updateErr := s.UpdateTransactionStatus(ctx, tx.DepositID, database.StatusFailed, ""); updateErr != nil {
+				logger.Error("Failed to mark timed out transaction as failed: %v", updateErr)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (s *BridgeService) recoverStuckTransactionsPeriodically() {
+	defer s.wg.Done()
+	logger.Info("Starting stuck transaction recovery processor...")
+
+	// Run immediately on startup to fix any existing issues
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
+	if err := s.RecoverStuckTransactions(ctx); err != nil {
+		logger.Error("Error in initial transaction recovery: %v", err)
+	}
+	cancel()
+
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
+			if err := s.RecoverStuckTransactions(ctx); err != nil {
+				logger.Error("Error in transaction recovery: %v", err)
+			}
+			cancel()
+		}
 	}
 }

@@ -646,3 +646,88 @@ func (db *DB) GetLockedDeposits() ([]*big.Int, error) {
 
 	return deposits, nil
 }
+
+// GetTransactionsByStatus retrieves transactions with the specified status
+// limit: maximum number of transactions to return (use 0 for no limit)
+// offset: number of transactions to skip (use for pagination)
+func (db *DB) GetTransactionsByStatus(status string, limit, offset int) ([]*Transaction, error) {
+	query := `
+		SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at
+		FROM transaction_history
+		WHERE status = $1
+		ORDER BY created_at DESC
+	`
+
+	args := []interface{}{status}
+
+	if limit > 0 {
+		query += " LIMIT $2"
+		args = append(args, limit)
+
+		if offset > 0 {
+			query += " OFFSET $3"
+			args = append(args, offset)
+		}
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query transactions by status: %w", err)
+	}
+	defer rows.Close()
+
+	var transactions []*Transaction
+	for rows.Next() {
+		var tx Transaction
+		var depositIDStr, amountStr, monAmountStr, walletAddrStr string
+
+		err := rows.Scan(
+			&tx.ID,
+			&depositIDStr,
+			&walletAddrStr,
+			&amountStr,
+			&tx.Currency,
+			&monAmountStr,
+			&tx.Status,
+			&tx.TxHash,
+			&tx.MonadTxHash,
+			&tx.CreatedAt,
+			&tx.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan transaction row: %w", err)
+		}
+
+		// Convert deposit_id string to *big.Int
+		depositID, ok := new(big.Int).SetString(depositIDStr, 10)
+		if !ok {
+			return nil, fmt.Errorf("failed to convert deposit_id %s to big.Int", depositIDStr)
+		}
+		tx.DepositID = depositID
+
+		// Convert amount string to *big.Int
+		amount, ok := new(big.Int).SetString(amountStr, 10)
+		if !ok {
+			return nil, fmt.Errorf("failed to convert amount %s to big.Int", amountStr)
+		}
+		tx.Amount = amount
+
+		// Convert mon_amount string to *big.Int
+		monAmount, ok := new(big.Int).SetString(monAmountStr, 10)
+		if !ok {
+			return nil, fmt.Errorf("failed to convert mon_amount %s to big.Int", monAmountStr)
+		}
+		tx.MonAmount = monAmount
+
+		// Convert wallet address string to common.Address
+		tx.WalletAddress = common.HexToAddress(walletAddrStr)
+
+		transactions = append(transactions, &tx)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating transaction rows: %w", err)
+	}
+
+	return transactions, nil
+}
