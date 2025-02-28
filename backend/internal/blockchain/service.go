@@ -319,16 +319,34 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 		event.DepositId.String(), txHash)
 	if err := s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusCompleted, txHash); err != nil {
 		logger.Error("Failed to update transaction status to completed: %v", err)
+		// Even though the update failed, the tokens were minted successfully
+		// Let's log the Monad tx hash to make it easier to find in case of issues
+		logger.Error("IMPORTANT: Transaction status update failed, but tokens were minted! Deposit ID: %s, Monad tx hash: %s",
+			event.DepositId.String(), txHash)
 	} else {
-		// Verify the update was successful
+		// Verify the update was successful by querying the database
 		tx, err := s.GetTransactionByDepositID(ctx, event.DepositId)
 		if err != nil {
 			logger.Error("Failed to verify transaction update: %v", err)
 		} else {
-			logger.Info("✅ Transaction status updated successfully: deposit_id=%s, status=%s, monad_tx_hash=%s",
-				event.DepositId.String(), tx.Status, tx.MonadTxHash)
+			if tx.Status == database.StatusCompleted && tx.MonadTxHash == txHash {
+				logger.Info("✅ Transaction status updated correctly: deposit_id=%s, status=%s, monad_tx_hash=%s",
+					event.DepositId.String(), tx.Status, tx.MonadTxHash)
+			} else {
+				logger.Warn("⚠️ Transaction status may not have updated correctly: deposit_id=%s, current_status=%s, monad_tx_hash=%s (expected: %s)",
+					event.DepositId.String(), tx.Status, tx.MonadTxHash, txHash)
+			}
 		}
 	}
+
+	// Also update the cache to reflect the completed transaction
+	s.txCacheMutex.Lock()
+	s.txCache[event.DepositId.String()] = &database.Transaction{
+		DepositID:   event.DepositId,
+		Status:      database.StatusCompleted,
+		MonadTxHash: txHash,
+	}
+	s.txCacheMutex.Unlock()
 
 	// Update wallet usage after successful mint
 	s.updateWalletUsage(event.Depositor, monAmount)
@@ -1176,16 +1194,20 @@ func (s *BridgeService) FindMonadTransactionByDepositID(ctx context.Context, dep
 		logger.Info("Found transaction in database: deposit_id=%s, status=%s, monad_tx_hash=%s",
 			depositID.String(), tx.Status, tx.MonadTxHash)
 
-		// If there's a Monad transaction hash in the database, use it
+		// If status is completed, return the hash and success status
+		if tx.Status == database.StatusCompleted {
+			logger.Info("Transaction marked as completed in database: %s, returning hash: %s",
+				depositID.String(), tx.MonadTxHash)
+			return tx.MonadTxHash, "success", nil
+		}
+
+		// For other statuses with a hash, return the hash and status
 		if tx.MonadTxHash != "" {
 			return tx.MonadTxHash, string(tx.Status), nil
 		}
 
-		// If status is completed but no hash, it might be special handling
-		if tx.Status == database.StatusCompleted {
-			logger.Info("Transaction marked as completed in database: %s", depositID.String())
-			return tx.MonadTxHash, "success", nil
-		}
+		// Return the status without a hash for other cases
+		return "", string(tx.Status), nil
 	}
 
 	// Not found in database
