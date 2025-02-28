@@ -3,6 +3,7 @@ package blockchain
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"math/big"
@@ -548,42 +549,46 @@ func (s *BridgeService) waitForConfirmations(ctx context.Context, blockNumber ui
 
 // mintTokens mints MON tokens on the Monad blockchain
 func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address, amount *big.Int, depositId *big.Int) (string, error) {
-	// Additional safeguard: check if there are any existing transactions (completed or pending) for this deposit ID
+	// First check if this transaction is already completed in database
 	existingTx, err := s.GetTransactionByDepositID(ctx, depositId)
-	if err == nil && existingTx != nil {
-		if existingTx.Status == database.StatusCompleted && existingTx.MonadTxHash != "" {
-			log.Printf("⚠️ DUPLICATE PREVENTION: Deposit ID %s already has a completed transaction with Monad hash %s",
-				depositId.String(), existingTx.MonadTxHash)
-			return existingTx.MonadTxHash, nil // Return the hash without error so status update proceeds
-		}
-
-		// For transactions in progress, check if there's a completed transaction on Monad
-		if existingTx.Status == database.StatusPending {
-			// Try to find if there's already a completed transaction on Monad
-			monadTxHash, status, err := s.FindMonadTransactionByDepositID(ctx, depositId)
-			if err == nil && monadTxHash != "" && status == "success" {
-				log.Printf("📌 Found existing Monad transaction %s for deposit ID %s",
-					monadTxHash, depositId.String())
-				return monadTxHash, nil // Return the hash without error so status update proceeds
-			}
-
-			log.Printf("⚠️ DUPLICATE PREVENTION: Deposit ID %s is already being processed with a pending transaction",
-				depositId.String())
-			return "", fmt.Errorf("another transaction for deposit ID %s is already in progress", depositId.String())
-		}
+	if err == nil && existingTx != nil && existingTx.Status == database.StatusCompleted && existingTx.MonadTxHash != "" {
+		logger.Info("⚠️ DUPLICATE PREVENTION: Deposit ID %s already has a completed transaction with Monad hash %s",
+			depositId.String(), existingTx.MonadTxHash)
+		return existingTx.MonadTxHash, nil
 	}
 
-	// Normal transaction lookup that was added in previous fix
-	// See if we've already processed this transaction to prevent duplicate mints
+	// For pending transactions, actively check on the Monad blockchain if it's already been processed
+	if err == nil && existingTx != nil && existingTx.Status == database.StatusPending {
+		// Check Monad blockchain directly
+		monadTxHash, err := s.checkMonadBlockchainForTransaction(ctx, depositId)
+		if err == nil && monadTxHash != "" {
+			logger.Info("🔍 Found existing transaction on Monad blockchain: %s for deposit ID %s",
+				monadTxHash, depositId.String())
+
+			// Update database with Monad tx hash
+			if updateErr := s.UpdateTransactionStatus(ctx, depositId, database.StatusCompleted, monadTxHash); updateErr != nil {
+				logger.Error("Failed to update transaction status: %v", updateErr)
+			}
+
+			return monadTxHash, nil
+		}
+
+		// If we get here, the transaction is actually pending and needs processing
+		// DO NOT throw an error - we need to process this transaction
+		logger.Info("Transaction for deposit ID %s is pending and needs processing", depositId.String())
+	}
+
+	// Check transaction cache as well
 	txLookupKey := depositId.String()
 	s.txCacheMutex.RLock()
 	cachedTx, found := s.txCache[txLookupKey]
 	s.txCacheMutex.RUnlock()
 
-	if found && cachedTx.Status != database.StatusPending {
+	if found && cachedTx.Status == database.StatusCompleted && cachedTx.MonadTxHash != "" {
 		return cachedTx.MonadTxHash, nil
 	}
 
+	// Proceed with the regular minting process
 	transfer := []struct {
 		Recipient common.Address `abi:"recipient"`
 		Amount    *big.Int       `abi:"amount"`
@@ -601,10 +606,16 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		return "", fmt.Errorf("failed to get transaction options: %v", err)
 	}
 
+	// Log that we're about to submit the transaction
+	logger.Info("⏳ Submitting Monad transaction for deposit ID %s", depositId.String())
+
 	tx, err := s.monadDistributor.BoundContract.Transact(opts, "distributeFunds", transfer)
 	if err != nil {
 		return "", fmt.Errorf("failed to distribute funds: %v", err)
 	}
+
+	logger.Info("⏳ Waiting for Monad transaction %s for deposit ID %s to be mined",
+		tx.Hash().Hex(), depositId.String())
 
 	receipt, err := bind.WaitMined(ctx, s.monadDistributor.client, tx)
 	if err != nil {
@@ -615,18 +626,115 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		return "", fmt.Errorf("distribution transaction failed")
 	}
 
-	// Format amount to a readable form (18 decimal places)
+	// Format amount for logging
 	amountStr := new(big.Float).Quo(
 		new(big.Float).SetInt(amount),
 		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 	).Text('f', 6)
 
-	logger.Info("✅ Distributed %s MON to %s (tx: %s)",
+	// Log the successful transaction
+	logger.Info("✅ Successfully distributed %s MON to %s (tx: %s)",
 		amountStr,
 		recipient.Hex(),
 		tx.Hash().Hex())
 
+	// CRITICAL: Immediately update the transaction status in database
+	if err := s.UpdateTransactionStatus(ctx, depositId, database.StatusCompleted, tx.Hash().Hex()); err != nil {
+		// Log the error but don't fail - tokens were still distributed
+		logger.Error("CRITICAL: Failed to update transaction status: %v", err)
+		logger.Error("IMPORTANT: Transaction status update failed, but tokens were minted! Deposit ID: %s, Monad tx hash: %s",
+			depositId.String(), tx.Hash().Hex())
+	} else {
+		// Verify the update
+		verifyTx, verifyErr := s.db.GetTransactionByDepositID(depositId)
+		if verifyErr != nil {
+			logger.Error("Failed to verify transaction update: %v", verifyErr)
+		} else if verifyTx.Status != database.StatusCompleted || verifyTx.MonadTxHash != tx.Hash().Hex() {
+			logger.Error("CRITICAL: Transaction verify failed - current status=%s, monad_tx_hash=%s",
+				verifyTx.Status, verifyTx.MonadTxHash)
+		} else {
+			logger.Info("✅ Database update confirmed for deposit ID %s with Monad tx hash %s",
+				depositId.String(), tx.Hash().Hex())
+		}
+	}
+
 	return tx.Hash().Hex(), nil
+}
+
+// checkMonadBlockchainForTransaction attempts to find a transaction on the Monad blockchain
+// for a given deposit ID. This is used for recovery purposes.
+func (s *BridgeService) checkMonadBlockchainForTransaction(ctx context.Context, depositId *big.Int) (string, error) {
+	client := s.monadDistributor.client
+
+	// First try to query recent events from the contract
+	// We'd ideally look for TransferSingle events from the ERC1155 contract
+	// or specific DistributeFunds events from our distributor contract
+
+	// Get current block number
+	currentBlock, err := client.BlockNumber(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get current block number: %w", err)
+	}
+
+	// Look back at most 500 blocks
+	// Adjust as needed based on your expected transaction volume and confirmation time
+	lookBackBlocks := uint64(500)
+	if currentBlock < lookBackBlocks {
+		lookBackBlocks = currentBlock
+	}
+
+	startBlock := currentBlock - lookBackBlocks
+
+	// Create a filter query
+	filterQuery := ethereum.FilterQuery{
+		FromBlock: big.NewInt(int64(startBlock)),
+		ToBlock:   big.NewInt(int64(currentBlock)),
+		Addresses: []common.Address{s.monadDistributor.address},
+	}
+
+	logs, err := client.FilterLogs(ctx, filterQuery)
+	if err != nil {
+		logger.Error("Failed to filter logs: %v", err)
+		return "", err
+	}
+
+	logger.Info("Searching %d logs for deposit ID %s", len(logs), depositId.String())
+
+	// Search logs for events involving our deposit ID
+	for _, log := range logs {
+		// Check if there's a transaction receipt
+		receipt, err := client.TransactionReceipt(ctx, log.TxHash)
+		if err != nil {
+			continue
+		}
+
+		// If the transaction was successful
+		if receipt.Status == 1 {
+			// Get the transaction
+			tx, _, err := client.TransactionByHash(ctx, log.TxHash)
+			if err != nil {
+				continue
+			}
+
+			// Try to decode input data to see if it matches our deposit ID
+			// This is a simple approach that just checks for the presence of the deposit ID
+			// in the transaction data
+			data := tx.Data()
+			depositIdHex := fmt.Sprintf("%x", depositId)
+			if len(depositIdHex)%2 != 0 {
+				depositIdHex = "0" + depositIdHex
+			}
+
+			// Search for the deposit ID in the transaction data (with padding)
+			if strings.Contains(hex.EncodeToString(data), depositIdHex) {
+				logger.Info("Found matching transaction %s for deposit ID %s",
+					log.TxHash.Hex(), depositId.String())
+				return log.TxHash.Hex(), nil
+			}
+		}
+	}
+
+	return "", nil
 }
 
 func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType CurrencyType) *big.Int {
