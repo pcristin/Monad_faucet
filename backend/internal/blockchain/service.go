@@ -304,26 +304,15 @@ func (s *BridgeService) finishProcessingDeposit(depositID *big.Int) {
 func (s *BridgeService) processDeposit(event DepositEvent) error {
 	startTime := time.Now()
 
-	// Acquire a distributed lock for this deposit
-	lockSuccess, lockErr := s.db.AcquireProcessingLock(event.DepositId, s.instanceID, s.lockDuration)
-	if lockErr != nil {
-		logger.Error("Failed to acquire processing lock: %v", lockErr)
-		return fmt.Errorf("failed to acquire processing lock: %w", lockErr)
+	// First, check if this deposit is already being processed
+	if s.isProcessingDeposit(event.DepositId) {
+		// This is a duplicate attempt, just return without error
+		logger.Warn("Skipping duplicate processing attempt for deposit ID %s", event.DepositId.String())
+		return nil
 	}
-	if !lockSuccess {
-		logger.Warn("Unable to acquire processing lock for deposit ID %s, it may be processed by another instance", event.DepositId.String())
-		return fmt.Errorf("deposit already being processed by another instance")
-	}
-	logger.Info("🔒 Acquired processing lock for deposit ID %s", event.DepositId.String())
 
-	// Ensure we release the lock when done
-	defer func() {
-		if releaseErr := s.db.ReleaseProcessingLock(event.DepositId, s.instanceID); releaseErr != nil {
-			logger.Error("Failed to release processing lock: %v", releaseErr)
-		} else {
-			logger.Info("🔓 Released processing lock for deposit ID %s", event.DepositId.String())
-		}
-	}()
+	// Always mark the deposit as finished processing when we're done
+	defer s.finishProcessingDeposit(event.DepositId)
 
 	// Double-check if this transaction was already completed
 	existingTx, err := s.GetTransactionByDepositID(context.Background(), event.DepositId)
@@ -332,15 +321,6 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 			event.DepositId.String(), existingTx.MonadTxHash)
 		return nil
 	}
-
-	// Check if this deposit is already being processed to prevent parallel processing
-	if s.isProcessingDeposit(event.DepositId) {
-		// This is a duplicate attempt, just return without error
-		return nil
-	}
-
-	// Always mark the deposit as finished processing when we're done
-	defer s.finishProcessingDeposit(event.DepositId)
 
 	logger.Info("Processing deposit %s", event)
 
@@ -635,13 +615,17 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		return "", fmt.Errorf("distribution transaction failed")
 	}
 
+	// Format amount to a readable form (18 decimal places)
+	amountStr := new(big.Float).Quo(
+		new(big.Float).SetInt(amount),
+		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+	).Text('f', 6)
+
 	logger.Info("✅ Distributed %s MON to %s (tx: %s)",
-		new(big.Float).Quo(
-			new(big.Float).SetInt(amount),
-			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))).Text('f', 9),
+		amountStr,
 		recipient.Hex(),
-		tx.Hash().Hex(),
-	)
+		tx.Hash().Hex())
+
 	return tx.Hash().Hex(), nil
 }
 
@@ -765,7 +749,7 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 
 	ethUsdPriceFloat := new(big.Float).Quo(
 		new(big.Float).SetInt(ethUsdPrice),
-		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil)), // 8 decimals for Chainlink
+		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil)),
 	)
 
 	monUsdRatioFloat := new(big.Float).Quo(
