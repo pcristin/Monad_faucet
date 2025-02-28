@@ -1162,12 +1162,12 @@ func (s *BridgeService) FindMonadTransactionByDepositID(ctx context.Context, dep
 	// Try looking in the database as a first option
 	tx, err := s.db.GetTransactionByDepositID(depositID)
 	if err == nil && tx != nil {
-		logger.Info("Found transaction in database: deposit_id=%s, status=%s, tx_hash=%s",
-			depositID.String(), tx.Status, tx.TxHash)
+		logger.Info("Found transaction in database: deposit_id=%s, status=%s, monad_tx_hash=%s",
+			depositID.String(), tx.Status, tx.MonadTxHash)
 
-		// If there's a transaction hash in the database, use it
-		if tx.TxHash != "" {
-			return tx.TxHash, string(tx.Status), nil
+		// If there's a Monad transaction hash in the database, use it
+		if tx.MonadTxHash != "" {
+			return tx.MonadTxHash, string(tx.Status), nil
 		}
 
 		// If status is completed but no hash, it might be special handling

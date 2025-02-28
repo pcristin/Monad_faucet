@@ -439,6 +439,7 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 	var req struct {
 		TxHash         string `json:"tx_hash"`
 		ArbitrumTxHash string `json:"arbitrum_tx_hash"`
+		DepositID      string `json:"deposit_id"` // Add support for deposit ID lookup
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -455,15 +456,62 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 	}
 
 	// Log the transaction status request
-	logger.Info("Transaction status request: tx_hash=%s, client_ip=%s, user_agent=%s",
-		txHash, c.ClientIP(), c.Request.UserAgent())
+	logger.Info("Transaction status request: tx_hash=%s, deposit_id=%s, client_ip=%s, user_agent=%s",
+		txHash, req.DepositID, c.ClientIP(), c.Request.UserAgent())
 
-	// Check for empty tx_hash
+	// Check if we have a deposit ID instead of a tx hash
+	if req.DepositID != "" {
+		// Convert deposit ID to big.Int
+		depositID, success := new(big.Int).SetString(req.DepositID, 10)
+		if !success {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "Invalid deposit ID format",
+				"status":  "error",
+				"message": "Please provide a valid deposit ID",
+			})
+			return
+		}
+
+		// Try to get transaction by deposit ID
+		tx, err := h.bridgeService.GetTransactionByDepositID(c.Request.Context(), depositID)
+		if err == nil && tx != nil {
+			// We found a transaction by deposit ID
+			response := struct {
+				Status            string            `json:"status"`
+				Message           string            `json:"message"`
+				Txs               map[string]string `json:"txs,omitempty"`
+				DepositID         string            `json:"deposit_id,omitempty"`
+				ArbitrumTxHash    string            `json:"arbitrum_tx_hash,omitempty"`
+				MonadTxHash       string            `json:"monad_tx_hash,omitempty"`
+				RefundTxHash      string            `json:"refund_tx_hash,omitempty"`
+				RefundDestination string            `json:"refund_destination,omitempty"`
+			}{
+				Txs: make(map[string]string),
+			}
+
+			response.DepositID = tx.DepositID.String()
+			response.ArbitrumTxHash = tx.TxHash
+			if tx.TxHash != "" {
+				response.Txs["Arbitrum"] = tx.TxHash
+			}
+			if tx.MonadTxHash != "" {
+				response.Txs["Monad"] = tx.MonadTxHash
+				response.MonadTxHash = tx.MonadTxHash
+			}
+
+			// Process the status
+			processTransactionStatus(tx, &response, h.bridgeService, c)
+			c.JSON(http.StatusOK, response)
+			return
+		}
+	}
+
+	// If no deposit ID or deposit ID lookup failed, check for empty tx_hash
 	if txHash == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "Transaction hash cannot be empty",
 			"status":  "error",
-			"message": "Please provide a valid transaction hash",
+			"message": "Please provide a valid transaction hash or deposit ID",
 		})
 		return
 	}
@@ -526,6 +574,32 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 			processTransactionStatus(tx, &response, h.bridgeService, c)
 			c.JSON(http.StatusOK, response)
 			return
+		}
+	}
+
+	// If we have an Arbitrum hash but no transaction was found directly,
+	// try to extract deposit ID from this transaction on the Arbitrum chain
+	if strings.HasPrefix(txHash, "0x") {
+		// Try to get deposit ID from the Arbitrum transaction
+		depositID, err := h.bridgeService.GetDepositIDFromTxHash(c.Request.Context(), txHash)
+		if err == nil && depositID != nil {
+			// Found a deposit ID, now look up the transaction
+			tx, err := h.bridgeService.GetTransactionByDepositID(c.Request.Context(), depositID)
+			if err == nil && tx != nil {
+				// We found a transaction by deposit ID
+				response.DepositID = depositID.String()
+				response.ArbitrumTxHash = txHash
+				if tx.MonadTxHash != "" {
+					response.Txs["Monad"] = tx.MonadTxHash
+					response.MonadTxHash = tx.MonadTxHash
+				}
+				response.Txs["Arbitrum"] = txHash
+
+				// Process the status
+				processTransactionStatus(tx, &response, h.bridgeService, c)
+				c.JSON(http.StatusOK, response)
+				return
+			}
 		}
 	}
 

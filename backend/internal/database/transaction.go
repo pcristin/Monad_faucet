@@ -155,30 +155,57 @@ func (db *DB) GetTransactionByArbitrumTxHash(txHash string) (*Transaction, error
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			// Try to find it in the transaction_metadata table if it exists
-			var depositIDStr string
-			err = db.QueryRow(
-				`SELECT deposit_id FROM transaction_metadata 
-				WHERE key = 'arbitrum_tx_hash' AND value = $1`,
-				txHash,
-			).Scan(&depositIDStr)
+			// Try a more flexible query to find any transaction with this hash
+			// This will catch cases where the Arbitrum hash might be stored in a different way
+			err := db.QueryRow(
+				`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at 
+				FROM transaction_history 
+				WHERE tx_hash LIKE $1 OR monad_tx_hash LIKE $1`,
+				"%"+txHash[2:]+"%", // Search for the hash without 0x prefix
+			).Scan(
+				&tx.ID,
+				&depositIDStr,
+				&walletAddressStr,
+				&amountStr,
+				&currencyInt,
+				&monAmountStr,
+				&tx.Status,
+				&tx.TxHash,
+				&tx.MonadTxHash,
+				&tx.CreatedAt,
+				&tx.UpdatedAt,
+			)
 
 			if err != nil {
 				if err == sql.ErrNoRows {
-					return nil, fmt.Errorf("transaction not found for Arbitrum tx hash: %s", txHash)
+					// Try to find it in the transaction_metadata table if it exists
+					var depositIDStr string
+					err = db.QueryRow(
+						`SELECT deposit_id FROM transaction_metadata 
+						WHERE key = 'arbitrum_tx_hash' AND value = $1`,
+						txHash,
+					).Scan(&depositIDStr)
+
+					if err != nil {
+						if err == sql.ErrNoRows {
+							return nil, fmt.Errorf("transaction not found for Arbitrum tx hash: %s", txHash)
+						}
+						return nil, fmt.Errorf("failed to query transaction metadata: %w", err)
+					}
+
+					// Now get the transaction by deposit ID
+					depositID, ok := new(big.Int).SetString(depositIDStr, 10)
+					if !ok {
+						return nil, fmt.Errorf("invalid deposit ID format in metadata: %s", depositIDStr)
+					}
+
+					return db.GetTransactionByDepositID(depositID)
 				}
-				return nil, fmt.Errorf("failed to query transaction metadata: %w", err)
+				return nil, fmt.Errorf("failed to get transaction with flexible query: %w", err)
 			}
-
-			// Now get the transaction by deposit ID
-			depositID, ok := new(big.Int).SetString(depositIDStr, 10)
-			if !ok {
-				return nil, fmt.Errorf("invalid deposit ID format in metadata: %s", depositIDStr)
-			}
-
-			return db.GetTransactionByDepositID(depositID)
+		} else {
+			return nil, fmt.Errorf("failed to get transaction: %w", err)
 		}
-		return nil, fmt.Errorf("failed to get transaction: %w", err)
 	}
 
 	// Convert strings to appropriate types
