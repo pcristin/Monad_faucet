@@ -490,7 +490,8 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 
 			logger.Info("Including Monad hash in response",
 				slog.String("monad_tx_hash", tx.MonadTxHash),
-				slog.String("deposit_id", tx.DepositID.String()))
+				slog.String("deposit_id", tx.DepositID.String()),
+				slog.String("response_txs", fmt.Sprintf("%+v", response.Txs)))
 		}
 
 		return response
@@ -556,6 +557,22 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 						// Update tx object for response
 						tx.Status = "completed"
 						tx.MonadTxHash = monadTxHash
+
+						// Verify the update was successful
+						verifyTx, verifyErr := h.bridgeService.GetDB().GetTransactionByDepositID(tx.DepositID)
+						if verifyErr != nil {
+							logger.Error("Error verifying transaction update", slog.String("error", verifyErr.Error()))
+						} else if verifyTx.Status != "completed" || verifyTx.MonadTxHash != monadTxHash {
+							logger.Error("Transaction update verification failed",
+								slog.String("expected_status", "completed"),
+								slog.String("actual_status", verifyTx.Status),
+								slog.String("expected_hash", monadTxHash),
+								slog.String("actual_hash", verifyTx.MonadTxHash))
+						} else {
+							logger.Info("Transaction update verified successfully",
+								slog.String("status", verifyTx.Status),
+								slog.String("monad_tx_hash", verifyTx.MonadTxHash))
+						}
 
 						// Log that we found and are including the Monad hash
 						logger.Info("Including completed Monad transaction in response",
@@ -679,6 +696,22 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 						tx.Status = "completed"
 						tx.MonadTxHash = monadTxHash
 
+						// Verify the update was successful
+						verifyTx, verifyErr := h.bridgeService.GetDB().GetTransactionByDepositID(tx.DepositID)
+						if verifyErr != nil {
+							logger.Error("Error verifying transaction update", slog.String("error", verifyErr.Error()))
+						} else if verifyTx.Status != "completed" || verifyTx.MonadTxHash != monadTxHash {
+							logger.Error("Transaction update verification failed",
+								slog.String("expected_status", "completed"),
+								slog.String("actual_status", verifyTx.Status),
+								slog.String("expected_hash", monadTxHash),
+								slog.String("actual_hash", verifyTx.MonadTxHash))
+						} else {
+							logger.Info("Transaction update verified successfully",
+								slog.String("status", verifyTx.Status),
+								slog.String("monad_tx_hash", verifyTx.MonadTxHash))
+						}
+
 						// Log that we found and are including the Monad hash
 						logger.Info("Including completed Monad transaction in response",
 							slog.String("deposit_id", tx.DepositID.String()),
@@ -752,6 +785,22 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 						// Update tx object for response
 						tx.Status = "completed"
 						tx.MonadTxHash = monadTxHash
+
+						// Verify the update was successful
+						verifyTx, verifyErr := h.bridgeService.GetDB().GetTransactionByDepositID(tx.DepositID)
+						if verifyErr != nil {
+							logger.Error("Error verifying transaction update", slog.String("error", verifyErr.Error()))
+						} else if verifyTx.Status != "completed" || verifyTx.MonadTxHash != monadTxHash {
+							logger.Error("Transaction update verification failed",
+								slog.String("expected_status", "completed"),
+								slog.String("actual_status", verifyTx.Status),
+								slog.String("expected_hash", monadTxHash),
+								slog.String("actual_hash", verifyTx.MonadTxHash))
+						} else {
+							logger.Info("Transaction update verified successfully",
+								slog.String("status", verifyTx.Status),
+								slog.String("monad_tx_hash", verifyTx.MonadTxHash))
+						}
 
 						// Log that we found and are including the Monad hash
 						logger.Info("Including completed Monad transaction in response",
