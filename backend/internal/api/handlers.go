@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
+	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 	"golang.org/x/time/rate"
 )
@@ -450,6 +452,49 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		slog.String("arbitrum_tx_hash", arbitrumTxHash),
 	)
 
+	// Common response structure
+	type TransactionResponse struct {
+		Status            string            `json:"status"`
+		Message           string            `json:"message"`
+		Txs               map[string]string `json:"txs"`
+		DepositID         string            `json:"deposit_id,omitempty"`
+		ArbitrumTxHash    string            `json:"arbitrum_tx_hash,omitempty"`
+		MonadTxHash       string            `json:"monad_tx_hash,omitempty"`
+		RefundTxHash      string            `json:"refund_tx_hash,omitempty"`
+		RefundDestination string            `json:"refund_destination,omitempty"`
+	}
+
+	// Helper function to create response
+	createResponse := func(tx *database.Transaction) *TransactionResponse {
+		response := &TransactionResponse{
+			Status:  tx.Status,
+			Message: "Transaction status retrieved successfully",
+			Txs:     make(map[string]string),
+		}
+
+		if tx.DepositID != nil {
+			response.DepositID = tx.DepositID.String()
+		}
+
+		// Always include Arbitrum hash if available
+		if tx.TxHash != "" {
+			response.ArbitrumTxHash = tx.TxHash
+			response.Txs["Arbitrum"] = tx.TxHash
+		}
+
+		// Always include Monad hash if available
+		if tx.MonadTxHash != "" {
+			response.MonadTxHash = tx.MonadTxHash
+			response.Txs["Monad"] = tx.MonadTxHash
+
+			logger.Info("Including Monad hash in response",
+				slog.String("monad_tx_hash", tx.MonadTxHash),
+				slog.String("deposit_id", tx.DepositID.String()))
+		}
+
+		return response
+	}
+
 	// Prioritize depositID for lookup
 	if depositID != "" {
 		// Parse deposit ID
@@ -475,24 +520,6 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 			})
 			return
 		}
-
-		// Initialize response
-		response := struct {
-			Status            string            `json:"status"`
-			Message           string            `json:"message"`
-			Txs               map[string]string `json:"txs,omitempty"`
-			DepositID         string            `json:"deposit_id,omitempty"`
-			ArbitrumTxHash    string            `json:"arbitrum_tx_hash,omitempty"`
-			MonadTxHash       string            `json:"monad_tx_hash,omitempty"`
-			RefundTxHash      string            `json:"refund_tx_hash,omitempty"`
-			RefundDestination string            `json:"refund_destination,omitempty"`
-		}{
-			Status:  "success",
-			Message: "Transaction status retrieved successfully",
-			Txs:     make(map[string]string),
-		}
-
-		response.DepositID = depositID
 
 		if tx != nil {
 			logger.Info("Transaction found",
@@ -538,20 +565,16 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 				}
 			}
 
-			// Always include Arbitrum hash if available
-			if tx.TxHash != "" {
-				response.ArbitrumTxHash = tx.TxHash
-				response.Txs["Arbitrum"] = tx.TxHash
-			}
+			response := createResponse(tx)
 
-			// Always include Monad hash if available
-			if tx.MonadTxHash != "" {
-				response.MonadTxHash = tx.MonadTxHash
-				response.Txs["Monad"] = tx.MonadTxHash
+			// Debug log the full response for completed transactions
+			if tx.Status == "completed" {
+				responseJSON, _ := json.Marshal(response)
+				logger.Info("Sending completed transaction response",
+					slog.String("response_body", string(responseJSON)),
+					slog.String("deposit_id", tx.DepositID.String()),
+					slog.String("monad_tx_hash", tx.MonadTxHash))
 			}
-
-			response.Status = tx.Status
-			response.Message = "Transaction status retrieved successfully"
 
 			c.JSON(http.StatusOK, response)
 			logger.Info("Response sent",
@@ -562,8 +585,13 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		}
 
 		// Transaction not found for this deposit ID
-		response.Status = "not_found"
-		response.Message = "No transaction found for this deposit ID"
+		response := &TransactionResponse{
+			Status:  "not_found",
+			Message: "No transaction found for this deposit ID",
+			Txs:     make(map[string]string),
+		}
+		response.DepositID = depositID
+
 		c.JSON(http.StatusOK, response)
 		logger.Info("No transaction found for deposit ID",
 			slog.String("duration", time.Since(startTime).String()),
@@ -583,35 +611,16 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 				slog.String("status", tx.Status),
 			)
 
-			response := struct {
-				Status            string            `json:"status"`
-				Message           string            `json:"message"`
-				Txs               map[string]string `json:"txs,omitempty"`
-				DepositID         string            `json:"deposit_id,omitempty"`
-				ArbitrumTxHash    string            `json:"arbitrum_tx_hash,omitempty"`
-				MonadTxHash       string            `json:"monad_tx_hash,omitempty"`
-				RefundTxHash      string            `json:"refund_tx_hash,omitempty"`
-				RefundDestination string            `json:"refund_destination,omitempty"`
-			}{
-				Txs: make(map[string]string),
+			response := createResponse(tx)
+
+			// Debug log the full response for completed transactions
+			if tx.Status == "completed" {
+				responseJSON, _ := json.Marshal(response)
+				logger.Info("Sending completed transaction response",
+					slog.String("response_body", string(responseJSON)),
+					slog.String("deposit_id", tx.DepositID.String()),
+					slog.String("monad_tx_hash", tx.MonadTxHash))
 			}
-
-			response.DepositID = tx.DepositID.String()
-
-			// Always include Arbitrum hash if available
-			if tx.TxHash != "" {
-				response.ArbitrumTxHash = tx.TxHash
-				response.Txs["Arbitrum"] = tx.TxHash
-			}
-
-			// Always include Monad hash if available
-			if tx.MonadTxHash != "" {
-				response.MonadTxHash = tx.MonadTxHash
-				response.Txs["Monad"] = tx.MonadTxHash
-			}
-
-			response.Status = tx.Status
-			response.Message = "Transaction status retrieved successfully"
 
 			c.JSON(http.StatusOK, response)
 			logger.Info("Response sent",
@@ -632,6 +641,7 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 			logger.Info("Found transaction via Arbitrum hash",
 				slog.String("deposit_id", tx.DepositID.String()),
 				slog.String("status", tx.Status),
+				slog.String("monad_tx_hash", tx.MonadTxHash),
 			)
 
 			// If transaction is pending, attempt a blockchain verification
@@ -667,35 +677,16 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 				}
 			}
 
-			response := struct {
-				Status            string            `json:"status"`
-				Message           string            `json:"message"`
-				Txs               map[string]string `json:"txs,omitempty"`
-				DepositID         string            `json:"deposit_id,omitempty"`
-				ArbitrumTxHash    string            `json:"arbitrum_tx_hash,omitempty"`
-				MonadTxHash       string            `json:"monad_tx_hash,omitempty"`
-				RefundTxHash      string            `json:"refund_tx_hash,omitempty"`
-				RefundDestination string            `json:"refund_destination,omitempty"`
-			}{
-				Txs: make(map[string]string),
+			response := createResponse(tx)
+
+			// Debug log the full response for completed transactions
+			if tx.Status == "completed" {
+				responseJSON, _ := json.Marshal(response)
+				logger.Info("Sending completed transaction response",
+					slog.String("response_body", string(responseJSON)),
+					slog.String("deposit_id", tx.DepositID.String()),
+					slog.String("monad_tx_hash", tx.MonadTxHash))
 			}
-
-			response.DepositID = tx.DepositID.String()
-
-			// Always include Arbitrum hash if available
-			if tx.TxHash != "" {
-				response.ArbitrumTxHash = tx.TxHash
-				response.Txs["Arbitrum"] = tx.TxHash
-			}
-
-			// Always include Monad hash if available
-			if tx.MonadTxHash != "" {
-				response.MonadTxHash = tx.MonadTxHash
-				response.Txs["Monad"] = tx.MonadTxHash
-			}
-
-			response.Status = tx.Status
-			response.Message = "Transaction status retrieved successfully"
 
 			c.JSON(http.StatusOK, response)
 			logger.Info("Response sent",
@@ -754,35 +745,16 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 				}
 			}
 
-			response := struct {
-				Status            string            `json:"status"`
-				Message           string            `json:"message"`
-				Txs               map[string]string `json:"txs,omitempty"`
-				DepositID         string            `json:"deposit_id,omitempty"`
-				ArbitrumTxHash    string            `json:"arbitrum_tx_hash,omitempty"`
-				MonadTxHash       string            `json:"monad_tx_hash,omitempty"`
-				RefundTxHash      string            `json:"refund_tx_hash,omitempty"`
-				RefundDestination string            `json:"refund_destination,omitempty"`
-			}{
-				Txs: make(map[string]string),
+			response := createResponse(tx)
+
+			// Debug log the full response for completed transactions
+			if tx.Status == "completed" {
+				responseJSON, _ := json.Marshal(response)
+				logger.Info("Sending completed transaction response",
+					slog.String("response_body", string(responseJSON)),
+					slog.String("deposit_id", tx.DepositID.String()),
+					slog.String("monad_tx_hash", tx.MonadTxHash))
 			}
-
-			response.DepositID = tx.DepositID.String()
-
-			// Always include Arbitrum hash if available
-			if tx.TxHash != "" {
-				response.ArbitrumTxHash = tx.TxHash
-				response.Txs["Arbitrum"] = tx.TxHash
-			}
-
-			// Always include Monad hash if available
-			if tx.MonadTxHash != "" {
-				response.MonadTxHash = tx.MonadTxHash
-				response.Txs["Monad"] = tx.MonadTxHash
-			}
-
-			response.Status = tx.Status
-			response.Message = "Transaction status retrieved successfully"
 
 			c.JSON(http.StatusOK, response)
 			logger.Info("Response sent",
@@ -798,21 +770,11 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 
 	// If we got here, the transaction is not found
 	logger.Info("Transaction not found after all lookup attempts")
-	response := struct {
-		Status            string            `json:"status"`
-		Message           string            `json:"message"`
-		Txs               map[string]string `json:"txs,omitempty"`
-		DepositID         string            `json:"deposit_id,omitempty"`
-		ArbitrumTxHash    string            `json:"arbitrum_tx_hash,omitempty"`
-		MonadTxHash       string            `json:"monad_tx_hash,omitempty"`
-		RefundTxHash      string            `json:"refund_tx_hash,omitempty"`
-		RefundDestination string            `json:"refund_destination,omitempty"`
-	}{
-		Txs: make(map[string]string),
+	response := &TransactionResponse{
+		Status:  "not_found",
+		Message: "Transaction not found in our system",
+		Txs:     make(map[string]string),
 	}
-
-	response.Status = "not_found"
-	response.Message = "Transaction not found in our system"
 
 	if arbitrumTxHash != "" {
 		response.ArbitrumTxHash = arbitrumTxHash
