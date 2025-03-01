@@ -152,10 +152,14 @@ func (h *Handler) AdminUpdateRatio(c *gin.Context) {
 	blockchain.UpdateMonUsdRatio(newRatioInt)
 
 	// Log the admin action in the database
-	if h.bridgeService != nil && h.bridgeService.GetDB() != nil {
+	db := h.bridgeService.GetDB()
+	if db != nil {
+		// Debug the database type
+		logger.Info("Database type in handler: %T", db)
+
 		// Use JSON format instead of key=value format to avoid SQL syntax issues
 		params := fmt.Sprintf(`{"new_ratio":"%s"}`, req.MonUsdRatio)
-		if err := h.bridgeService.GetDB().LogAdminAction("update_ratio", params, apiKey); err != nil {
+		if err := db.LogAdminAction("update_ratio", params, apiKey); err != nil {
 			logger.Error("Failed to log admin action: %v", err)
 		}
 	}
@@ -192,8 +196,9 @@ func (h *Handler) PauseDeposits(c *gin.Context) {
 	}
 
 	// Log the admin action in the database
-	if h.bridgeService != nil && h.bridgeService.GetDB() != nil {
-		if err := h.bridgeService.GetDB().LogAdminAction("pause_deposits", "", apiKey); err != nil {
+	db := h.bridgeService.GetDB()
+	if db != nil {
+		if err := db.LogAdminAction("pause_deposits", "", apiKey); err != nil {
 			logger.Error("Failed to log admin action: %v", err)
 		}
 	}
@@ -222,8 +227,9 @@ func (h *Handler) ResumeDeposits(c *gin.Context) {
 	}
 
 	// Log the admin action in the database
-	if h.bridgeService != nil && h.bridgeService.GetDB() != nil {
-		if err := h.bridgeService.GetDB().LogAdminAction("resume_deposits", "", apiKey); err != nil {
+	db := h.bridgeService.GetDB()
+	if db != nil {
+		if err := db.LogAdminAction("resume_deposits", "", apiKey); err != nil {
 			logger.Error("Failed to log admin action: %v", err)
 		}
 	}
@@ -389,10 +395,11 @@ func (h *Handler) AdminUpdateWalletLimit(c *gin.Context) {
 	}
 
 	// Log the admin action in the database
-	if h.bridgeService != nil && h.bridgeService.GetDB() != nil {
+	db := h.bridgeService.GetDB()
+	if db != nil {
 		// Use JSON format instead of key=value format to avoid SQL syntax issues
 		params := fmt.Sprintf(`{"limit_percentage":%d}`, req.LimitPercentage)
-		if err := h.bridgeService.GetDB().LogAdminAction("update_wallet_limit", params, apiKey); err != nil {
+		if err := db.LogAdminAction("update_wallet_limit", params, apiKey); err != nil {
 			logger.Error("Failed to log admin action: %v", err)
 		}
 	}
@@ -527,34 +534,28 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 			if tx.Status == "pending" {
 				logger.Info("Transaction is pending, checking blockchain for confirmation")
 
-				// Check if we need to aggressively verify on blockchain
-				if c.Request.UserAgent() != "" && strings.Contains(strings.ToLower(c.Request.UserAgent()), "mobile") {
-					// This is likely a mobile app request, be more aggressive in verification
-					// Create a direct blockchain check - don't expose the unexported method
-					// Since we can't call the unexported method directly, we'll use FindMonadTransactionByDepositID
-					// which eventually calls the same blockchain check functionality
-					status, monadTxHash, err := h.bridgeService.FindMonadTransactionByDepositID(c, tx.DepositID)
-					if err != nil {
-						logger.Warn("Error checking blockchain for transaction",
-							slog.String("error", err.Error()),
-							slog.String("deposit_id", tx.DepositID.String()),
-						)
-					} else if monadTxHash != "" && status == "completed" {
-						// Transaction found on blockchain, update status
-						logger.Info("Transaction found on blockchain during status check",
-							slog.String("deposit_id", tx.DepositID.String()),
-							slog.String("monad_tx_hash", monadTxHash),
-						)
+				// Perform blockchain verification for all clients, not just mobile
+				status, monadTxHash, err := h.bridgeService.FindMonadTransactionByDepositID(c, tx.DepositID)
+				if err != nil {
+					logger.Warn("Error checking blockchain for transaction",
+						slog.String("error", err.Error()),
+						slog.String("deposit_id", tx.DepositID.String()),
+					)
+				} else if monadTxHash != "" && status == "completed" {
+					// Transaction found on blockchain, update status
+					logger.Info("Transaction found on blockchain during status check",
+						slog.String("deposit_id", tx.DepositID.String()),
+						slog.String("monad_tx_hash", monadTxHash),
+					)
 
-						// Update transaction status in database
-						err = h.bridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, "completed", monadTxHash)
-						if err != nil {
-							logger.Error("Error updating transaction status", slog.String("error", err.Error()))
-						} else {
-							// Update tx object for response
-							tx.Status = "completed"
-							tx.MonadTxHash = monadTxHash
-						}
+					// Update transaction status in database
+					err = h.bridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, "completed", monadTxHash)
+					if err != nil {
+						logger.Error("Error updating transaction status", slog.String("error", err.Error()))
+					} else {
+						// Update tx object for response
+						tx.Status = "completed"
+						tx.MonadTxHash = monadTxHash
 					}
 				}
 			}
@@ -650,31 +651,28 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 			if tx.Status == "pending" {
 				logger.Info("Transaction is pending, checking blockchain for confirmation")
 
-				// Check if we need to aggressively verify on blockchain
-				if c.Request.UserAgent() != "" && strings.Contains(strings.ToLower(c.Request.UserAgent()), "mobile") {
-					// This is likely a mobile app request, be more aggressive in verification
-					status, monadTxHash, err := h.bridgeService.FindMonadTransactionByDepositID(c, tx.DepositID)
-					if err != nil {
-						logger.Warn("Error checking blockchain for transaction",
-							slog.String("error", err.Error()),
-							slog.String("deposit_id", tx.DepositID.String()),
-						)
-					} else if monadTxHash != "" && status == "completed" {
-						// Transaction found on blockchain, update status
-						logger.Info("Transaction found on blockchain during status check",
-							slog.String("deposit_id", tx.DepositID.String()),
-							slog.String("monad_tx_hash", monadTxHash),
-						)
+				// Perform blockchain verification for all clients, not just mobile
+				status, monadTxHash, err := h.bridgeService.FindMonadTransactionByDepositID(c, tx.DepositID)
+				if err != nil {
+					logger.Warn("Error checking blockchain for transaction",
+						slog.String("error", err.Error()),
+						slog.String("deposit_id", tx.DepositID.String()),
+					)
+				} else if monadTxHash != "" && status == "completed" {
+					// Transaction found on blockchain, update status
+					logger.Info("Transaction found on blockchain during status check",
+						slog.String("deposit_id", tx.DepositID.String()),
+						slog.String("monad_tx_hash", monadTxHash),
+					)
 
-						// Update transaction status in database
-						err = h.bridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, "completed", monadTxHash)
-						if err != nil {
-							logger.Error("Error updating transaction status", slog.String("error", err.Error()))
-						} else {
-							// Update tx object for response
-							tx.Status = "completed"
-							tx.MonadTxHash = monadTxHash
-						}
+					// Update transaction status in database
+					err = h.bridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, "completed", monadTxHash)
+					if err != nil {
+						logger.Error("Error updating transaction status", slog.String("error", err.Error()))
+					} else {
+						// Update tx object for response
+						tx.Status = "completed"
+						tx.MonadTxHash = monadTxHash
 					}
 				}
 			}
@@ -722,31 +720,28 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 			if tx.Status == "pending" {
 				logger.Info("Transaction is pending, checking blockchain for confirmation")
 
-				// Check if we need to aggressively verify on blockchain
-				if c.Request.UserAgent() != "" && strings.Contains(strings.ToLower(c.Request.UserAgent()), "mobile") {
-					// This is likely a mobile app request, be more aggressive in verification
-					status, monadTxHash, err := h.bridgeService.FindMonadTransactionByDepositID(c, tx.DepositID)
-					if err != nil {
-						logger.Warn("Error checking blockchain for transaction",
-							slog.String("error", err.Error()),
-							slog.String("deposit_id", tx.DepositID.String()),
-						)
-					} else if monadTxHash != "" && status == "completed" {
-						// Transaction found on blockchain, update status
-						logger.Info("Transaction found on blockchain during status check",
-							slog.String("deposit_id", tx.DepositID.String()),
-							slog.String("monad_tx_hash", monadTxHash),
-						)
+				// Perform blockchain verification for all clients, not just mobile
+				status, monadTxHash, err := h.bridgeService.FindMonadTransactionByDepositID(c, tx.DepositID)
+				if err != nil {
+					logger.Warn("Error checking blockchain for transaction",
+						slog.String("error", err.Error()),
+						slog.String("deposit_id", tx.DepositID.String()),
+					)
+				} else if monadTxHash != "" && status == "completed" {
+					// Transaction found on blockchain, update status
+					logger.Info("Transaction found on blockchain during status check",
+						slog.String("deposit_id", tx.DepositID.String()),
+						slog.String("monad_tx_hash", monadTxHash),
+					)
 
-						// Update transaction status in database
-						err = h.bridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, "completed", monadTxHash)
-						if err != nil {
-							logger.Error("Error updating transaction status", slog.String("error", err.Error()))
-						} else {
-							// Update tx object for response
-							tx.Status = "completed"
-							tx.MonadTxHash = monadTxHash
-						}
+					// Update transaction status in database
+					err = h.bridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, "completed", monadTxHash)
+					if err != nil {
+						logger.Error("Error updating transaction status", slog.String("error", err.Error()))
+					} else {
+						// Update tx object for response
+						tx.Status = "completed"
+						tx.MonadTxHash = monadTxHash
 					}
 				}
 			}

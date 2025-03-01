@@ -38,12 +38,15 @@ func main() {
 	}
 	defer db.Close()
 
+	logger.Info("Database initialized in directory: %s", cfg.DataDir)
+
+	// Debug the database type
+	logger.Info("Database type: %T", db)
+
 	// Create indexes for performance optimization
 	if err := db.CreateIndexes(); err != nil {
 		logger.Fatal("Failed to create database indexes: %v", err)
 	}
-
-	logger.Info("Database initialized in directory: %s", cfg.DataDir)
 
 	// Parse private key
 	privateKey, err := crypto.HexToECDSA(cfg.WalletPrivateKey)
