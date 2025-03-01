@@ -1506,12 +1506,28 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 	// 1. First calculate: depositAmount * ethUsdPrice (ETH wei * USD price with 8 decimals)
 	depositTimesPrice := new(big.Int).Mul(depositAmount, ethUsdPrice)
 
+	// Log intermediate values for debugging
+	logger.Info("ETH calculation debug - depositAmount: %s, ethUsdPrice: %s, depositTimesPrice: %s",
+		depositAmount.String(), ethUsdPrice.String(), depositTimesPrice.String())
+
 	// 2. Adjust for decimals: We need to divide by 10^8 to account for ETH/USD price decimals
+	// But we also need to account for ETH's 18 decimals
+	// So we divide by 10^8 to get USD value with 18 decimals (same as ETH)
 	usdValueInWei := new(big.Int).Div(depositTimesPrice, new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil))
 
-	// 3. Now divide by MON/USD ratio to get MON amount
-	monWeiInt := new(big.Int).Mul(usdValueInWei, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
-	monWeiInt = new(big.Int).Div(monWeiInt, monUsdRatio)
+	logger.Info("ETH calculation debug - usdValueInWei: %s, monUsdRatio: %s",
+		usdValueInWei.String(), monUsdRatio.String())
+
+	// 3. Now calculate MON amount: USD value / MON/USD ratio
+	// Both values have 18 decimals, so the result will have 18 decimals
+	// Formula: (depositAmount * ethUsdPrice / 10^8) * 10^18 / monUsdRatio
+	// This gives us: (ETH amount in USD) * (MON per USD) = MON amount
+	monWeiInt := new(big.Int).Div(
+		new(big.Int).Mul(usdValueInWei, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+		monUsdRatio,
+	)
+
+	logger.Info("ETH calculation debug - final monWeiInt: %s", monWeiInt.String())
 
 	// Convert values to float64 for logging and minimum value checks
 	ethUsdValue, _ := ethUsdPriceFloat.Float64()

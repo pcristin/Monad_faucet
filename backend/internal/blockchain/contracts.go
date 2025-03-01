@@ -66,7 +66,10 @@ type ContractState struct {
 }
 
 // Initial MON/USD ratio (0.1 USD = 1 MON)
-var initialMonUsdRatio = new(big.Int).Exp(big.NewInt(1), big.NewInt(17), nil) // 0.1 * 10^18
+var initialMonUsdRatio = new(big.Int).Div(
+	new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil), // 10^18
+	big.NewInt(10), // Divide by 10 to get 0.1 * 10^18
+) // 0.1 * 10^18
 
 // Create global ratio instance
 var globalMonUsdRatio = NewMonUsdRatio(initialMonUsdRatio)
