@@ -1508,15 +1508,14 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 
 	// Step 2: Adjust for decimals in ethUsdPrice (8 decimals)
 	// This gives us the USD value with 18+8=26 decimals
-
-	// Step 3: Now we need to divide by monUsdRatio (USD/MON with 18 decimals)
-	// But first we need to adjust the decimal places to match
 	// We need to divide by 10^8 to get USD value with 18 decimals (same as monUsdRatio)
 	usdValueWith18Decimals := new(big.Int).Div(depositTimesPrice, new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil))
 
-	// Step 4: Finally, divide the USD value by the MON/USD ratio to get MON amount
-	// Both values now have 18 decimals, so the result will have 18 decimals
-	monWeiInt := new(big.Int).Div(usdValueWith18Decimals, monUsdRatio)
+	// Step 3: For accurate division with big integers (avoiding loss of precision)
+	// Multiply by 10^18 before division to maintain precision, then divide by monUsdRatio
+	// This ensures we get the correct MON amount with 18 decimals
+	scaledUsdValue := new(big.Int).Mul(usdValueWith18Decimals, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	monWeiInt := new(big.Int).Div(scaledUsdValue, monUsdRatio)
 
 	// Log intermediate values for debugging
 	logger.Info("ETH calculation debug - depositAmount: %s, ethUsdPrice: %s, depositTimesPrice: %s",
