@@ -1,24 +1,24 @@
 package blockchain
 
 import (
+	"crypto/ecdsa"
 	"math/big"
-	"time"
+	"sync/atomic"
+
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 )
 
 type CurrencyType uint8
+
+const WalletLimitPercentage = 30
 
 const (
 	CurrencyETH CurrencyType = iota
 	CurrencyUSDC
 	CurrencyUSDT
 )
-
-// WalletUsage struct is kept for compatibility but no longer used for tracking limits
-// since limits are now per-transaction instead of time-based
-type WalletUsage struct {
-	TotalAmount *big.Int  // Total MON tokens distributed to this wallet (no longer used)
-	LastUpdated time.Time // Time of last distribution (no longer used)
-}
 
 // CurrencyTypeToString converts a CurrencyType to its string representation
 func CurrencyTypeToString(c CurrencyType) string {
@@ -32,4 +32,32 @@ func CurrencyTypeToString(c CurrencyType) string {
 	default:
 		return "UNKNOWN"
 	}
+}
+
+// ArbitrumDepositor represents the Arbitrum depositor contract
+type ArbitrumDepositor struct {
+	Client     *ethclient.Client
+	Address    common.Address
+	ChainID    *big.Int
+	PrivateKey *ecdsa.PrivateKey
+	*bind.BoundContract
+}
+
+// MonadDistributor represents the Monad distributor contract
+type MonadDistributor struct {
+	Client     *ethclient.Client
+	Address    common.Address
+	PrivateKey *ecdsa.PrivateKey
+	*bind.BoundContract
+}
+
+// MonUsdRatio represents the ratio of MON to USD (atomic value)
+type MonUsdRatio struct {
+	value atomic.Value // stores *big.Int
+}
+
+func NewMonUsdRatio(initialValue *big.Int) *MonUsdRatio {
+	r := &MonUsdRatio{}
+	r.value.Store(initialValue)
+	return r
 }

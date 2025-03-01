@@ -7,7 +7,6 @@ import (
 	"log"
 	"math/big"
 	"strings"
-	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -19,34 +18,6 @@ import (
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
-
-// ArbitrumDepositor represents the Arbitrum depositor contract
-type ArbitrumDepositor struct {
-	client     *ethclient.Client
-	address    common.Address
-	chainID    *big.Int
-	privateKey *ecdsa.PrivateKey
-	*bind.BoundContract
-}
-
-// MonadDistributor represents the Monad distributor contract
-type MonadDistributor struct {
-	client     *ethclient.Client
-	address    common.Address
-	privateKey *ecdsa.PrivateKey
-	*bind.BoundContract
-}
-
-// MonUsdRatio represents the ratio of MON to USD (atomic value)
-type MonUsdRatio struct {
-	value atomic.Value // stores *big.Int
-}
-
-func NewMonUsdRatio(initialValue *big.Int) *MonUsdRatio {
-	r := &MonUsdRatio{}
-	r.value.Store(initialValue)
-	return r
-}
 
 func (r *MonUsdRatio) Get() *big.Int {
 	return r.value.Load().(*big.Int)
@@ -101,7 +72,10 @@ func loadSettingsFromDB() {
 	limitPercentage, err := dbInstance.GetIntSetting("wallet_limit_percentage")
 	if err == nil {
 		// Update the in-memory value without updating the database again
-		WalletLimitPercentage = int64(limitPercentage)
+		err = dbInstance.SetIntSetting("wallet_limit_percentage", limitPercentage)
+		if err != nil {
+			logger.Error("Error updating wallet limit percentage in database: %v", err)
+		}
 		log.Printf("Loaded wallet limit percentage from database: %d%%", limitPercentage)
 	}
 }
@@ -163,10 +137,10 @@ func NewArbitrumDepositor(client *ethclient.Client, address common.Address, priv
 	}
 
 	return &ArbitrumDepositor{
-		client:        client,
-		address:       address,
-		chainID:       chainID,
-		privateKey:    privateKey,
+		Client:        client,
+		Address:       address,
+		ChainID:       chainID,
+		PrivateKey:    privateKey,
 		BoundContract: boundContract,
 	}, nil
 }
@@ -175,9 +149,9 @@ func NewArbitrumDepositor(client *ethclient.Client, address common.Address, priv
 func NewMonadDistributor(client *ethclient.Client, address common.Address, privateKey *ecdsa.PrivateKey) (*MonadDistributor, error) {
 	boundContract := bind.NewBoundContract(address, DistributorABI, client, client, client)
 	return &MonadDistributor{
-		client:        client,
-		address:       address,
-		privateKey:    privateKey,
+		Client:        client,
+		Address:       address,
+		PrivateKey:    privateKey,
 		BoundContract: boundContract,
 	}, nil
 }
@@ -185,7 +159,7 @@ func NewMonadDistributor(client *ethclient.Client, address common.Address, priva
 // GetEthSwapRatio returns the current ETH/MON swap ratio based on ETH/USD price from Chainlink
 func (d *ArbitrumDepositor) GetEthSwapRatio(ctx context.Context) (*big.Int, error) {
 	// Use the retry wrapper function
-	return getEthSwapRatioWithRetry(ctx, d, NewRetryClient(d.client))
+	return getEthSwapRatioWithRetry(ctx, d, NewRetryClient(d.Client))
 }
 
 // GetContractState fetches the current state of both contracts
@@ -193,8 +167,8 @@ func GetContractState(ctx context.Context, arb *ArbitrumDepositor, monad *MonadD
 	var state ContractState
 
 	// Create retry clients
-	arbRetryClient := NewRetryClient(arb.client)
-	monadRetryClient := NewRetryClient(monad.client)
+	arbRetryClient := NewRetryClient(arb.Client)
+	monadRetryClient := NewRetryClient(monad.Client)
 
 	// Call contract methods in parallel using goroutines
 	errChan := make(chan error, 4) // Updated to 4 for the additional ETH ratio check
@@ -225,7 +199,7 @@ func GetContractState(ctx context.Context, arb *ArbitrumDepositor, monad *MonadD
 
 	// Get MON balance (native token) with retries
 	go func() {
-		balance, err := monadRetryClient.BalanceAtWithRetry(ctx, monad.address, nil)
+		balance, err := monadRetryClient.BalanceAtWithRetry(ctx, monad.Address, nil)
 		if err != nil {
 			errChan <- fmt.Errorf("failed to get MON balance: %v", err)
 			return
@@ -265,7 +239,7 @@ func getEthSwapRatioWithRetry(ctx context.Context, d *ArbitrumDepositor, retryCl
 		return nil, fmt.Errorf("failed to parse price feed ABI: %v", err)
 	}
 
-	priceFeed := bind.NewBoundContract(common.HexToAddress(ChainlinkEthUsdFeed), priceFeedAbi, d.client, d.client, d.client)
+	priceFeed := bind.NewBoundContract(common.HexToAddress(ChainlinkEthUsdFeed), priceFeedAbi, d.Client, d.Client, d.Client)
 
 	var out []interface{}
 	err = retryClient.CallWithRetry(ctx, priceFeed, &out, "latestRoundData")
@@ -280,13 +254,13 @@ func getEthSwapRatioWithRetry(ctx context.Context, d *ArbitrumDepositor, retryCl
 // RefundDeposit initiates a refund for a failed deposit
 func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.Int) error {
 	// Create retry client
-	retryClient := NewRetryClient(d.client)
+	retryClient := NewRetryClient(d.Client)
 
 	// Get deposit details from events
 	logs, err := retryClient.FilterLogsWithRetry(ctx, ethereum.FilterQuery{
 		FromBlock: big.NewInt(0),
 		ToBlock:   nil,
-		Addresses: []common.Address{d.address},
+		Addresses: []common.Address{d.Address},
 		Topics: [][]common.Hash{
 			{DepositorABI.Events["DepositEvent"].ID},
 		},
@@ -321,7 +295,7 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 	}
 
 	// Get current gas price with a small buffer (20% increase)
-	gasPrice, err := d.client.SuggestGasPrice(ctx)
+	gasPrice, err := d.Client.SuggestGasPrice(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get gas price: %v", err)
 	}
@@ -341,7 +315,7 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 	}
 
 	// Get our wallet's address from the private key
-	publicKey := d.privateKey.Public()
+	publicKey := d.PrivateKey.Public()
 	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
 	if !ok {
 		return fmt.Errorf("error casting public key to ECDSA")
@@ -351,7 +325,7 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 	// Estimate gas
 	msg := ethereum.CallMsg{
 		From: fromAddress,
-		To:   &d.address,
+		To:   &d.Address,
 		Data: input,
 	}
 
@@ -359,7 +333,7 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 	var gasLimit uint64
 	estimateGasOp := func() error {
 		var estimateErr error
-		gasLimit, estimateErr = d.client.EstimateGas(ctx, msg)
+		gasLimit, estimateErr = d.Client.EstimateGas(ctx, msg)
 		return estimateErr
 	}
 
@@ -375,7 +349,7 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 	var nonce uint64
 	nonceOp := func() error {
 		var nonceErr error
-		nonce, nonceErr = d.client.PendingNonceAt(ctx, fromAddress)
+		nonce, nonceErr = d.Client.PendingNonceAt(ctx, fromAddress)
 		return nonceErr
 	}
 
@@ -388,20 +362,20 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 		Nonce:    nonce,
 		GasPrice: gasPrice,
 		Gas:      gasLimit,
-		To:       &d.address,
+		To:       &d.Address,
 		Value:    big.NewInt(0),
 		Data:     input,
 	})
 
 	// Sign and send transaction
-	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(d.chainID), d.privateKey)
+	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(d.ChainID), d.PrivateKey)
 	if err != nil {
 		return fmt.Errorf("failed to sign transaction: %v", err)
 	}
 
 	// Send transaction with retry
 	sendTxOp := func() error {
-		return d.client.SendTransaction(ctx, signedTx)
+		return d.Client.SendTransaction(ctx, signedTx)
 	}
 
 	err = RetryWithBackoff(sendTxOp, DefaultRetryConfig())
@@ -410,7 +384,7 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 	}
 
 	// Wait for transaction receipt
-	receipt, err := bind.WaitMined(ctx, d.client, signedTx)
+	receipt, err := bind.WaitMined(ctx, d.Client, signedTx)
 	if err != nil {
 		return fmt.Errorf("failed to wait for refund transaction: %v", err)
 	}
@@ -425,12 +399,12 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 
 // GetTransactOpts returns properly configured transaction options for signing
 func (m *MonadDistributor) GetTransactOpts(ctx context.Context) (*bind.TransactOpts, error) {
-	chainID, err := m.client.ChainID(ctx)
+	chainID, err := m.Client.ChainID(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get chain ID: %v", err)
 	}
 
-	auth, err := bind.NewKeyedTransactorWithChainID(m.privateKey, chainID)
+	auth, err := bind.NewKeyedTransactorWithChainID(m.PrivateKey, chainID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transactor: %v", err)
 	}

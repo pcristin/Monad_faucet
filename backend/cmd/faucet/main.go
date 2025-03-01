@@ -14,7 +14,9 @@ import (
 
 	"github.com/pcristin/monad-faucet/config"
 	"github.com/pcristin/monad-faucet/internal/api"
+	"github.com/pcristin/monad-faucet/internal/api/admins"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
+	"github.com/pcristin/monad-faucet/internal/bridge"
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
@@ -86,7 +88,7 @@ func main() {
 	}
 
 	// Create bridge service
-	bridgeService := blockchain.NewBridgeService(arbDepositor, monadDistributor, db)
+	bridgeService := bridge.NewBridgeService(arbDepositor, monadDistributor, db)
 	if err := bridgeService.Start(); err != nil {
 		logger.Fatal("Failed to start bridge service: %v", err)
 	}
@@ -134,7 +136,7 @@ func main() {
 		c.Next()
 
 		// Skip logging for health checks in production to reduce log volume
-		if os.Getenv("RENDER") == "true" && (path == "/health" || path == "/") {
+		if os.Getenv("RENDER") == "true" && (path == "bridge/health" || path == "bridge/") {
 			return
 		}
 
@@ -167,6 +169,9 @@ func main() {
 	// Register API routes
 	handler := api.NewHandler(bridgeService)
 	handler.RegisterRoutes(r)
+
+	// Register admin routes separately to avoid import cycles
+	admins.RegisterRoutes(r, handler)
 
 	// Create HTTP server
 	srv := &http.Server{

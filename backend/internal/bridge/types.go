@@ -1,0 +1,61 @@
+package bridge
+
+import (
+	"context"
+	"fmt"
+	"math/big"
+	"sync"
+	"time"
+
+	"github.com/pcristin/monad-faucet/internal/blockchain"
+	"github.com/pcristin/monad-faucet/internal/database"
+)
+
+// BridgeService handles the business logic for the bridge operations.
+type BridgeService struct {
+	arbDepositor        *blockchain.ArbitrumDepositor
+	monadDistributor    *blockchain.MonadDistributor
+	depositChan         chan blockchain.DepositEvent
+	refundChan          chan *big.Int
+	wg                  sync.WaitGroup
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	db                  *database.DB
+	txCache             map[string]*database.Transaction
+	txCacheMutex        sync.RWMutex
+	txCacheExpiration   time.Duration
+	processingMutex     sync.Mutex
+	processingDeposits  map[string]bool
+	instanceID          string
+	lockDuration        time.Duration
+	lockRefreshInterval time.Duration
+	lockRefreshers      map[string]context.CancelFunc
+	lockRefreshersMutex sync.Mutex
+}
+
+// NewBridgeService creates a new instance of BridgeService.
+func NewBridgeService(
+	arbDepositor *blockchain.ArbitrumDepositor,
+	monadDistributor *blockchain.MonadDistributor,
+	db *database.DB,
+) *BridgeService {
+	ctx, cancel := context.WithCancel(context.Background())
+	instanceID := fmt.Sprintf("instance-%d", time.Now().UnixNano())
+	return &BridgeService{
+		arbDepositor:        arbDepositor,
+		monadDistributor:    monadDistributor,
+		depositChan:         make(chan blockchain.DepositEvent, 100),
+		refundChan:          make(chan *big.Int, 100),
+		wg:                  sync.WaitGroup{},
+		ctx:                 ctx,
+		cancel:              cancel,
+		db:                  db,
+		txCache:             make(map[string]*database.Transaction),
+		txCacheExpiration:   24 * time.Hour,
+		processingDeposits:  make(map[string]bool),
+		instanceID:          instanceID,
+		lockDuration:        5 * time.Minute,
+		lockRefreshInterval: 1 * time.Minute,
+		lockRefreshers:      make(map[string]context.CancelFunc),
+	}
+}
