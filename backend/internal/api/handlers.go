@@ -454,14 +454,10 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 
 	// Common response structure
 	type TransactionResponse struct {
-		Status            string            `json:"status"`
-		Message           string            `json:"message"`
-		Txs               map[string]string `json:"txs"`
-		DepositID         string            `json:"deposit_id,omitempty"`
-		ArbitrumTxHash    string            `json:"arbitrum_tx_hash,omitempty"`
-		MonadTxHash       string            `json:"monad_tx_hash,omitempty"`
-		RefundTxHash      string            `json:"refund_tx_hash,omitempty"`
-		RefundDestination string            `json:"refund_destination,omitempty"`
+		Status    string            `json:"status"`
+		Message   string            `json:"message"`
+		Txs       map[string]string `json:"txs"`
+		DepositID string            `json:"deposit_id,omitempty"`
 	}
 
 	// Helper function to create response
@@ -478,13 +474,11 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 
 		// Always include Arbitrum hash if available
 		if tx.TxHash != "" {
-			response.ArbitrumTxHash = tx.TxHash
 			response.Txs["Arbitrum"] = tx.TxHash
 		}
 
 		// Always include Monad hash if available
 		if tx.MonadTxHash != "" {
-			response.MonadTxHash = tx.MonadTxHash
 			response.Txs["Monad"] = tx.MonadTxHash
 
 			logger.Info("Including Monad hash in response",
@@ -576,6 +570,10 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 					slog.String("monad_tx_hash", tx.MonadTxHash))
 			}
 
+			// Always log the final response JSON for any request
+			finalJSON, _ := json.Marshal(response)
+			logger.Info("Final API response", slog.String("json", string(finalJSON)))
+
 			c.JSON(http.StatusOK, response)
 			logger.Info("Response sent",
 				slog.String("duration", time.Since(startTime).String()),
@@ -621,6 +619,10 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 					slog.String("deposit_id", tx.DepositID.String()),
 					slog.String("monad_tx_hash", tx.MonadTxHash))
 			}
+
+			// Always log the final response JSON for any request
+			finalJSON, _ := json.Marshal(response)
+			logger.Info("Final API response", slog.String("json", string(finalJSON)))
 
 			c.JSON(http.StatusOK, response)
 			logger.Info("Response sent",
@@ -687,6 +689,10 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 					slog.String("deposit_id", tx.DepositID.String()),
 					slog.String("monad_tx_hash", tx.MonadTxHash))
 			}
+
+			// Always log the final response JSON for any request
+			finalJSON, _ := json.Marshal(response)
+			logger.Info("Final API response", slog.String("json", string(finalJSON)))
 
 			c.JSON(http.StatusOK, response)
 			logger.Info("Response sent",
@@ -756,6 +762,10 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 					slog.String("monad_tx_hash", tx.MonadTxHash))
 			}
 
+			// Always log the final response JSON for any request
+			finalJSON, _ := json.Marshal(response)
+			logger.Info("Final API response", slog.String("json", string(finalJSON)))
+
 			c.JSON(http.StatusOK, response)
 			logger.Info("Response sent",
 				slog.String("duration", time.Since(startTime).String()),
@@ -777,12 +787,14 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 	}
 
 	if arbitrumTxHash != "" {
-		response.ArbitrumTxHash = arbitrumTxHash
 		response.Txs["Arbitrum"] = arbitrumTxHash
 	} else if txHash != "" {
-		response.MonadTxHash = txHash
 		response.Txs["Monad"] = txHash
 	}
+
+	// Always log the final response JSON for any request
+	finalJSON, _ := json.Marshal(response)
+	logger.Info("Final API response", slog.String("json", string(finalJSON)))
 
 	c.JSON(http.StatusOK, response)
 	logger.Info("Response sent",
