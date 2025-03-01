@@ -218,6 +218,13 @@ func (s *BridgeService) isProcessingDeposit(depositID *big.Int) bool {
 	if err != nil {
 		logger.Error("Failed to check distributed lock: %v", err)
 		// Fall back to local locking in case of database errors
+
+		// First check if the transaction is already completed to avoid duplicates
+		existingTx, txErr := s.GetTransactionByDepositID(context.Background(), depositID)
+		if txErr == nil && existingTx != nil && existingTx.Status == database.StatusCompleted {
+			logger.Info("Transaction for deposit ID %s is already completed, not acquiring local lock", depositIDStr)
+			return true
+		}
 	} else if !lockAcquired {
 		logger.Warn("⚠️ Deposit ID %s is locked by another instance, skipping duplicate attempt", depositIDStr)
 		return true
@@ -399,6 +406,30 @@ func (s *BridgeService) processDeposit(event DepositEvent) error {
 
 	// Mint tokens on Monad
 	logger.Info("Minting %s MON tokens for wallet %s", formatMonAmount(monAmount), event.Depositor.Hex())
+
+	// ONE MORE FINAL CHECK before minting to catch any race conditions
+	// This will prevent duplicate transactions in case multiple instances start processing the same deposit
+	finalTx, finalErr := s.GetTransactionByDepositID(ctx, event.DepositId)
+	if finalErr == nil && finalTx != nil && finalTx.Status == database.StatusCompleted && finalTx.MonadTxHash != "" {
+		logger.Info("⚠️ LAST-MINUTE DUPLICATE PREVENTION: Deposit ID %s already has a completed transaction with Monad hash %s",
+			event.DepositId.String(), finalTx.MonadTxHash)
+		return nil // Successfully handled, just return
+	}
+
+	// Also check for an existing transaction on the blockchain as a last defense
+	existingTxHash, _ := s.checkMonadBlockchainForTransaction(ctx, event.DepositId)
+	if existingTxHash != "" {
+		logger.Info("⚠️ LAST-MINUTE BLOCKCHAIN CHECK: Found existing transaction %s for deposit ID %s",
+			existingTxHash, event.DepositId.String())
+
+		// Update the database
+		if err := s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusCompleted, existingTxHash); err != nil {
+			logger.Error("Failed to update transaction with found tx hash: %v", err)
+		}
+
+		return nil // Successfully handled, just return
+	}
+
 	txHash, err := s.mintTokens(ctx, event.Depositor, monAmount, event.DepositId)
 	if err != nil {
 		// Check if this is a duplicate transaction error
@@ -560,7 +591,31 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		// Continue despite lock error - we'll catch duplicates in other ways
 	} else if !acquired {
 		logger.Warn("⚠️ Another instance appears to be processing deposit ID %s", depositIDStr)
-		// DO NOT stop processing - we need extra checks to handle the case when the lock fails
+		// If lock acquisition failed, perform an immediate check to see if the other process has already
+		// completed the transaction on the blockchain or updated the database
+		time.Sleep(2 * time.Second) // Brief pause to allow other process to complete
+
+		// Check in database first (faster than blockchain check)
+		existingTx, err := s.GetTransactionByDepositID(ctx, depositId)
+		if err == nil && existingTx != nil && existingTx.Status == database.StatusCompleted && existingTx.MonadTxHash != "" {
+			logger.Info("⚠️ DUPLICATE PREVENTION: Deposit ID %s already has a completed transaction with Monad hash %s",
+				depositIDStr, existingTx.MonadTxHash)
+			return existingTx.MonadTxHash, nil
+		}
+
+		// Check blockchain as a fallback
+		monadTxHash, err := s.checkMonadBlockchainForTransaction(ctx, depositId)
+		if err == nil && monadTxHash != "" {
+			logger.Info("🔍 Found existing transaction on Monad blockchain: %s for deposit ID %s",
+				monadTxHash, depositId.String())
+
+			// Update database with Monad tx hash
+			if updateErr := s.UpdateTransactionStatus(ctx, depositId, database.StatusCompleted, monadTxHash); updateErr != nil {
+				logger.Error("Failed to update transaction status: %v", updateErr)
+			}
+
+			return monadTxHash, nil
+		}
 	} else {
 		// Don't forget to release the lock when we're done
 		defer func() {
@@ -633,6 +688,33 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		return monadTxHash, nil
 	}
 
+	// FIFTH DEFENSE: Register intent to process this transaction in database BEFORE submitting
+	// This creates a race condition barrier that helps prevent duplicate submissions
+	if existingTx == nil || existingTx.Status != database.StatusPending {
+		// Create or update transaction with pending status
+		if err := s.UpdateTransactionStatus(ctx, depositId, database.StatusPending, ""); err != nil {
+			logger.Error("Failed to update transaction to pending status: %v", err)
+			// Continue anyway, but log the error
+		} else {
+			logger.Info("Updated transaction status to pending for deposit ID %s", depositId.String())
+		}
+
+		// After marking as pending, do one more check on the blockchain to catch any race conditions
+		// This is a critical section to prevent duplicate transactions
+		time.Sleep(1 * time.Second) // Give other instances a moment to potentially complete
+		monadTxHash, _ := s.checkMonadBlockchainForTransaction(ctx, depositId)
+		if monadTxHash != "" {
+			logger.Info("🔍 RACE CONDITION CHECK: Found existing transaction %s after marking as pending", monadTxHash)
+
+			// Update database with Monad tx hash
+			if updateErr := s.UpdateTransactionStatus(ctx, depositId, database.StatusCompleted, monadTxHash); updateErr != nil {
+				logger.Error("Failed to update transaction status: %v", updateErr)
+			}
+
+			return monadTxHash, nil
+		}
+	}
+
 	// Proceed with the regular minting process
 	transfer := []struct {
 		Recipient common.Address `abi:"recipient"`
@@ -695,45 +777,38 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 				time.Sleep(time.Second * 2)
 				continue
 			}
-
-			logger.Error("IMPORTANT: Transaction status update failed after 3 attempts, but tokens were minted! Deposit ID: %s, Monad tx hash: %s",
-				depositId.String(), txHash)
 		} else {
-			// Verify the update
-			verifyTx, verifyErr := s.db.GetTransactionByDepositID(depositId)
-			if verifyErr != nil {
-				logger.Error("Failed to verify transaction update: %v", verifyErr)
-			} else if verifyTx.Status != database.StatusCompleted || verifyTx.MonadTxHash != txHash {
-				logger.Error("CRITICAL: Transaction verify failed - current status=%s, monad_tx_hash=%s",
-					verifyTx.Status, verifyTx.MonadTxHash)
-
-				if i < 2 {
-					// Try again if verification failed
-					logger.Info("Retrying transaction status update...")
-					time.Sleep(time.Second * 2)
-					continue
-				}
-			} else {
-				logger.Info("✅ Database update confirmed for deposit ID %s with Monad tx hash %s",
-					depositId.String(), txHash)
-
-				// Add to in-memory cache as an additional safeguard against race conditions
-				s.txCacheMutex.Lock()
-				s.txCache[depositId.String()] = &database.Transaction{
-					DepositID:     depositId,
-					WalletAddress: recipient,
-					MonAmount:     amount,
-					Status:        database.StatusCompleted,
-					MonadTxHash:   txHash,
-				}
-				s.txCacheMutex.Unlock()
-
-				break // Success, exit the retry loop
-			}
+			logger.Info("✅ Database update confirmed for deposit ID %s with Monad tx hash %s",
+				depositId.String(), txHash)
+			break
 		}
 	}
 
-	return tx.Hash().Hex(), nil
+	// Update the transaction cache
+	s.txCacheMutex.Lock()
+	s.txCache[txLookupKey] = &database.Transaction{
+		DepositID:   depositId,
+		Status:      database.StatusCompleted,
+		MonadTxHash: txHash,
+	}
+	s.txCacheMutex.Unlock()
+
+	logger.Info("🔄 Updating transaction status to completed for deposit ID %s with Monad tx hash %s",
+		depositId.String(), txHash)
+
+	// Double-check that the status was actually updated
+	updatedTx, err := s.GetTransactionByDepositID(ctx, depositId)
+	if err != nil {
+		logger.Error("Failed to verify transaction status update: %v", err)
+	} else if updatedTx.Status != database.StatusCompleted || updatedTx.MonadTxHash != txHash {
+		logger.Error("⚠️ Transaction status verification failed! Expected status=%s, hash=%s but got status=%s, hash=%s",
+			database.StatusCompleted, txHash, updatedTx.Status, updatedTx.MonadTxHash)
+	} else {
+		logger.Info("✅ Transaction status updated correctly: deposit_id=%s, status=%s, monad_tx_hash=%s",
+			depositId.String(), updatedTx.Status, updatedTx.MonadTxHash)
+	}
+
+	return txHash, nil
 }
 
 // checkMonadBlockchainForTransaction attempts to find a transaction on the Monad blockchain
