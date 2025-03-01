@@ -538,12 +538,18 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 				}
 			}
 
-			response.ArbitrumTxHash = tx.TxHash
-			response.MonadTxHash = tx.MonadTxHash
-			response.Txs["Arbitrum"] = tx.TxHash
+			// Always include Arbitrum hash if available
+			if tx.TxHash != "" {
+				response.ArbitrumTxHash = tx.TxHash
+				response.Txs["Arbitrum"] = tx.TxHash
+			}
+
+			// Always include Monad hash if available
 			if tx.MonadTxHash != "" {
+				response.MonadTxHash = tx.MonadTxHash
 				response.Txs["Monad"] = tx.MonadTxHash
 			}
+
 			response.Status = tx.Status
 			response.Message = "Transaction status retrieved successfully"
 
@@ -591,10 +597,19 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 			}
 
 			response.DepositID = tx.DepositID.String()
-			response.ArbitrumTxHash = tx.TxHash
-			response.MonadTxHash = tx.MonadTxHash
-			response.Txs["Arbitrum"] = tx.TxHash
-			response.Txs["Monad"] = tx.MonadTxHash
+
+			// Always include Arbitrum hash if available
+			if tx.TxHash != "" {
+				response.ArbitrumTxHash = tx.TxHash
+				response.Txs["Arbitrum"] = tx.TxHash
+			}
+
+			// Always include Monad hash if available
+			if tx.MonadTxHash != "" {
+				response.MonadTxHash = tx.MonadTxHash
+				response.Txs["Monad"] = tx.MonadTxHash
+			}
+
 			response.Status = tx.Status
 			response.Message = "Transaction status retrieved successfully"
 
@@ -666,10 +681,19 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 			}
 
 			response.DepositID = tx.DepositID.String()
-			response.ArbitrumTxHash = tx.TxHash
-			response.MonadTxHash = tx.MonadTxHash
-			response.Txs["Arbitrum"] = tx.TxHash
-			response.Txs["Monad"] = tx.MonadTxHash
+
+			// Always include Arbitrum hash if available
+			if tx.TxHash != "" {
+				response.ArbitrumTxHash = tx.TxHash
+				response.Txs["Arbitrum"] = tx.TxHash
+			}
+
+			// Always include Monad hash if available
+			if tx.MonadTxHash != "" {
+				response.MonadTxHash = tx.MonadTxHash
+				response.Txs["Monad"] = tx.MonadTxHash
+			}
+
 			response.Status = tx.Status
 			response.Message = "Transaction status retrieved successfully"
 
@@ -744,15 +768,21 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 			}
 
 			response.DepositID = tx.DepositID.String()
-			response.ArbitrumTxHash = tx.TxHash
-			response.Txs["Arbitrum"] = tx.TxHash
+
+			// Always include Arbitrum hash if available
+			if tx.TxHash != "" {
+				response.ArbitrumTxHash = tx.TxHash
+				response.Txs["Arbitrum"] = tx.TxHash
+			}
+
+			// Always include Monad hash if available
+			if tx.MonadTxHash != "" {
+				response.MonadTxHash = tx.MonadTxHash
+				response.Txs["Monad"] = tx.MonadTxHash
+			}
+
 			response.Status = tx.Status
 			response.Message = "Transaction status retrieved successfully"
-
-			if tx.MonadTxHash != "" {
-				response.Txs["Monad"] = tx.MonadTxHash
-				response.MonadTxHash = tx.MonadTxHash
-			}
 
 			c.JSON(http.StatusOK, response)
 			logger.Info("Response sent",
