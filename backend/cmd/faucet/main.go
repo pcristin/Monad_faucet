@@ -50,6 +50,9 @@ func main() {
 		logger.Fatal("Failed to create database indexes: %v", err)
 	}
 
+	// Connect blockchain module to database for settings like MON/USD ratio
+	blockchain.SetDatabase(db)
+
 	// Parse private key
 	privateKey, err := crypto.HexToECDSA(cfg.WalletPrivateKey)
 	if err != nil {

@@ -66,6 +66,10 @@ func loadSettingsFromDB() {
 		// Update the in-memory value without updating the database again
 		globalMonUsdRatio.Set(ratio)
 		log.Printf("Loaded MON/USD ratio from database: %s", ratio.String())
+	} else {
+		// If database value is not available, use the default value
+		log.Printf("Could not load MON/USD ratio from database (error: %v). Using default value: %s",
+			err, initialMonUsdRatio.String())
 	}
 
 	// Load wallet limit percentage
