@@ -1502,98 +1502,46 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 	)
 
-	// Calculate USD value: depositAmount * ethUsdPrice / 10^(18+8-18) = depositAmount * ethUsdPrice / 10^8
-	// Using big.Rat for precise calculation
-	depositRat := new(big.Rat).SetInt(depositAmount)
-	ethUsdPriceRat := new(big.Rat).SetInt(ethUsdPrice)
-	usdValueRat := new(big.Rat).Mul(depositRat, ethUsdPriceRat)
-	// Adjust for Chainlink decimals (8)
-	usdValueRat = new(big.Rat).Quo(usdValueRat, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil)))
-	// Further adjust for ETH decimals (18)
-	usdValueRat = new(big.Rat).Quo(usdValueRat, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)))
+	// FIX: Implement correct calculation for ETH to MON conversion
+	// 1. First calculate: depositAmount * ethUsdPrice (ETH wei * USD price with 8 decimals)
+	depositTimesPrice := new(big.Int).Mul(depositAmount, ethUsdPrice)
 
-	// Calculate MON amount: usdValue * 10^18 / monUsdRatio
-	monAmountRat := new(big.Rat).Mul(usdValueRat, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)))
-	monAmountRat = new(big.Rat).Quo(monAmountRat, new(big.Rat).SetInt(monUsdRatio))
+	// 2. Adjust for decimals: We need to divide by 10^8 to account for ETH/USD price decimals
+	usdValueInWei := new(big.Int).Div(depositTimesPrice, new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil))
 
-	// Convert to floats for logging
-	usdValueFloat, _ := usdValueRat.Float64()
-	monAmountFloat, _ := new(big.Rat).Quo(monAmountRat, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))).Float64()
+	// 3. Now divide by MON/USD ratio to get MON amount
+	monWeiInt := new(big.Int).Mul(usdValueInWei, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	monWeiInt = new(big.Int).Div(monWeiInt, monUsdRatio)
 
-	// Calculate final MON wei amount (rounding properly)
-	monWeiRat := new(big.Rat).Add(monAmountRat, new(big.Rat).SetFrac(big.NewInt(1), big.NewInt(2))) // Add 0.5 for rounding
-	monWeiInt := new(big.Int)
-	monWeiRat.Num().Div(monWeiRat.Num(), monWeiRat.Denom())
-	monWeiInt.Set(monWeiRat.Num())
+	// Convert values to float64 for logging and minimum value checks
+	ethUsdValue, _ := ethUsdPriceFloat.Float64()
+	monUsdValue, _ := monUsdRatioFloat.Float64()
+	depositValue, _ := depositEthFloat.Float64()
+	usdValue := depositValue * ethUsdValue
+	monAmountFloat := usdValue / monUsdValue
 
-	// Log the calculation
-	ethUsdPriceValue, _ := ethUsdPriceFloat.Float64()
-	monUsdRatioValue, _ := monUsdRatioFloat.Float64()
+	// Handle minimum values for small deposits
+	minMonWei := big.NewInt(1000000000000000) // 0.001 MON (10^15 wei)
 
-	// Handle small deposits (when calculated MON is very low or zero)
-	if (monWeiInt.Sign() <= 0 && depositAmount.Sign() > 0) || monAmountFloat < 0.00001 {
-		// Base minimum MON amount (in wei) for any valid deposit
-		minMonWei := big.NewInt(1000000000000000) // 0.001 MON (10^15 wei)
-
-		// Get MON/USD ratio for direct calculation
-		monUsdRatio := GetMonUsdRatio()
-		monUsdRatioFloat := new(big.Float).Quo(
-			new(big.Float).SetInt(monUsdRatio),
-			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-		)
-		monRatioValue, _ := monUsdRatioFloat.Float64()
-
-		// Calculate expected MON amount in proper proportion to USD value
-		// For an ETH deposit worth $0.02 with MON/USD = $0.17, we should get 0.02/0.17 = 0.1176 MON
-		expectedMon := new(big.Float).Quo(
-			new(big.Float).SetFloat64(usdValueFloat),
-			monUsdRatioFloat,
-		)
-
-		// Convert to wei (multiply by 10^18)
-		expectedMonWei := new(big.Float).Mul(
-			expectedMon,
-			new(big.Float).SetFloat64(1e18),
-		)
-
-		// Convert to integer with proper rounding
-		expectedMonWeiInt, _ := expectedMonWei.Int(nil)
-
-		// Ensure we provide at least the minimum MON amount for any valid deposit
-		if expectedMonWeiInt.Cmp(minMonWei) < 0 {
-			expectedMonWeiInt = new(big.Int).Set(minMonWei)
+	// For small deposits that would result in very little MON, ensure minimum values
+	if monWeiInt.Sign() <= 0 || monWeiInt.Cmp(minMonWei) < 0 {
+		if depositAmount.Sign() > 0 {
+			logger.Info("Deposit would result in less than minimum MON, adjusting to minimum value")
+			monWeiInt = new(big.Int).Set(minMonWei)
 		}
-
-		// For very small deposits (under $0.001), ensure they still get something if valid
-		if usdValueFloat < 0.001 && depositAmount.Sign() > 0 {
-			// Ensure minimum amount of MON wei for extremely small deposits
-			microMon := big.NewInt(10000000000000) // 0.00001 MON (10^13 wei)
-			if expectedMonWeiInt.Cmp(microMon) < 0 {
-				expectedMonWeiInt = microMon
-			}
-		}
-
-		humanReadableMon := new(big.Float).Quo(
-			new(big.Float).SetInt(expectedMonWeiInt),
-			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-		).Text('f', 6)
-
-		logger.Info("ETH to MON calculation: %s ETH ≈ $%.6f USD (ETH price: $%.2f) / $%.6f per MON = %s MON (%s wei)",
-			depositEthFloat.Text('f', 18),
-			usdValueFloat,
-			ethUsdPriceValue,
-			monRatioValue,
-			humanReadableMon,
-			expectedMonWeiInt.String())
-
-		return expectedMonWeiInt
 	}
 
-	logger.Info("ETH to MON calculation: %s ETH ≈ $%.6f USD (ETH price: $%.2f) / $%.6f per MON = %.6f MON (%s wei)",
+	humanReadableMon := new(big.Float).Quo(
+		new(big.Float).SetInt(monWeiInt),
+		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+	).Text('f', 6)
+
+	logger.Info("ETH to MON calculation: %s ETH ≈ $%.6f USD (ETH price: $%.2f) / $%.6f per MON = %s MON (%.6f MON, %s wei)",
 		depositEthFloat.Text('f', 18),
-		usdValueFloat,
-		ethUsdPriceValue,
-		monUsdRatioValue,
+		usdValue,
+		ethUsdValue,
+		monUsdValue,
+		humanReadableMon,
 		monAmountFloat,
 		monWeiInt.String())
 
@@ -2098,6 +2046,52 @@ func (s *BridgeService) FindMonadTransactionByDepositID(ctx context.Context, dep
 		logger.Info("Found existing Monad transaction hash %s for deposit ID %s with status %s",
 			tx.MonadTxHash, depositID.String(), tx.Status)
 		return tx.Status, tx.MonadTxHash, nil
+	}
+
+	// If transaction is pending, check the blockchain for confirmation
+	if tx.Status == database.StatusPending {
+		logger.Info("Transaction is pending, checking blockchain directly for deposit ID %s", depositID.String())
+
+		// Check the blockchain for this transaction
+		monadTxHash, err := s.checkMonadBlockchainForTransaction(ctx, depositID)
+		if err != nil {
+			logger.Warn("Error checking blockchain for deposit ID %s: %v", depositID.String(), err)
+			// Continue despite error - we'll try the fallback search
+		}
+
+		if monadTxHash != "" {
+			// Found the transaction on the blockchain! Update the database
+			logger.Info("Found transaction %s on blockchain for deposit ID %s during status check",
+				monadTxHash, depositID.String())
+
+			// Update status in database
+			if updateErr := s.UpdateTransactionStatus(ctx, depositID, database.StatusCompleted, monadTxHash); updateErr != nil {
+				logger.Error("Failed to update transaction status: %v", updateErr)
+			} else {
+				logger.Info("✅ Updated transaction status for deposit ID %s to completed with hash %s",
+					depositID.String(), monadTxHash)
+			}
+
+			// Return the completed status and hash
+			return database.StatusCompleted, monadTxHash, nil
+		}
+
+		// If the standard search didn't find anything, try the more thorough fallback search
+		logger.Info("Standard blockchain search didn't find transaction, trying more thorough search for deposit ID %s", depositID.String())
+
+		// Try the fallback search method that scans all distribution events
+		searchErr := s.searchAllDistributionEvents(ctx, depositID)
+		if searchErr != nil {
+			logger.Warn("Error during fallback search for deposit ID %s: %v", depositID.String(), searchErr)
+		}
+
+		// Check the database again after the fallback search
+		updatedTx, _ := s.db.GetTransactionByDepositID(depositID)
+		if updatedTx != nil && updatedTx.Status == database.StatusCompleted && updatedTx.MonadTxHash != "" {
+			logger.Info("✅ Fallback search found and updated transaction: %s for deposit ID %s",
+				updatedTx.MonadTxHash, depositID.String())
+			return database.StatusCompleted, updatedTx.MonadTxHash, nil
+		}
 	}
 
 	// If there's no Monad tx hash but there is a status, at least return the status

@@ -556,6 +556,11 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 						// Update tx object for response
 						tx.Status = "completed"
 						tx.MonadTxHash = monadTxHash
+
+						// Log that we found and are including the Monad hash
+						logger.Info("Including completed Monad transaction in response",
+							slog.String("deposit_id", tx.DepositID.String()),
+							slog.String("monad_tx_hash", monadTxHash))
 					}
 				}
 			}
@@ -673,6 +678,11 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 						// Update tx object for response
 						tx.Status = "completed"
 						tx.MonadTxHash = monadTxHash
+
+						// Log that we found and are including the Monad hash
+						logger.Info("Including completed Monad transaction in response",
+							slog.String("deposit_id", tx.DepositID.String()),
+							slog.String("monad_tx_hash", monadTxHash))
 					}
 				}
 			}
@@ -742,6 +752,11 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 						// Update tx object for response
 						tx.Status = "completed"
 						tx.MonadTxHash = monadTxHash
+
+						// Log that we found and are including the Monad hash
+						logger.Info("Including completed Monad transaction in response",
+							slog.String("deposit_id", tx.DepositID.String()),
+							slog.String("monad_tx_hash", monadTxHash))
 					}
 				}
 			}
