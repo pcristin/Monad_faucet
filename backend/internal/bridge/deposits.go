@@ -26,12 +26,16 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 	defer s.finishProcessingDeposit(event.DepositId)
 
 	// Double-check for a completed transaction.
-	if tx, err := s.GetTransactionByDepositID(context.Background(), event.DepositId); err == nil && tx != nil && tx.Status == database.StatusCompleted {
+	tx, err := s.db.GetTransactionByDepositID(event.DepositId)
+	if err == nil && tx != nil && tx.Status == database.StatusCompleted {
 		logger.Info("Transaction for deposit ID %s already completed with Monad tx hash %s", event.DepositId.String(), tx.MonadTxHash)
 		return nil
 	}
 
-	logger.Info("Processing deposit %s", event)
+	logger.Info("Processing deposit %s from wallet %s, amount %s, currency %s",
+		event.DepositId.String(), event.Depositor.Hex(), event.Amount.String(),
+		blockchain.CurrencyTypeToString(event.Currency))
+
 	ctx, cancel := context.WithTimeout(s.ctx, 3*time.Minute)
 	defer cancel()
 
@@ -43,50 +47,29 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 		return fmt.Errorf("bridge is currently paused")
 	}
 
-	monAmount := calculateMonAmount(event.Amount, state.SwapRatios[event.Currency], event.Currency)
-	logger.Info("Calculated MON amount: %s from deposit amount: %s", monAmount.String(), event.Amount.String())
+	// Get swap ratio from state
+	swapRatio := state.SwapRatios[event.Currency]
+	if swapRatio == nil || swapRatio.Cmp(big.NewInt(0)) <= 0 {
+		logger.Error("Invalid swap ratio for currency %s: %v",
+			blockchain.CurrencyTypeToString(event.Currency), swapRatio)
+		return fmt.Errorf("invalid swap ratio")
+	}
 
-	// Create or update a pending transaction.
-	existingTx, err := s.GetTransactionByDepositID(ctx, event.DepositId)
-	if err != nil || existingTx == nil {
-		// Create transaction record with detailed logging
-		logger.Info("Creating new transaction record for deposit ID %s with amount %s MON",
-			event.DepositId.String(), monAmount.String())
+	// Calculate MON amount with detailed logging
+	monAmount := calculateMonAmount(event.Amount, swapRatio, event.Currency)
+	logger.Info("Calculated MON amount: %s from deposit amount: %s %s",
+		formatMonAmount(monAmount), event.Amount.String(),
+		blockchain.CurrencyTypeToString(event.Currency))
 
-		txRecord := &database.Transaction{
-			DepositID:     event.DepositId,
-			WalletAddress: event.Depositor,
-			Amount:        event.Amount,
-			Currency:      database.CurrencyType(event.Currency),
-			MonAmount:     monAmount,
-			Status:        database.StatusPending,
-			TxHash:        event.TxHash,
-		}
-
-		if err := s.db.CreateTransaction(txRecord); err != nil {
-			logger.Error("Failed to create transaction record: %v", err)
-			// Continue processing despite the error, we'll try to recover later
-		} else {
-			logger.Info("Transaction record created successfully with ID %d for deposit ID %s",
-				txRecord.ID, event.DepositId.String())
-
-			// Verify transaction was created
-			verifyTx, verifyErr := s.db.GetTransactionByDepositID(event.DepositId)
-			if verifyErr != nil {
-				logger.Error("Error verifying transaction creation: %v", verifyErr)
-			} else if verifyTx == nil {
-				logger.Error("Transaction verification failed: record not found after creation")
-			} else {
-				logger.Info("Transaction verified: ID=%d, DepositID=%s, Amount=%s, MonAmount=%s",
-					verifyTx.ID, verifyTx.DepositID.String(), verifyTx.Amount.String(), verifyTx.MonAmount.String())
-			}
-		}
-	} else if existingTx.Status == database.StatusCompleted {
-		logger.Info("Transaction for deposit ID %s already completed with Monad tx hash %s", event.DepositId.String(), existingTx.MonadTxHash)
+	// Create or update transaction record in database
+	dbTransaction, err := s.ensureTransactionRecord(event, monAmount)
+	if err != nil {
+		logger.Error("Failed to ensure transaction record: %v", err)
+		// Continue processing despite error, we'll try to recover
+	} else if dbTransaction != nil && dbTransaction.Status == database.StatusCompleted {
+		logger.Info("Transaction already completed with hash %s, skipping processing",
+			dbTransaction.MonadTxHash)
 		return nil
-	} else {
-		logger.Info("Using existing transaction record for deposit ID %s (status: %s)",
-			event.DepositId.String(), existingTx.Status)
 	}
 
 	if err := s.validateDepositWithAmount(state, event, monAmount); err != nil {
@@ -122,27 +105,86 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 			return fmt.Errorf("duplicate mint attempt: %w", err)
 		}
 		logger.Error("Mint tokens failed: %v. Deposit: %v", err, event)
-		// Recovery logic omitted here for brevity (same as original)
+		// Update status to failed
 		_ = s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusFailed, "")
 		s.QueueRefund(event.DepositId)
 		return fmt.Errorf("failed to mint tokens: %w", err)
 	}
 
-	logger.Info("Updating transaction status to completed for deposit ID %s with tx %s", event.DepositId.String(), txHash)
+	logger.Info("Successfully minted %s MON for wallet %s. Updating transaction status to completed with tx %s",
+		formatMonAmount(monAmount), event.Depositor.Hex(), txHash)
+
+	// Update transaction status and verify the update
 	if err := s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusCompleted, txHash); err != nil {
 		logger.Error("Failed to update transaction status: %v", err)
 	} else {
-		if tx, err := s.db.GetTransactionByDepositID(event.DepositId); err == nil {
-			if tx.Status == database.StatusCompleted && tx.MonadTxHash == txHash {
-				logger.Info("Transaction status updated correctly for deposit ID %s", event.DepositId.String())
-			} else {
-				logger.Warn("Transaction status may not have updated correctly for deposit ID %s", event.DepositId.String())
-			}
+		// Verify the update was successful
+		updatedTx, verifyErr := s.db.GetTransactionByDepositID(event.DepositId)
+		if verifyErr != nil {
+			logger.Error("Failed to verify transaction update: %v", verifyErr)
+		} else if updatedTx == nil {
+			logger.Error("Transaction not found after update")
+		} else if updatedTx.Status != database.StatusCompleted {
+			logger.Error("Transaction status not updated correctly: expected %s, got %s",
+				database.StatusCompleted, updatedTx.Status)
+		} else if updatedTx.MonadTxHash != txHash {
+			logger.Error("Transaction hash not updated correctly: expected %s, got %s",
+				txHash, updatedTx.MonadTxHash)
+		} else {
+			logger.Info("Transaction successfully updated and verified: status=%s, txHash=%s",
+				updatedTx.Status, updatedTx.MonadTxHash)
 		}
 	}
+
+	// Update transaction cache
 	s.updateTxCache(event.DepositId, database.StatusCompleted, txHash)
 	logger.Info("Processing completed for deposit ID %s in %v", event.DepositId.String(), time.Since(startTime))
 	return nil
+}
+
+// ensureTransactionRecord ensures that a transaction record exists in the database for the given deposit event.
+// If a record exists, it returns it. If not, it creates a new record.
+func (s *BridgeService) ensureTransactionRecord(event blockchain.DepositEvent, monAmount *big.Int) (*database.Transaction, error) {
+	// First check if the transaction already exists
+	existingTx, err := s.db.GetTransactionByDepositID(event.DepositId)
+	if err == nil && existingTx != nil {
+		logger.Info("Found existing transaction record for deposit ID %s: status=%s",
+			event.DepositId.String(), existingTx.Status)
+		return existingTx, nil
+	}
+
+	// Create a new transaction record
+	logger.Info("Creating new transaction record for deposit ID %s from wallet %s",
+		event.DepositId.String(), event.Depositor.Hex())
+
+	txRecord := &database.Transaction{
+		DepositID:     event.DepositId,
+		WalletAddress: event.Depositor,
+		Amount:        event.Amount,
+		Currency:      database.CurrencyType(event.Currency),
+		MonAmount:     monAmount,
+		Status:        database.StatusPending,
+		TxHash:        event.TxHash,
+	}
+
+	if err := s.db.CreateTransaction(txRecord); err != nil {
+		logger.Error("Failed to create transaction record: %v", err)
+		return nil, fmt.Errorf("failed to create transaction record: %w", err)
+	}
+
+	// Verify the transaction was created
+	verifyTx, err := s.db.GetTransactionByDepositID(event.DepositId)
+	if err != nil {
+		logger.Error("Failed to verify transaction creation: %v", err)
+		return txRecord, fmt.Errorf("failed to verify transaction creation: %w", err)
+	} else if verifyTx == nil {
+		logger.Error("Transaction not found after creation for deposit ID %s", event.DepositId.String())
+		return txRecord, fmt.Errorf("transaction not found after creation")
+	}
+
+	logger.Info("Transaction record successfully created and verified for deposit ID %s: ID=%d",
+		event.DepositId.String(), verifyTx.ID)
+	return verifyTx, nil
 }
 
 // finishProcessingDeposit marks a deposit as no longer being processed.

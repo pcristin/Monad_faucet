@@ -20,35 +20,103 @@ func (s *BridgeService) GetDepositIDFromTxHash(ctx context.Context, txHash strin
 	if hash == (common.Hash{}) {
 		return nil, fmt.Errorf("invalid tx hash format")
 	}
+
+	// First try database
+	logger.Info("Looking up transaction by Arbitrum tx hash: %s", txHash)
 	tx, err := s.db.GetTransactionByArbitrumTxHash(hash.Hex())
 	if err == nil && tx != nil {
-		logger.Info("Found deposit ID %s for tx %s", tx.DepositID.String(), txHash)
+		logger.Info("Found deposit ID %s for tx %s in database", tx.DepositID.String(), txHash)
 		return tx.DepositID, nil
 	}
-	return nil, fmt.Errorf("transaction not found in database")
+
+	// If not found in database, try to get it from the contract logs
+	logger.Info("Transaction not found in database, checking contract logs for tx %s", txHash)
+
+	// Look through deposit events to find a matching transaction hash
+	// This is a simplified implementation - in a real system you'd want to
+	// query the contract directly or use an indexer service
+	depositID, err := s.findDepositIDFromContractLogs(ctx, hash)
+	if err != nil {
+		logger.Error("Error getting deposit ID from contract logs: %v", err)
+		return nil, fmt.Errorf("transaction not found: %w", err)
+	}
+
+	if depositID != nil && depositID.Cmp(big.NewInt(0)) > 0 {
+		logger.Info("Found deposit ID %s from contract for tx hash %s", depositID.String(), txHash)
+
+		// Check if we have a transaction record for this deposit ID
+		existingTx, err := s.db.GetTransactionByDepositID(depositID)
+		if err == nil && existingTx != nil {
+			// Update transaction record with tx hash if needed
+			if existingTx.TxHash == "" || existingTx.TxHash != txHash {
+				logger.Info("Updating transaction record with Arbitrum tx hash %s", txHash)
+				if err := s.db.UpdateTransactionHash(depositID, txHash); err != nil {
+					logger.Error("Failed to update transaction hash: %v", err)
+				}
+			}
+		} else {
+			// Create minimal transaction record if none exists
+			logger.Info("Creating minimal transaction record for deposit ID %s with tx hash %s", depositID.String(), txHash)
+			minimalTx := &database.Transaction{
+				DepositID: depositID,
+				TxHash:    txHash,
+				Status:    database.StatusPending,
+			}
+			if err := s.db.CreateTransaction(minimalTx); err != nil {
+				logger.Error("Failed to create minimal transaction record: %v", err)
+			}
+		}
+
+		return depositID, nil
+	}
+
+	return nil, fmt.Errorf("could not find deposit ID for tx hash %s", txHash)
 }
 
 func (s *BridgeService) GetCachedTransactionByDepositID(ctx context.Context, depositID *big.Int) (*database.Transaction, error) {
+	if depositID == nil {
+		return nil, fmt.Errorf("deposit ID is nil")
+	}
+
 	cacheKey := depositID.String()
+
+	// Check cache first
 	s.txCacheMutex.RLock()
 	if cached, exists := s.txCache[cacheKey]; exists && cached.Status != database.StatusPending {
 		s.txCacheMutex.RUnlock()
+		logger.Info("Found transaction in cache for deposit ID %s with status %s", depositID.String(), cached.Status)
 		return cached, nil
 	}
 	s.txCacheMutex.RUnlock()
+
+	// If not in cache, check database
+	logger.Info("Transaction not in cache, checking database for deposit ID %s", depositID.String())
 	tx, err := s.db.GetTransactionByDepositID(depositID)
 	if err != nil {
+		logger.Error("Failed to get transaction from database: %v", err)
 		return nil, fmt.Errorf("failed to get transaction from DB: %w", err)
 	}
+
+	if tx == nil {
+		logger.Warn("No transaction found for deposit ID %s", depositID.String())
+		return nil, fmt.Errorf("transaction not found for deposit ID %s", depositID.String())
+	}
+
+	// If transaction is completed, cache it
 	if tx.Status != database.StatusPending {
 		s.txCacheMutex.Lock()
 		s.txCache[cacheKey] = tx
 		s.txCacheMutex.Unlock()
+
+		// Set expiration for cache entry
 		go func(key string, expiration time.Duration) {
 			time.Sleep(expiration)
 			s.clearTransactionCache(key)
 		}(cacheKey, s.txCacheExpiration)
+
+		logger.Info("Cached transaction for deposit ID %s with status %s", depositID.String(), tx.Status)
 	}
+
 	return tx, nil
 }
 
@@ -213,15 +281,67 @@ func (s *BridgeService) GetDepositIDFromArbitrumTxHash(ctx context.Context, txHa
 }
 
 func (s *BridgeService) GetMonadTxHashFromArbitrumTxHash(ctx context.Context, txHash string) (string, string, error) {
+	logger.Info("Looking up Monad transaction for Arbitrum tx hash %s", txHash)
+
+	// Step 1: Get deposit ID from Arbitrum tx hash
 	depositID, err := s.GetDepositIDFromArbitrumTxHash(ctx, txHash)
 	if err != nil {
 		logger.Error("Error getting deposit ID from Arbitrum tx hash: %v", err)
-		return "", "", err
+		return "", "", fmt.Errorf("error getting deposit ID: %w", err)
 	}
+
+	if depositID == nil {
+		logger.Error("No deposit ID found for tx hash %s", txHash)
+		return "", "", fmt.Errorf("deposit ID not found for tx hash")
+	}
+
+	logger.Info("Found deposit ID %s for Arbitrum tx hash %s", depositID.String(), txHash)
+
+	// Step 2: Get transaction status and Monad tx hash from deposit ID
 	status, monadTxHash, err := s.FindMonadTransactionByDepositID(ctx, depositID)
 	if err != nil {
-		logger.Error("Error finding Monad tx hash by deposit ID: %v", err)
-		return "", "", err
+		logger.Error("Error finding Monad tx for deposit ID %s: %v", depositID.String(), err)
+		return "", "", fmt.Errorf("error finding Monad tx: %w", err)
 	}
+
+	if monadTxHash != "" {
+		logger.Info("Found Monad tx %s with status %s for Arbitrum tx %s", monadTxHash, status, txHash)
+	} else {
+		logger.Info("No Monad tx found for Arbitrum tx %s, status: %s", txHash, status)
+	}
+
 	return status, monadTxHash, nil
+}
+
+func (s *BridgeService) findDepositIDFromContractLogs(ctx context.Context, txHash common.Hash) (*big.Int, error) {
+	// In a real implementation, you would query the blockchain for the transaction
+	// and extract the deposit ID from the logs or transaction data
+	// This is a placeholder implementation
+
+	// Get transaction receipt
+	receipt, err := s.arbDepositor.Client.TransactionReceipt(ctx, txHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get transaction receipt: %w", err)
+	}
+
+	// Look for DepositEvent in the logs
+	for _, log := range receipt.Logs {
+		// Check if this log is from our depositor contract
+		if log.Address == s.arbDepositor.Address {
+			// Try to parse as DepositEvent
+			var depositEvent struct {
+				Depositor common.Address
+				Amount    *big.Int
+				DepositId *big.Int
+				Currency  uint8
+			}
+
+			err = s.arbDepositor.BoundContract.UnpackLog(&depositEvent, "DepositEvent", *log)
+			if err == nil && depositEvent.DepositId != nil {
+				return depositEvent.DepositId, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("could not find DepositEvent in transaction logs")
 }
