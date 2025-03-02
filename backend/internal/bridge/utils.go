@@ -54,72 +54,50 @@ func calculateMonAmount(amount *big.Int, swapRatio *big.Int, currency blockchain
 	// Make a copy of the input amount to avoid modifying the original
 	amountCopy := new(big.Int).Set(amount)
 
-	// Critical step: We need to normalize the input amount based on the currency's decimal precision
-	// before applying the swap ratio
+	// Get the standard MON decimals (18)
+	monDecimals := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+
+	// Calculate based on currency type
 	var monAmount *big.Int
 
 	if currency == blockchain.CurrencyUSDT || currency == blockchain.CurrencyUSDC {
-		// USDT and USDC have 6 decimals, but MON has 18 decimals
-		// We need to:
-		// 1. Scale the input amount to 18 decimals (multiply by 10^12)
-		// 2. Multiply by the swap ratio
-		// 3. Divide by 10^18 to get the final MON amount
+		// USDT and USDC have 6 decimals
+		// 1. Convert deposited amount to its USD value (with 18 decimals precision)
+		// 2. Apply the swap ratio which is MON tokens per 1 USD
 
-		// Step 1: Scale from 6 to 18 decimals
+		// Convert from 6 decimals to 18 decimals for consistent precision
 		scaleFactor := new(big.Int).Exp(big.NewInt(10), big.NewInt(12), nil)
 		scaledAmount := new(big.Int).Mul(amountCopy, scaleFactor)
-		logger.Info("Step 1: Scaled amount from 6 to 18 decimals: %s", scaledAmount.String())
+		logger.Info("Scaled USD token amount to 18 decimals: %s", scaledAmount.String())
 
-		// Step 2: Apply swap ratio
+		// Apply swap ratio - this will give MON amount with 36 decimals of precision
+		// swapRatio = 10^18 / monUsdRatio, which means tokens per 1 USD with 18 decimals
 		monAmount = new(big.Int).Mul(scaledAmount, swapRatio)
-		logger.Info("Step 2: After applying swap ratio: %s", monAmount.String())
+		logger.Info("After applying swap ratio: %s", monAmount.String())
 
-		// Step 3: Normalize to MON tokens (divide by 10^18)
-		divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
-		monAmount = new(big.Int).Div(monAmount, divisor)
-		logger.Info("Step 3: Final MON amount after normalization: %s", monAmount.String())
+		// Normalize to MON 18 decimals by dividing by 10^18
+		monAmount = new(big.Int).Div(monAmount, monDecimals)
+		logger.Info("Final normalized MON amount: %s", monAmount.String())
 
-		// Special case: If this is 0.25 USDT (250000), verify we're getting approximately 2.5 MON
-		if amount.String() == "250000" {
-			expected := new(big.Int).Mul(big.NewInt(25), new(big.Int).Exp(big.NewInt(10), big.NewInt(17), nil)) // 2.5 MON
-			if monAmount.Cmp(expected) < 0 {
-				logger.Warn("Validation failed: Expected ~2.5 MON for 0.25 USDT, got %s MON", formatMonAmount(monAmount))
-				logger.Info("Using expected value of 2.5 MON for 0.25 USDT")
-				return expected
-			}
-		}
 	} else if currency == blockchain.CurrencyETH {
-		// ETH already has 18 decimals, same as MON
-		// We need to:
-		// 1. Multiply by the swap ratio
-		// 2. Divide by 10^18 to get the final MON amount
+		// ETH has 18 decimals, same as MON
+		// swapRatio = (ethUsdPrice * 10^10) * (10^18 / monUsdRatio) / 10^18
+		// which equals (ethUsdPrice / monUsdPrice) * 10^10
 
-		// Step 1: Apply swap ratio
+		// For ETH, the swap ratio already accounts for ETH's USD price and MON's USD price
+		// Just multiply by the amount and divide by 10^18
 		monAmount = new(big.Int).Mul(amountCopy, swapRatio)
-		logger.Info("Step 1 (ETH): After applying swap ratio: %s", monAmount.String())
+		logger.Info("After applying ETH swap ratio: %s", monAmount.String())
 
-		// Step 2: Normalize to MON tokens
-		divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
-		monAmount = new(big.Int).Div(monAmount, divisor)
-		logger.Info("Step 2 (ETH): Final MON amount after normalization: %s", monAmount.String())
+		// Normalize to MON 18 decimals
+		monAmount = new(big.Int).Div(monAmount, monDecimals)
+		logger.Info("Final normalized ETH->MON amount: %s", monAmount.String())
 
-		// Special case: If this is 0.00012 ETH (120000000000000), verify we're getting approximately 2.7 MON
-		if amount.String() == "120000000000000" {
-			expected := new(big.Int).Mul(big.NewInt(27), new(big.Int).Exp(big.NewInt(10), big.NewInt(17), nil)) // 2.7 MON
-			if monAmount.Cmp(expected) < 0 {
-				logger.Warn("Validation failed: Expected ~2.7 MON for 0.00012 ETH, got %s MON", formatMonAmount(monAmount))
-				logger.Info("Using expected value of 2.7 MON for 0.00012 ETH")
-				return expected
-			}
-		}
 	} else {
-		// For any other currency, use default calculation
+		logger.Warn("Unknown currency type %d, using default calculation", currency)
+		// Default calculation for unknown currencies
 		monAmount = new(big.Int).Mul(amountCopy, swapRatio)
-		logger.Info("Applied swap ratio: monAmount=%s", monAmount.String())
-
-		divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
-		monAmount = new(big.Int).Div(monAmount, divisor)
-		logger.Info("After normalization: monAmount=%s", monAmount.String())
+		monAmount = new(big.Int).Div(monAmount, monDecimals)
 	}
 
 	// Safety check - ensure we're not sending less than minimum amount (0.001 MON = 10^15)
