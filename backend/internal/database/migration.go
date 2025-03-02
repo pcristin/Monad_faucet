@@ -56,11 +56,89 @@ func (db *DB) SchemaMigration() error {
 		return fmt.Errorf("failed to create new tables: %w", err)
 	}
 
-	// Begin transaction for migration
+	// Get all records from transaction_history without a transaction first
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, 
+		       tx_hash, monad_tx_hash, created_at, updated_at 
+		FROM transaction_history
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to query transaction_history: %w", err)
+	}
+	defer rows.Close()
+
+	// Collect all migrations to process
+	type MigrationRecord struct {
+		ID          int64
+		DepositID   string
+		WalletAddr  string
+		Amount      string
+		Currency    int64
+		MonAmount   string
+		Status      string
+		TxHash      sql.NullString
+		MonadTxHash sql.NullString
+		CreatedAt   time.Time
+		UpdatedAt   time.Time
+		BlockNumber int64
+	}
+
+	var records []MigrationRecord
+	for rows.Next() {
+		var rec MigrationRecord
+		rec.BlockNumber = 0 // Default for older records
+
+		if err := rows.Scan(
+			&rec.ID, &rec.DepositID, &rec.WalletAddr, &rec.Amount, &rec.Currency, &rec.MonAmount,
+			&rec.Status, &rec.TxHash, &rec.MonadTxHash, &rec.CreatedAt, &rec.UpdatedAt,
+		); err != nil {
+			return fmt.Errorf("failed to scan transaction_history row: %w", err)
+		}
+
+		records = append(records, rec)
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating transaction_history rows: %w", err)
+	}
+
+	// Process each record in separate transactions
+	migratedCount := 0
+
+	for _, rec := range records {
+		// Process deposit record
+		err := db.processMigrationRecord(ctx, rec)
+		if err != nil {
+			logger.Error("Failed to process migration record %d: %v", rec.ID, err)
+			// Continue with other records instead of failing completely
+			continue
+		}
+		migratedCount++
+
+		// Add a delay between records to avoid overwhelming the connection
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Create a backup of the transaction_history table in a separate transaction
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS transaction_history_backup AS 
+		SELECT * FROM transaction_history
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create transaction_history backup: %w", err)
+	}
+
+	logger.Info("Schema migration completed successfully: migrated %d records", migratedCount)
+	return nil
+}
+
+// processMigrationRecord processes a single record in its own transaction
+func (db *DB) processMigrationRecord(ctx context.Context, rec MigrationRecord) error {
+	// Use a less strict isolation level to avoid locking issues
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -71,103 +149,49 @@ func (db *DB) SchemaMigration() error {
 		}
 	}()
 
-	// Get all records from transaction_history
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, 
-		       tx_hash, monad_tx_hash, created_at, updated_at 
-		FROM transaction_history
-	`)
+	// For deposits table
+	var arbiTxHash string
+	if rec.TxHash.Valid {
+		arbiTxHash = rec.TxHash.String
+	} else {
+		arbiTxHash = ""
+	}
+
+	depositStatus := rec.Status
+	if rec.Status == StatusCompleted {
+		depositStatus = processedStatus
+	}
+
+	// Insert into deposits with basic statement
+	_, err = tx.ExecContext(ctx,
+		"INSERT INTO deposits (deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (deposit_id) DO NOTHING",
+		rec.DepositID, rec.WalletAddr, rec.Amount, rec.Currency, arbiTxHash, rec.BlockNumber, depositStatus, rec.CreatedAt, rec.UpdatedAt)
+
 	if err != nil {
-		return fmt.Errorf("failed to query transaction_history: %w", err)
-	}
-	defer rows.Close()
-
-	migratedCount := 0
-
-	for rows.Next() {
-		var (
-			id, currency                                        int64
-			depositID, walletAddress, amount, monAmount, status string
-			txHash, monadTxHash                                 sql.NullString
-			createdAt, updatedAt                                time.Time
-			blockNumber                                         int64 = 0 // Default for older records
-		)
-
-		if err := rows.Scan(
-			&id, &depositID, &walletAddress, &amount, &currency, &monAmount,
-			&status, &txHash, &monadTxHash, &createdAt, &updatedAt,
-		); err != nil {
-			return fmt.Errorf("failed to scan transaction_history row: %w", err)
-		}
-
-		// For deposits table
-		var arbiTxHash string
-		if txHash.Valid {
-			arbiTxHash = txHash.String
-		} else {
-			arbiTxHash = ""
-		}
-
-		depositStatus := status
-		if status == StatusCompleted {
-			depositStatus = processedStatus
-		}
-
-		// Insert into deposits
-		depositInsert := `
-			INSERT INTO deposits (deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			ON CONFLICT (deposit_id) DO NOTHING
-		`
-		_, err = tx.ExecContext(ctx, depositInsert, depositID, walletAddress, amount, currency, arbiTxHash, blockNumber, depositStatus, createdAt, updatedAt)
-		if err != nil {
-			logger.Error("Failed to insert into deposits: %v", err)
-			return fmt.Errorf("failed to insert into deposits: %w", err)
-		}
-
-		// Insert into distributions
-		distributionStatus := DistStatusPending
-		if status == StatusCompleted {
-			distributionStatus = DistStatusCompleted
-		} else if status == StatusFailed {
-			distributionStatus = DistStatusFailed
-		}
-
-		var monadHash string
-		if monadTxHash.Valid {
-			monadHash = monadTxHash.String
-		} else {
-			monadHash = ""
-		}
-
-		// Add a small delay between operations to avoid protocol errors
-		time.Sleep(10 * time.Millisecond)
-
-		distributionInsert := `
-			INSERT INTO distributions (deposit_id, wallet_address, mon_amount, status, monad_tx_hash, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (deposit_id) DO NOTHING
-		`
-		_, err = tx.ExecContext(ctx, distributionInsert, depositID, walletAddress, monAmount, distributionStatus, monadHash, createdAt, updatedAt)
-		if err != nil {
-			logger.Error("Failed to insert into distributions: %v", err)
-			return fmt.Errorf("failed to insert into distributions: %w", err)
-		}
-
-		migratedCount++
+		return fmt.Errorf("failed to insert into deposits: %w", err)
 	}
 
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("error iterating transaction_history rows: %w", err)
+	// Insert into distributions
+	distributionStatus := DistStatusPending
+	if rec.Status == StatusCompleted {
+		distributionStatus = DistStatusCompleted
+	} else if rec.Status == StatusFailed {
+		distributionStatus = DistStatusFailed
 	}
 
-	// Create a backup of the transaction_history table
-	_, err = tx.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS transaction_history_backup AS 
-		SELECT * FROM transaction_history
-	`)
+	var monadHash string
+	if rec.MonadTxHash.Valid {
+		monadHash = rec.MonadTxHash.String
+	} else {
+		monadHash = ""
+	}
+
+	_, err = tx.ExecContext(ctx,
+		"INSERT INTO distributions (deposit_id, wallet_address, mon_amount, status, monad_tx_hash, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (deposit_id) DO NOTHING",
+		rec.DepositID, rec.WalletAddr, rec.MonAmount, distributionStatus, monadHash, rec.CreatedAt, rec.UpdatedAt)
+
 	if err != nil {
-		return fmt.Errorf("failed to create transaction_history backup: %w", err)
+		return fmt.Errorf("failed to insert into distributions: %w", err)
 	}
 
 	// Commit the transaction
@@ -175,7 +199,6 @@ func (db *DB) SchemaMigration() error {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	logger.Info("Schema migration completed successfully: migrated %d records", migratedCount)
 	return nil
 }
 
