@@ -62,30 +62,45 @@ func calculateMonAmount(amount *big.Int, swapRatio *big.Int, currency blockchain
 
 	if currency == blockchain.CurrencyUSDT || currency == blockchain.CurrencyUSDC {
 		// USDT and USDC have 6 decimals
-		// 1. Convert deposited amount to its USD value (with 18 decimals precision)
-		// 2. Apply the swap ratio which is MON tokens per 1 USD
+		// 1. Calculate how many full USD tokens we have (divide by 10^6)
+		// 2. Apply the swap ratio to get MON tokens
 
-		// Convert from 6 decimals to 18 decimals for consistent precision
-		scaleFactor := new(big.Int).Exp(big.NewInt(10), big.NewInt(12), nil)
-		scaledAmount := new(big.Int).Mul(amountCopy, scaleFactor)
-		logger.Info("Scaled USD token amount to 18 decimals: %s", scaledAmount.String())
+		// First log the raw amount in wei
+		logger.Info("Raw USD token amount in wei: %s", amountCopy.String())
 
-		// Apply swap ratio - this will give MON amount with 36 decimals of precision
-		// swapRatio = 10^18 / monUsdRatio, which means tokens per 1 USD with 18 decimals
-		monAmount = new(big.Int).Mul(scaledAmount, swapRatio)
-		logger.Info("After applying swap ratio: %s", monAmount.String())
+		// Get USD token decimals (6)
+		usdTokenDecimals := new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)
+
+		// Scale the swap ratio to account for USD token decimals
+		// swapRatio is MON tokens per 1 USD with 18 decimals precision
+		scaledRatio := new(big.Int).Mul(swapRatio, usdTokenDecimals)
+		logger.Info("Scaled swap ratio: %s", scaledRatio.String())
+
+		// Apply scaled ratio directly to get MON amount in wei
+		monAmount = new(big.Int).Mul(amountCopy, scaledRatio)
+		logger.Info("Intermediate MON calculation: %s", monAmount.String())
 
 		// Normalize to MON 18 decimals by dividing by 10^18
 		monAmount = new(big.Int).Div(monAmount, monDecimals)
 		logger.Info("Final normalized MON amount: %s", monAmount.String())
 
+		// Double-check the calculation with a different approach
+		// This is for validation only
+		usdValue := new(big.Float).SetInt(amountCopy)
+		usdValue = new(big.Float).Quo(usdValue, new(big.Float).SetInt(usdTokenDecimals))
+		swapRatioFloat := new(big.Float).SetInt(swapRatio)
+		swapRatioFloat = new(big.Float).Quo(swapRatioFloat, new(big.Float).SetInt(monDecimals))
+		expectedMon := new(big.Float).Mul(usdValue, swapRatioFloat)
+		expectedMonFloat, _ := expectedMon.Float64()
+		logger.Info("Expected MON (float check): %f", expectedMonFloat)
+
+		// Convert to a string with fixed decimal places for better logging
+		expectedMonStr := fmt.Sprintf("%.18f", expectedMonFloat)
+		logger.Info("Expected MON as string: %s", expectedMonStr)
+
 	} else if currency == blockchain.CurrencyETH {
 		// ETH has 18 decimals, same as MON
-		// swapRatio = (ethUsdPrice * 10^10) * (10^18 / monUsdRatio) / 10^18
-		// which equals (ethUsdPrice / monUsdPrice) * 10^10
-
 		// For ETH, the swap ratio already accounts for ETH's USD price and MON's USD price
-		// Just multiply by the amount and divide by 10^18
 		monAmount = new(big.Int).Mul(amountCopy, swapRatio)
 		logger.Info("After applying ETH swap ratio: %s", monAmount.String())
 
@@ -107,6 +122,19 @@ func calculateMonAmount(amount *big.Int, swapRatio *big.Int, currency blockchain
 			monAmount.String(), minAmount.String())
 		return minAmount
 	}
+
+	// Final sanity check - make sure amount is reasonable
+	// For reference, 1 MON = 10^18 wei
+	maxReasonableAmount := new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil) // 10^9 MON
+	if monAmount.Cmp(maxReasonableAmount) > 0 {
+		logger.Error("Calculated MON amount is suspiciously large: %s, capping at reasonable maximum",
+			monAmount.String())
+		return maxReasonableAmount
+	}
+
+	// Log the final amount to be distributed in a human-readable format
+	monString := formatMonAmount(monAmount)
+	logger.Info("Final MON amount to distribute: %s (%s wei)", monString, monAmount.String())
 
 	return monAmount
 }

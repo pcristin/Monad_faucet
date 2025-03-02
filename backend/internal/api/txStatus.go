@@ -161,6 +161,12 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 						// Update response with distribution transaction
 						monadTxHash = distTxHash
 						status = "completed"
+					} else if err != nil {
+						// Log the error but continue - this is non-fatal
+						logger.Warn("Error checking for distribution events, will continue with mint tx",
+							slog.String("error", err.Error()),
+							slog.String("deposit_id", tx.DepositID.String()),
+							slog.String("mint_tx_hash", monadTxHash))
 					}
 
 					// Transaction found on blockchain, update status
@@ -307,6 +313,12 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 						// Update response with distribution transaction
 						monadTxHash = distTxHash
 						status = "completed"
+					} else if err != nil {
+						// Log the error but continue - this is non-fatal
+						logger.Warn("Error checking for distribution events, will continue with mint tx",
+							slog.String("error", err.Error()),
+							slog.String("deposit_id", tx.DepositID.String()),
+							slog.String("mint_tx_hash", monadTxHash))
 					}
 
 					// Transaction found on blockchain, update status
@@ -405,6 +417,12 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 						// Update response with distribution transaction
 						monadTxHash = distTxHash
 						status = "completed"
+					} else if err != nil {
+						// Log the error but continue - this is non-fatal
+						logger.Warn("Error checking for distribution events, will continue with mint tx",
+							slog.String("error", err.Error()),
+							slog.String("deposit_id", tx.DepositID.String()),
+							slog.String("mint_tx_hash", monadTxHash))
 					}
 
 					// Transaction found on blockchain, update status
