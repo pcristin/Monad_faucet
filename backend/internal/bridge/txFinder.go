@@ -6,7 +6,10 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/pcristin/monad-faucet/internal/blockchain"
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
@@ -314,11 +317,8 @@ func (s *BridgeService) GetMonadTxHashFromArbitrumTxHash(ctx context.Context, tx
 }
 
 func (s *BridgeService) findDepositIDFromContractLogs(ctx context.Context, txHash common.Hash) (*big.Int, error) {
-	// In a real implementation, you would query the blockchain for the transaction
-	// and extract the deposit ID from the logs or transaction data
-	// This is a placeholder implementation
-
-	// Get transaction receipt
+	// Get transaction receipt directly from the blockchain
+	logger.Info("Getting transaction receipt for tx hash %s", txHash.Hex())
 	receipt, err := s.arbDepositor.Client.TransactionReceipt(ctx, txHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get transaction receipt: %w", err)
@@ -336,12 +336,123 @@ func (s *BridgeService) findDepositIDFromContractLogs(ctx context.Context, txHas
 				Currency  uint8
 			}
 
+			// Try to unpack the log as a DepositEvent
 			err = s.arbDepositor.BoundContract.UnpackLog(&depositEvent, "DepositEvent", *log)
-			if err == nil && depositEvent.DepositId != nil {
+			if err == nil && depositEvent.DepositId != nil && depositEvent.DepositId.Cmp(big.NewInt(0)) > 0 {
+				logger.Info("Found deposit ID %s in transaction logs for tx %s",
+					depositEvent.DepositId.String(), txHash.Hex())
+
+				// Get additional data from the event
+				walletAddress := depositEvent.Depositor
+				amount := depositEvent.Amount
+				currency := depositEvent.Currency
+
+				// Log the complete deposit information
+				logger.Info("Extracted full deposit data: ID=%s, Wallet=%s, Amount=%s, Currency=%d",
+					depositEvent.DepositId.String(), walletAddress.Hex(), amount.String(), currency)
+
+				// Create transaction record if it doesn't exist
+				tx, err := s.db.GetTransactionByDepositID(depositEvent.DepositId)
+				if err != nil || tx == nil {
+					// Record doesn't exist, create a new one
+					logger.Info("Creating new transaction record for deposit ID %s from blockchain data",
+						depositEvent.DepositId.String())
+
+					// Calculate MON amount if we can access contract state
+					var monAmount *big.Int
+					state, err := s.GetState(ctx)
+					if err == nil && state != nil && state.SwapRatios != nil {
+						swapRatio := state.SwapRatios[blockchain.CurrencyType(currency)]
+						if swapRatio != nil {
+							monAmount = calculateMonAmount(amount, swapRatio, blockchain.CurrencyType(currency))
+							logger.Info("Calculated MON amount: %s for deposit amount %s",
+								monAmount.String(), amount.String())
+						}
+					}
+
+					// If we couldn't calculate MON amount, use a placeholder
+					if monAmount == nil {
+						monAmount = big.NewInt(0)
+						logger.Warn("Could not calculate MON amount, using placeholder")
+					}
+
+					newTx := &database.Transaction{
+						DepositID:     depositEvent.DepositId,
+						WalletAddress: walletAddress,
+						Amount:        amount,
+						Currency:      database.CurrencyType(currency),
+						MonAmount:     monAmount,
+						Status:        database.StatusPending,
+						TxHash:        txHash.Hex(),
+					}
+
+					if err := s.db.CreateTransaction(newTx); err != nil {
+						logger.Error("Failed to create transaction record: %v", err)
+						// Continue despite error, we've found the deposit ID
+					} else {
+						logger.Info("Successfully created transaction record for deposit ID %s",
+							depositEvent.DepositId.String())
+					}
+				} else if tx.TxHash == "" || tx.TxHash != txHash.Hex() {
+					// Update existing transaction with tx hash if needed
+					logger.Info("Updating existing transaction record with Arbitrum tx hash %s", txHash.Hex())
+					if err := s.db.UpdateTransactionHash(depositEvent.DepositId, txHash.Hex()); err != nil {
+						logger.Error("Failed to update transaction hash: %v", err)
+					}
+				}
+
 				return depositEvent.DepositId, nil
 			}
 		}
 	}
 
-	return nil, fmt.Errorf("could not find DepositEvent in transaction logs")
+	// If we couldn't find a deposit event in the transaction logs, try using the filter method
+	logger.Info("No DepositEvent found in transaction logs, trying to scan past deposits for tx %s", txHash.Hex())
+
+	// Create a RetryClient to handle blockchain queries with retries
+	retryClient := blockchain.NewRetryClient(s.arbDepositor.Client)
+
+	// Use a filter query to look for deposit events
+	fromBlock := big.NewInt(0)
+
+	// Use a topic based filter for deposit events
+	// This approach avoids using the Events field which isn't accessible
+	depositEventSignature := []byte("DepositEvent(address,uint256,uint256,uint8)")
+	depositEventTopic := crypto.Keccak256Hash(depositEventSignature)
+
+	// Get logs that might contain deposit events
+	logs, err := retryClient.FilterLogsWithRetry(ctx, ethereum.FilterQuery{
+		FromBlock: fromBlock,
+		ToBlock:   big.NewInt(0).Add(fromBlock, big.NewInt(1000000)), // Limit range to avoid timeout
+		Addresses: []common.Address{s.arbDepositor.Address},
+		Topics:    [][]common.Hash{{depositEventTopic}},
+	})
+
+	if err != nil {
+		logger.Error("Failed to filter logs for deposit events: %v", err)
+		return nil, fmt.Errorf("failed to search deposit events: %w", err)
+	}
+
+	logger.Info("Found %d deposit event logs to search through", len(logs))
+
+	for _, eventLog := range logs {
+		// Look for logs from the same transaction
+		if eventLog.TxHash == txHash {
+			var depositEvent struct {
+				Depositor common.Address
+				Amount    *big.Int
+				DepositId *big.Int
+				Currency  uint8
+			}
+
+			err = s.arbDepositor.BoundContract.UnpackLog(&depositEvent, "DepositEvent", eventLog)
+			if err == nil && depositEvent.DepositId != nil && depositEvent.DepositId.Cmp(big.NewInt(0)) > 0 {
+				logger.Info("Found deposit ID %s in broad event search for tx %s",
+					depositEvent.DepositId.String(), txHash.Hex())
+				return depositEvent.DepositId, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("could not find deposit ID for tx hash %s in any deposit events", txHash.Hex())
 }

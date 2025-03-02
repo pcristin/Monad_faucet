@@ -46,6 +46,10 @@ func main() {
 
 	logger.Info("Database initialized successfully")
 
+	// Set the database instance for the blockchain package so it can load settings
+	blockchain.SetDatabase(db)
+	logger.Info("Blockchain settings loaded from database")
+
 	// Parse private key
 	privateKey, err := crypto.HexToECDSA(cfg.WalletPrivateKey)
 	if err != nil {
