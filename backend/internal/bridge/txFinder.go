@@ -28,7 +28,7 @@ func (s *BridgeService) GetDepositIDFromTxHash(ctx context.Context, txHash strin
 	return nil, fmt.Errorf("transaction not found in database")
 }
 
-func (s *BridgeService) GetTransactionByDepositID(ctx context.Context, depositID *big.Int) (*database.Transaction, error) {
+func (s *BridgeService) GetCachedTransactionByDepositID(ctx context.Context, depositID *big.Int) (*database.Transaction, error) {
 	cacheKey := depositID.String()
 	s.txCacheMutex.RLock()
 	if cached, exists := s.txCache[cacheKey]; exists && cached.Status != database.StatusPending {
@@ -52,7 +52,7 @@ func (s *BridgeService) GetTransactionByDepositID(ctx context.Context, depositID
 	return tx, nil
 }
 
-func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *big.Int, status, txHash string) error {
+func (s *BridgeService) UpdateTransactionStatusWithCache(ctx context.Context, depositID *big.Int, status, txHash string) error {
 	dbTx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin DB tx: %w", err)
@@ -81,7 +81,7 @@ func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *
 }
 
 func (s *BridgeService) FindMonadTransactionByDepositID(ctx context.Context, depositID *big.Int) (string, string, error) {
-	tx, err := s.db.GetTransactionByDepositID(depositID)
+	tx, err := s.GetCachedTransactionByDepositID(ctx, depositID)
 	if err != nil {
 		logger.Error("Error finding transaction: %v", err)
 		return "", "", err
@@ -95,7 +95,7 @@ func (s *BridgeService) FindMonadTransactionByDepositID(ctx context.Context, dep
 		monadTxHash, err := s.checkMonadBlockchainForTransaction(ctx, depositID)
 		if err == nil && monadTxHash != "" {
 			logger.Info("Found blockchain tx %s for deposit ID %s", monadTxHash, depositID.String())
-			if updateErr := s.UpdateTransactionStatus(ctx, depositID, database.StatusCompleted, monadTxHash); updateErr != nil {
+			if updateErr := s.UpdateTransactionStatusWithCache(ctx, depositID, database.StatusCompleted, monadTxHash); updateErr != nil {
 				logger.Error("Failed to update tx status: %v", updateErr)
 			}
 			return database.StatusCompleted, monadTxHash, nil

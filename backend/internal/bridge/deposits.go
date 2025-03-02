@@ -32,7 +32,7 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 	}
 
 	logger.Info("Processing deposit %s", event)
-	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
+	ctx, cancel := context.WithTimeout(s.ctx, 3*time.Minute)
 	defer cancel()
 
 	state, err := s.GetState(ctx)

@@ -20,13 +20,13 @@ type IPRateLimiter struct {
 	b   int
 }
 
-type Handler struct {
+type RateLimitHandler struct {
 	core.BaseHandler
 	RateLimiter *IPRateLimiter
 }
 
-// NewHandler creates a new API handler
-func NewHandler(bridgeService *bridge.BridgeService) *Handler {
+// NewRateLimitHandler creates a new API handler
+func NewRateLimitHandler(bridgeService *bridge.BridgeService) *RateLimitHandler {
 	// Create a rate limiter with 10 requests per minute and burst of 20
 	rateLimiter := NewIPRateLimiter(rate.Limit(10/60.0), 20)
 
@@ -36,7 +36,7 @@ func NewHandler(bridgeService *bridge.BridgeService) *Handler {
 	// Create a cache with 5-second default expiration and 10-second cleanup interval
 	responseCache := cache.New(5*time.Second, 10*time.Second)
 
-	return &Handler{
+	return &RateLimitHandler{
 		BaseHandler: core.BaseHandler{
 			BridgeService:  bridgeService,
 			StartTime:      time.Now(),
@@ -49,32 +49,32 @@ func NewHandler(bridgeService *bridge.BridgeService) *Handler {
 }
 
 // GetBridgeService returns the bridge service
-func (h *Handler) GetBridgeService() *bridge.BridgeService {
+func (h *RateLimitHandler) GetBridgeService() *bridge.BridgeService {
 	return h.BridgeService
 }
 
 // GetAdminAPIKey returns the admin API key
-func (h *Handler) GetAdminAPIKey() string {
+func (h *RateLimitHandler) GetAdminAPIKey() string {
 	return h.AdminAPIKey
 }
 
 // GetStartTime returns the start time
-func (h *Handler) GetStartTime() time.Time {
+func (h *RateLimitHandler) GetStartTime() time.Time {
 	return h.StartTime
 }
 
 // GetRequestCounter returns the request counter
-func (h *Handler) GetRequestCounter() *atomic.Int64 {
+func (h *RateLimitHandler) GetRequestCounter() *atomic.Int64 {
 	return &h.RequestCounter
 }
 
 // GetBaseGoroutines returns the base goroutines count
-func (h *Handler) GetBaseGoroutines() int {
+func (h *RateLimitHandler) GetBaseGoroutines() int {
 	return h.BaseGoroutines
 }
 
 // GetResponseCache returns the response cache
-func (h *Handler) GetResponseCache() *cache.Cache {
+func (h *RateLimitHandler) GetResponseCache() *cache.Cache {
 	return h.ResponseCache
 }
 

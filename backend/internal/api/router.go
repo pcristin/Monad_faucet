@@ -8,7 +8,7 @@ import (
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	// Add request counter middleware
 	r.Use(func(c *gin.Context) {
-		h.RequestCounter.Add(1)
+		h.GetRequestCounter().Add(1)
 		c.Next()
 	})
 

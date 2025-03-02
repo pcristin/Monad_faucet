@@ -31,6 +31,7 @@ type BridgeService struct {
 	lockRefreshInterval time.Duration
 	lockRefreshers      map[string]context.CancelFunc
 	lockRefreshersMutex sync.Mutex
+	workerManager       interface{} // Will be set to *workers.Manager
 }
 
 // NewBridgeService creates a new instance of BridgeService.

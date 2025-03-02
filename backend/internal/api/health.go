@@ -33,6 +33,6 @@ func (h *Handler) HealthCheck(c *gin.Context) {
 		"status":  "ok",
 		"message": "Service is healthy",
 		"version": "1.0.0", // Replace with actual version from build
-		"uptime":  time.Since(h.StartTime).String(),
+		"uptime":  time.Since(h.GetStartTime()).String(),
 	})
 }

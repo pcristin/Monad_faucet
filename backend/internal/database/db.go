@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -20,58 +21,48 @@ type DB struct {
 	*sql.DB
 }
 
-// New creates a new database connection
-func New(dataDir string) (*DB, error) {
-	// Get database connection string from environment variable
-	// If not provided, use the dataDir parameter for backward compatibility
-	dbURL := getDBConnectionString()
-
-	db, err := sql.Open("postgres", dbURL)
+// NewDB creates a new database connection.
+func NewDB(ctx context.Context, dsn string) (*DB, error) {
+	db, err := sql.Open("postgres", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, fmt.Errorf("error opening database: %w", err)
 	}
 
-	// Test the connection
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to connect to database: %w", err)
-	}
-
-	// Set connection pool settings
+	// Set connection pool parameters
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(time.Hour)
+	db.SetConnMaxLifetime(5 * time.Minute)
 
-	// Create a new DB instance
-	database := &DB{db}
-
-	// Initialize the database schema
-	if err := database.initSchema(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to initialize database schema: %w", err)
+	// Check connection
+	if err := db.PingContext(ctx); err != nil {
+		return nil, fmt.Errorf("error connecting to database: %w", err)
 	}
 
-	return database, nil
-}
+	logger.Info("Connected to database")
+	wrappedDB := &DB{DB: db}
 
-// getDBConnectionString gets the PostgreSQL connection string from env vars
-func getDBConnectionString() string {
-	// Check for the DATABASE_URL environment variable (provided by Render)
-	if dbURL := getEnv("DATABASE_URL", ""); dbURL != "" {
-		return dbURL
+	// Create processing_locks table if it doesn't exist to avoid issues with locks
+	_, err = db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS processing_locks (
+			deposit_id VARCHAR(100) PRIMARY KEY,
+			instance_id VARCHAR(50) NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			expires_at TIMESTAMP NOT NULL,
+			CONSTRAINT deposit_id_unique UNIQUE (deposit_id)
+		);
+		
+		CREATE INDEX IF NOT EXISTS idx_processing_locks_expires_at ON processing_locks(expires_at);
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("error creating processing_locks table: %w", err)
 	}
 
-	// Fallback to constructing a connection string from individual parameters
-	host := getEnv("DB_HOST", "localhost")
-	port := getEnv("DB_PORT", "5432")
-	user := getEnv("DB_USER", "postgres")
-	password := getEnv("DB_PASSWORD", "postgres")
-	dbname := getEnv("DB_NAME", "monad_faucet")
-	sslmode := getEnv("DB_SSLMODE", "disable")
+	// Run schema migration if needed
+	if err := wrappedDB.SchemaMigration(); err != nil {
+		return nil, fmt.Errorf("error migrating schema: %w", err)
+	}
 
-	// Format: "host=localhost port=5432 user=postgres password=postgres dbname=monad_faucet sslmode=disable"
-	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-		host, port, user, password, dbname, sslmode)
+	return wrappedDB, nil
 }
 
 // getEnv gets an environment variable or returns the default value

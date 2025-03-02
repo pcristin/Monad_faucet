@@ -4,24 +4,30 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
 	"github.com/pcristin/monad-faucet/internal/database"
+	"github.com/pcristin/monad-faucet/internal/workers"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
 // Start initializes the service and starts processing deposits.
 func (s *BridgeService) Start() error {
 	logger.Info("Starting bridge service...")
-	s.wg.Add(1)
-	go s.processDeposits()
-	s.wg.Add(1)
-	go s.processRefunds()
+
+	// Start the worker manager if it exists
+	if wm := s.GetWorkerManager(); wm != nil {
+		wm.StartAll()
+	} else {
+		logger.Warn("No worker manager set, skipping worker initialization")
+	}
+
+	// Start recovery process for stuck transactions
 	s.wg.Add(1)
 	go s.recoverStuckTransactionsPeriodically()
+
 	return nil
 }
 
@@ -29,6 +35,12 @@ func (s *BridgeService) Start() error {
 func (s *BridgeService) Stop() error {
 	logger.Info("Stopping bridge service...")
 	s.cancel()
+
+	// Stop the worker manager if it exists
+	if wm := s.GetWorkerManager(); wm != nil {
+		wm.StopAll()
+	}
+
 	s.wg.Wait()
 	logger.Info("Bridge service stopped")
 	return nil
@@ -36,42 +48,20 @@ func (s *BridgeService) Stop() error {
 
 // HandleDeposit queues a deposit for processing.
 func (s *BridgeService) HandleDeposit(event blockchain.DepositEvent) {
-	select {
-	case s.depositChan <- event:
-		logger.Info("Queued deposit: %s", event.String())
-	default:
-		logger.Warn("Deposit channel full, dropping event: %s", event.String())
-	}
-}
-
-// QueueRefund queues a deposit ID for refund after checking safety.
-func (s *BridgeService) QueueRefund(depositId *big.Int) {
-	depositIDStr := depositId.String()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Check database.
-	tx, err := s.GetTransactionByDepositID(ctx, depositId)
-	if err == nil && tx != nil && tx.Status == database.StatusCompleted && tx.MonadTxHash != "" {
-		logger.Warn("⚠️ REFUND PREVENTED: Deposit ID %s already completed with tx %s", depositIDStr, tx.MonadTxHash)
-		return
+	// Create a deposit task and submit it to the worker pool
+	depositTask := &workers.DepositTask{
+		BaseTask:    workers.NewBaseTask("deposit"),
+		DepositID:   event.DepositId.String(),
+		UserAddress: event.Depositor.Hex(),
+		Amount:      event.Amount.String(),
+		TxHash:      event.TxHash,
 	}
 
-	// Check blockchain.
-	txHash, err := s.checkMonadBlockchainForTransaction(ctx, depositId)
-	if err == nil && txHash != "" {
-		logger.Warn("⚠️ REFUND PREVENTED: Found tx %s on blockchain for deposit ID %s", txHash, depositIDStr)
-		if updateErr := s.UpdateTransactionStatus(ctx, depositId, database.StatusCompleted, txHash); updateErr != nil {
-			logger.Error("Failed to update tx status during refund prevention: %v", updateErr)
-		}
-		return
-	}
-
-	select {
-	case s.refundChan <- depositId:
-		logger.Info("Queued refund for deposit ID: %s", depositIDStr)
-	default:
-		logger.Warn("Refund channel full, dropping deposit ID: %s", depositIDStr)
+	if wm := s.GetWorkerManager(); wm != nil {
+		wm.SubmitTask(workers.DepositPool, depositTask)
+	} else {
+		// Fallback to the old direct channel approach if no worker manager
+		s.depositChan <- event
 	}
 }
 
@@ -101,18 +91,43 @@ func (s *BridgeService) GracefulShutdown(ctx context.Context) {
 		s.wg.Wait()
 		close(done)
 	}()
+
 	select {
 	case <-done:
-		logger.Info("All in-progress transactions completed")
+		logger.Info("Bridge service stopped gracefully")
 	case <-ctx.Done():
-		logger.Warn("Shutdown timed out, some transactions may not have completed")
+		logger.Warn("Bridge service forced to stop")
 	}
 }
 
+// GetArbitrumClient returns the Arbitrum blockchain client.
 func (s *BridgeService) GetArbitrumClient() *ethclient.Client {
 	return s.arbDepositor.Client
 }
 
+// GetArbitrumContractAddress returns the Arbitrum contract address.
 func (s *BridgeService) GetArbitrumContractAddress() common.Address {
 	return s.arbDepositor.Address
+}
+
+// GetMonadClient returns the Monad blockchain client.
+func (s *BridgeService) GetMonadClient() *ethclient.Client {
+	return s.monadDistributor.Client
+}
+
+// GetMonadContractAddress returns the Monad contract address.
+func (s *BridgeService) GetMonadContractAddress() common.Address {
+	return s.monadDistributor.Address
+}
+
+// GetTransactionByDepositID retrieves a transaction by its deposit ID.
+func (s *BridgeService) GetTransactionByDepositID(ctx context.Context, depositID *big.Int) (*database.Transaction, error) {
+	// This is for backward compatibility with the old schema
+	return s.db.GetTransactionByDepositID(depositID)
+}
+
+// UpdateTransactionStatus updates the status of a transaction.
+func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *big.Int, status, txHash string) error {
+	// This is for backward compatibility with the old schema
+	return s.db.UpdateTransactionStatus(depositID, status, txHash)
 }

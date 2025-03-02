@@ -15,7 +15,7 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 	// Try to get cached response first
 	cacheKey := "faucetInfo" // Using a simple cache key as this data is the same for all users
 
-	if cachedResponse, found := h.ResponseCache.Get(cacheKey); found {
+	if cachedResponse, found := h.GetResponseCache().Get(cacheKey); found {
 		logger.Debug("Using cached faucet info response")
 		c.JSON(http.StatusOK, cachedResponse)
 		return
@@ -128,7 +128,7 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 	}
 
 	// Store in cache for future requests
-	h.ResponseCache.Set(cacheKey, response, cache.DefaultExpiration)
+	h.GetResponseCache().Set(cacheKey, response, cache.DefaultExpiration)
 
 	c.JSON(http.StatusOK, response)
 }

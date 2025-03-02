@@ -8,54 +8,109 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// Config holds all application configuration
 type Config struct {
-	Port                 string
-	ArbRpcURL            string
-	MonadRpcURL          string
-	ArbDepositorAddr     string
-	MonadDistributorAddr string
-	WalletPrivateKey     string
-	AdminAPIKeys         []string
-	DataDir              string // Directory to store SQLite database
+	ServerAddr           string           // HTTP server address with port
+	DatabaseURL          string           // PostgreSQL connection string
+	ArbRpcURL            string           // Arbitrum RPC URL
+	MonadRpcURL          string           // Monad RPC URL
+	ArbDepositorAddr     string           // Arbitrum depositor contract address
+	MonadDistributorAddr string           // Monad distributor contract address
+	WalletPrivateKey     string           // Private key for transaction signing
+	AdminAPIKeys         []string         // API keys for admin endpoints
+	AdminPasswords       []string         // Passwords for admin auth
+	LogLevel             string           // Logging level
+	WorkerPoolConfig     WorkerPoolConfig // Configuration for worker pools
 }
 
+// WorkerPoolConfig holds configuration for all worker pools
+type WorkerPoolConfig struct {
+	DepositWorkers      int // Number of deposit processing workers
+	CalculationWorkers  int // Number of calculation workers
+	DistributionWorkers int // Number of distribution workers
+	DBWorkers           int // Number of database workers
+}
+
+// Load reads configuration from environment variables
 func Load() (*Config, error) {
 	if err := godotenv.Load(); err != nil {
 		fmt.Printf("Warning: .env file not found\n")
 	}
 
-	// Determine the appropriate data directory
-	dataDir := getEnvOrDefault("DATA_DIR", "")
-	if dataDir == "" {
-		// Default locations based on environment
-		if os.Getenv("RENDER") != "" {
-			// If running on Render, use /var/data if available (requires paid plan with disk)
-			if _, err := os.Stat("/var/data"); err == nil {
-				dataDir = "/var/data"
-			} else {
-				// For free tier, use /tmp which is ephemeral
-				dataDir = "/tmp"
-				fmt.Printf("Warning: Using ephemeral /tmp directory for database on Render free tier\n")
-				fmt.Printf("Note: Database will be reset on service restart\n")
-			}
-		} else {
-			// Local development - use a data directory in the current working directory
-			dataDir = "./data"
+	// Get database URL - check multiple environment variables for flexibility
+	dbURL := getEnvOrDefault("DATABASE_URL", "")
+	if dbURL == "" {
+		// Try alternative environment variables
+		dbURL = getEnvOrDefault("POSTGRES_URL", "")
+	}
+	if dbURL == "" {
+		// Build from individual components if available
+		host := getEnvOrDefault("DB_HOST", "localhost")
+		port := getEnvOrDefault("DB_PORT", "5432")
+		user := getEnvOrDefault("DB_USER", "postgres")
+		password := getEnvOrDefault("DB_PASSWORD", "postgres")
+		dbname := getEnvOrDefault("DB_NAME", "bridgedb")
+		sslmode := getEnvOrDefault("DB_SSLMODE", "disable")
+
+		dbURL = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+			user, password, host, port, dbname, sslmode)
+	}
+
+	// Get worker pool configuration
+	depositWorkers := getEnvAsIntOrDefault("DEPOSIT_WORKERS", 5)
+	calculationWorkers := getEnvAsIntOrDefault("CALCULATION_WORKERS", 3)
+	distributionWorkers := getEnvAsIntOrDefault("DISTRIBUTION_WORKERS", 5)
+	dbWorkers := getEnvAsIntOrDefault("DB_WORKERS", 2)
+
+	// Get server address with port
+	port := getEnvOrDefault("PORT", "8080")
+	serverAddr := getEnvOrDefault("SERVER_ADDR", ":"+port)
+
+	// Admin API keys and passwords
+	adminAPIKeys := []string{
+		getEnvOrDefault("ADMIN_API_KEY_1", ""),
+		getEnvOrDefault("ADMIN_API_KEY_2", ""), // Optional second key
+	}
+
+	// Filter out empty API keys
+	var filteredAPIKeys []string
+	for _, key := range adminAPIKeys {
+		if key != "" {
+			filteredAPIKeys = append(filteredAPIKeys, key)
+		}
+	}
+
+	// Admin passwords
+	adminPasswords := []string{
+		getEnvOrDefault("ADMIN_PASSWORD_1", ""),
+		getEnvOrDefault("ADMIN_PASSWORD_2", ""), // Optional second password
+	}
+
+	// Filter out empty passwords
+	var filteredPasswords []string
+	for _, pw := range adminPasswords {
+		if pw != "" {
+			filteredPasswords = append(filteredPasswords, pw)
 		}
 	}
 
 	cfg := &Config{
-		Port:                 getEnvOrDefault("PORT", "8080"),
+		ServerAddr:           serverAddr,
+		DatabaseURL:          dbURL,
 		ArbRpcURL:            getEnvOrFatal("ARB_RPC_URL"),
 		MonadRpcURL:          getEnvOrFatal("MONAD_RPC_URL"),
 		ArbDepositorAddr:     getEnvOrDefault("ARB_DEPOSITOR_ADDRESS", "0xYourDepositorAddressHere"),
 		MonadDistributorAddr: getEnvOrDefault("MONAD_DISTRIBUTOR_ADDRESS", "0xYourDistributorAddressHere"),
 		WalletPrivateKey:     strings.TrimPrefix(getEnvOrFatal("WALLET_PRIVATE_KEY"), "0x"),
-		AdminAPIKeys: []string{
-			getEnvOrFatal("ADMIN_API_KEY_1"),
-			getEnvOrDefault("ADMIN_API_KEY_2", ""), // Optional second key
+		AdminAPIKeys:         filteredAPIKeys,
+		AdminPasswords:       filteredPasswords,
+		LogLevel:             getEnvOrDefault("LOG_LEVEL", "info"),
+		WorkerPoolConfig: WorkerPoolConfig{
+			DepositWorkers:      depositWorkers,
+			CalculationWorkers:  calculationWorkers,
+			DistributionWorkers: distributionWorkers,
+			DBWorkers:           dbWorkers,
 		},
-		DataDir: dataDir,
 	}
 
 	return cfg, nil
@@ -77,6 +132,15 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
+func getEnvAsIntOrDefault(key string, defaultValue int) int {
+	strValue := getEnvOrDefault(key, fmt.Sprintf("%d", defaultValue))
+	var value int
+	if _, err := fmt.Sscanf(strValue, "%d", &value); err != nil {
+		return defaultValue
+	}
+	return value
+}
+
 // Validate checks if all required configuration values are present
 func (c *Config) Validate() error {
 	var missingVars []string
@@ -91,14 +155,11 @@ func (c *Config) Validate() error {
 	if c.MonadRpcURL == "" {
 		missingVars = append(missingVars, "MONAD_RPC_URL")
 	}
-	if c.ArbDepositorAddr == "" {
-		missingVars = append(missingVars, "ARB_DEPOSITOR_ADDR")
+	if c.ArbDepositorAddr == "0xYourDepositorAddressHere" || c.ArbDepositorAddr == "" {
+		missingVars = append(missingVars, "ARB_DEPOSITOR_ADDRESS")
 	}
-	if c.MonadDistributorAddr == "" {
-		missingVars = append(missingVars, "MONAD_DISTRIBUTOR_ADDR")
-	}
-	if c.DataDir == "" {
-		missingVars = append(missingVars, "DATA_DIR")
+	if c.MonadDistributorAddr == "0xYourDistributorAddressHere" || c.MonadDistributorAddr == "" {
+		missingVars = append(missingVars, "MONAD_DISTRIBUTOR_ADDRESS")
 	}
 
 	if len(missingVars) > 0 {

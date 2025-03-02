@@ -25,6 +25,7 @@ const (
 	StatusCompleted = "completed"
 	StatusFailed    = "failed"
 	StatusRefunded  = "refunded"
+	StatusProcessed = "processed"
 )
 
 // Transaction represents a transaction in the history

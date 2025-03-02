@@ -14,10 +14,10 @@ import (
 
 	"github.com/pcristin/monad-faucet/config"
 	"github.com/pcristin/monad-faucet/internal/api"
-	"github.com/pcristin/monad-faucet/internal/api/admins"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
 	"github.com/pcristin/monad-faucet/internal/bridge"
 	"github.com/pcristin/monad-faucet/internal/database"
+	"github.com/pcristin/monad-faucet/internal/workers"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
@@ -33,25 +33,18 @@ func main() {
 		logger.Fatal("Configuration validation failed: %v", err)
 	}
 
+	// Create application context with cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Initialize database
-	db, err := database.New(cfg.DataDir)
+	db, err := database.NewDB(ctx, cfg.DatabaseURL)
 	if err != nil {
 		logger.Fatal("Failed to connect to database: %v", err)
 	}
 	defer db.Close()
 
-	logger.Info("Database initialized in directory: %s", cfg.DataDir)
-
-	// Debug the database type
-	logger.Info("Database type: %T", db)
-
-	// Create indexes for performance optimization
-	if err := db.CreateIndexes(); err != nil {
-		logger.Fatal("Failed to create database indexes: %v", err)
-	}
-
-	// Connect blockchain module to database for settings like MON/USD ratio
-	blockchain.SetDatabase(db)
+	logger.Info("Database initialized successfully")
 
 	// Parse private key
 	privateKey, err := crypto.HexToECDSA(cfg.WalletPrivateKey)
@@ -59,26 +52,25 @@ func main() {
 		logger.Fatal("Failed to parse private key: %v", err)
 	}
 
-	// Create event listener for Arbitrum
-	listener, err := blockchain.NewEventListener(cfg.ArbRpcURL)
+	// Create blockchain clients
+	arbClient, err := blockchain.NewClient(cfg.ArbRpcURL)
 	if err != nil {
-		logger.Fatal("Failed to create event listener: %v", err)
-	}
-	defer listener.Close()
-
-	// Create contract instances
-	arbDepositor, err := blockchain.NewArbitrumDepositor(
-		listener.GetClient(),
-		common.HexToAddress(cfg.ArbDepositorAddr),
-		privateKey,
-	)
-	if err != nil {
-		logger.Fatal("Failed to create Arbitrum depositor: %v", err)
+		logger.Fatal("Failed to connect to Arbitrum network: %v", err)
 	}
 
 	monadClient, err := blockchain.NewClient(cfg.MonadRpcURL)
 	if err != nil {
 		logger.Fatal("Failed to connect to Monad network: %v", err)
+	}
+
+	// Create contract instances
+	arbDepositor, err := blockchain.NewArbitrumDepositor(
+		arbClient,
+		common.HexToAddress(cfg.ArbDepositorAddr),
+		privateKey,
+	)
+	if err != nil {
+		logger.Fatal("Failed to create Arbitrum depositor: %v", err)
 	}
 
 	monadDistributor, err := blockchain.NewMonadDistributor(
@@ -90,130 +82,104 @@ func main() {
 		logger.Fatal("Failed to create Monad distributor: %v", err)
 	}
 
+	// Initialize worker pool manager with default configuration
+	workerPoolConfig := &workers.PoolConfig{
+		DepositWorkers:      5, // Default to 5 workers per pool
+		CalculationWorkers:  5,
+		DistributionWorkers: 5,
+		DatabaseWorkers:     5,
+		QueueSize:           100, // Default queue size
+	}
+
+	workerManager := workers.NewManager(workerPoolConfig)
+	workerManager.Initialize()
+	workerManager.StartAll()
+	defer workerManager.StopAll()
+
+	logger.Info("Worker pools started successfully")
+
 	// Create bridge service
-	bridgeService := bridge.NewBridgeService(arbDepositor, monadDistributor, db)
+	bridgeService := bridge.NewBridgeService(
+		arbDepositor,
+		monadDistributor,
+		db,
+	)
+
+	// Add worker manager to bridge service
+	bridgeService.SetWorkerManager(workerManager)
+
 	if err := bridgeService.Start(); err != nil {
 		logger.Fatal("Failed to start bridge service: %v", err)
 	}
 	defer bridgeService.Stop()
 
-	// Create a channel to receive shutdown signals
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	// Create event listener for Arbitrum deposits
+	listener, err := blockchain.NewEventListener(cfg.ArbRpcURL)
+	if err != nil {
+		logger.Fatal("Failed to create event listener: %v", err)
+	}
+	defer listener.Close()
 
-	// Create a context that we'll cancel on shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Start listening for events in a goroutine
-	events, errors := listener.ListenToDeposits(ctx)
+	// Start listening for deposit events
 	go func() {
+		// Get deposit events channel
+		depositChan, errChan := listener.ListenToDeposits(ctx)
+
+		// Process deposit events
 		for {
 			select {
-			case event := <-events:
-				logger.Info("🎉 %s", event.String())
-				bridgeService.HandleDeposit(event)
-			case err := <-errors:
-				if ctx.Err() == nil { // Only log errors if context is not cancelled
-					logger.Error("❌ Error from event listener: %v", err)
-				}
+			case deposit := <-depositChan:
+				bridgeService.HandleDeposit(deposit)
+			case err := <-errChan:
+				logger.Error("Error listening for deposits: %v", err)
 			case <-ctx.Done():
-				logger.Info("Event processing goroutine shutting down...")
 				return
 			}
 		}
 	}()
 
-	// Setup HTTP server
-	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	r.Use(gin.Recovery())
+	// Create API server
+	router := gin.Default()
 
-	// Request logging middleware
-	r.Use(func(c *gin.Context) {
-		// Start timer
-		start := time.Now()
-		path := c.Request.URL.Path
+	// Create API handler
+	mainHandler := api.NewHandler(db, bridgeService)
 
-		// Process request
-		c.Next()
-
-		// Skip logging for health checks in production to reduce log volume
-		if os.Getenv("RENDER") == "true" && (path == "bridge/health" || path == "bridge/") {
-			return
-		}
-
-		// Log request details after completion
-		latency := time.Since(start)
-		clientIP := c.ClientIP()
-		method := c.Request.Method
-		statusCode := c.Writer.Status()
-		userAgent := c.Request.UserAgent()
-
-		// Log in structured format
-		logger.Info("REQUEST: %s | %d | %s | %s | %s | %v",
-			method, statusCode, clientIP, path, userAgent, latency)
-	})
-
-	// CORS middleware
-	r.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
-			return
-		}
-
-		c.Next()
-	})
-
-	// Register API routes
-	handler := api.NewHandler(bridgeService)
-	handler.RegisterRoutes(r)
-
-	// Register admin routes separately to avoid import cycles
-	admins.RegisterRoutes(r, handler)
+	// Configure API routes with worker pool support
+	api.SetupWorkerPoolRoutes(router, mainHandler, db)
 
 	// Create HTTP server
-	srv := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: r,
+	server := &http.Server{
+		Addr:    cfg.ServerAddr,
+		Handler: router,
 	}
 
 	// Start HTTP server in a goroutine
 	go func() {
-		logger.Info("Starting HTTP server on port %s...", cfg.Port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("HTTP server error: %v", err)
+		logger.Info("Starting HTTP server on %s", cfg.ServerAddr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Fatal("HTTP server error: %v", err)
 		}
 	}()
 
-	logger.Info("✨ Server and event listener started. HTTP server on port %s", cfg.Port)
-	logger.Info("Press Ctrl+C to shutdown...")
+	// Create a channel to receive shutdown signals
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	// Wait for shutdown signal
-	<-sigChan
-	logger.Info("Shutdown signal received...")
+	// Wait for a shutdown signal
+	<-quit
+	logger.Info("Shutting down server...")
 
-	// Create a timeout context for graceful shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Create a deadline context for graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
-	// First cancel the event listener context
-	cancel()
-	logger.Info("Event listener shutdown initiated...")
-
-	// Then shutdown the HTTP server
-	logger.Info("HTTP server shutdown initiated, waiting for in-flight requests to complete...")
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("HTTP server forced to shutdown: %v", err)
+	// Stop HTTP server
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Fatal("Server forced to shutdown: %v", err)
 	}
 
-	// Wait for bridge service to complete any in-progress transactions
-	logger.Info("Waiting for bridge service to complete in-progress transactions...")
+	// Stop bridge service (already deferred)
 	bridgeService.GracefulShutdown(shutdownCtx)
 
-	logger.Info("Server shutdown complete.")
+	logger.Info("Server exited properly")
 }
