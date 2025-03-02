@@ -11,6 +11,21 @@ import (
 // Status value specific to the new database schema
 const processedStatus = "processed"
 
+// MigrationRecord represents a record from the old transaction_history table
+type MigrationRecord struct {
+	ID            int64
+	DepositID     string
+	WalletAddress string
+	Amount        string
+	Currency      int64
+	MonAmount     string
+	Status        string
+	TxHash        sql.NullString
+	MonadTxHash   sql.NullString
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
 // SchemaMigration performs the migration from the old schema to the new schema.
 func (db *DB) SchemaMigration() error {
 	logger.Info("Starting database schema migration...")
@@ -68,20 +83,6 @@ func (db *DB) SchemaMigration() error {
 	defer rows.Close()
 
 	// Collect all records to process
-	type MigrationRecord struct {
-		ID            int64
-		DepositID     string
-		WalletAddress string
-		Amount        string
-		Currency      int64
-		MonAmount     string
-		Status        string
-		TxHash        sql.NullString
-		MonadTxHash   sql.NullString
-		CreatedAt     time.Time
-		UpdatedAt     time.Time
-	}
-
 	logger.Info("Reading transaction records...")
 	var records []MigrationRecord
 	for rows.Next() {
