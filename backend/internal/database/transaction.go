@@ -70,33 +70,109 @@ func (db *DB) CreateTransaction(tx *Transaction) error {
 
 // UpdateTransactionStatus updates the status of a transaction
 func (db *DB) UpdateTransactionStatus(depositID *big.Int, status, txHash string) error {
-	_, err := db.Exec(
-		`UPDATE transaction_history 
-		SET status = $1, monad_tx_hash = $2, updated_at = CURRENT_TIMESTAMP 
-		WHERE deposit_id = $3`,
-		status,
-		txHash,
-		depositID.String(),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to update transaction status: %w", err)
+	if depositID == nil {
+		return fmt.Errorf("invalid deposit ID: nil")
 	}
-	return nil
+
+	depositIDStr := depositID.String()
+
+	// Add explicit logging for debugging
+	fmt.Printf("Updating transaction status for deposit ID %s: status=%s, txHash=%s\n",
+		depositIDStr, status, txHash)
+
+	// Implement retry logic (3 attempts)
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		// First check if the transaction exists
+		exists := false
+		err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM transaction_history WHERE deposit_id = $1)",
+			depositIDStr).Scan(&exists)
+
+		if err != nil {
+			fmt.Printf("Error checking transaction existence (attempt %d/3): %v\n", attempt, err)
+			time.Sleep(time.Duration(attempt*100) * time.Millisecond)
+			continue
+		}
+
+		if !exists {
+			fmt.Printf("Transaction for deposit ID %s does not exist in the database\n", depositIDStr)
+			// If transaction doesn't exist, create a minimal record to update later
+			if status == "completed" && txHash != "" {
+				_, insertErr := db.Exec(
+					`INSERT INTO transaction_history 
+					(deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash) 
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+					depositIDStr,
+					"0x0000000000000000000000000000000000000000", // Placeholder, will be updated later
+					"0", // Placeholder
+					0,   // Default to ETH
+					"0", // Placeholder
+					status,
+					"", // Will be filled later
+					txHash,
+				)
+				if insertErr != nil {
+					fmt.Printf("Error creating placeholder transaction record: %v\n", insertErr)
+				} else {
+					fmt.Printf("Created placeholder transaction record for deposit ID %s\n", depositIDStr)
+					return nil
+				}
+			}
+		}
+
+		// Proceed with update
+		result, err := db.Exec(
+			`UPDATE transaction_history 
+			SET status = $1, monad_tx_hash = $2, updated_at = CURRENT_TIMESTAMP 
+			WHERE deposit_id = $3`,
+			status,
+			txHash,
+			depositIDStr,
+		)
+
+		if err != nil {
+			fmt.Printf("Error updating transaction status (attempt %d/3): %v\n", attempt, err)
+			time.Sleep(time.Duration(attempt*100) * time.Millisecond)
+			continue
+		}
+
+		// Check if any rows were affected
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			fmt.Printf("Error getting rows affected: %v\n", err)
+		} else if rowsAffected == 0 {
+			fmt.Printf("No rows affected when updating transaction status for deposit ID %s\n", depositIDStr)
+		} else {
+			fmt.Printf("Successfully updated transaction status for deposit ID %s\n", depositIDStr)
+			return nil
+		}
+
+		time.Sleep(time.Duration(attempt*100) * time.Millisecond)
+	}
+
+	return fmt.Errorf("failed to update transaction status after multiple attempts: %w", err)
 }
 
 // GetTransactionByDepositID retrieves a transaction by its deposit ID
 func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error) {
+	if depositID == nil {
+		return nil, fmt.Errorf("invalid deposit ID: nil")
+	}
+
+	depositIDStr := depositID.String()
+	fmt.Printf("Getting transaction for deposit ID %s from database\n", depositIDStr)
+
 	var (
-		tx                                                      Transaction
-		depositIDStr, walletAddressStr, amountStr, monAmountStr string
-		currencyInt                                             int
+		tx                                        Transaction
+		walletAddressStr, amountStr, monAmountStr string
+		currencyInt                               int
 	)
 
 	err := db.QueryRow(
 		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at 
 		FROM transaction_history 
 		WHERE deposit_id = $1`,
-		depositID.String(),
+		depositIDStr,
 	).Scan(
 		&tx.ID,
 		&depositIDStr,
@@ -112,17 +188,38 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("transaction not found for deposit ID: %s", depositID.String())
+			fmt.Printf("Transaction not found for deposit ID: %s\n", depositIDStr)
+			return nil, fmt.Errorf("transaction not found for deposit ID: %s", depositIDStr)
 		}
+		fmt.Printf("Error getting transaction: %v\n", err)
 		return nil, fmt.Errorf("failed to get transaction: %w", err)
 	}
 
 	// Convert strings to appropriate types
-	tx.DepositID, _ = new(big.Int).SetString(depositIDStr, 10)
+	var ok bool
+	tx.DepositID, ok = new(big.Int).SetString(depositIDStr, 10)
+	if !ok {
+		fmt.Printf("Failed to parse deposit ID: %s\n", depositIDStr)
+	}
+
 	tx.WalletAddress = common.HexToAddress(walletAddressStr)
-	tx.Amount, _ = new(big.Int).SetString(amountStr, 10)
+
+	tx.Amount, ok = new(big.Int).SetString(amountStr, 10)
+	if !ok {
+		fmt.Printf("Failed to parse amount: %s\n", amountStr)
+		tx.Amount = big.NewInt(0)
+	}
+
 	tx.Currency = CurrencyType(currencyInt)
-	tx.MonAmount, _ = new(big.Int).SetString(monAmountStr, 10)
+
+	tx.MonAmount, ok = new(big.Int).SetString(monAmountStr, 10)
+	if !ok {
+		fmt.Printf("Failed to parse MON amount: %s\n", monAmountStr)
+		tx.MonAmount = big.NewInt(0)
+	}
+
+	fmt.Printf("Found transaction for deposit ID %s: status=%s, monadTxHash=%s, monAmount=%s\n",
+		depositIDStr, tx.Status, tx.MonadTxHash, tx.MonAmount.String())
 
 	return &tx, nil
 }

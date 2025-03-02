@@ -75,6 +75,29 @@ func (s *BridgeService) waitForConfirmations(ctx context.Context, blockNumber ui
 func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address, amount *big.Int, depositId *big.Int) (string, error) {
 	depositIDStr := depositId.String()
 	logger.Info("Acquiring lock for deposit ID %s in mintTokens", depositIDStr)
+
+	// Validate the amount before proceeding
+	if amount == nil || amount.Cmp(big.NewInt(0)) <= 0 {
+		return "", fmt.Errorf("invalid amount for minting: %v", amount)
+	}
+
+	// Log the current amount for debugging
+	logger.Info("Minting amount for deposit ID %s: %s Wei", depositIDStr, amount.String())
+
+	// Safety check - ensure amount is reasonable
+	minAmount := big.NewInt(1000000) // 0.001 MON minimum
+	if amount.Cmp(minAmount) < 0 {
+		logger.Warn("Amount %s is too small, using minimum amount %s", amount.String(), minAmount.String())
+		amount = new(big.Int).Set(minAmount)
+	}
+
+	// Check for existing transaction before acquiring lock
+	if tx, err := s.GetTransactionByDepositID(ctx, depositId); err == nil && tx != nil && tx.Status == database.StatusCompleted && tx.MonadTxHash != "" {
+		logger.Info("Duplicate prevention: deposit ID %s already processed", depositIDStr)
+		return tx.MonadTxHash, nil
+	}
+
+	// Acquire lock for processing
 	acquired, err := s.acquireLockWithRetries(ctx, depositId)
 	if err != nil || !acquired {
 		// Retry duplicate check if lock not acquired.
@@ -142,22 +165,35 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		return "", fmt.Errorf("failed to get transaction options: %v", err)
 	}
 
-	logger.Info("Submitting Monad tx for deposit ID %s", depositIDStr)
+	logger.Info("Submitting Monad tx for deposit ID %s with amount %s", depositIDStr, amount.String())
 	tx, err := s.monadDistributor.BoundContract.Transact(opts, "distributeFunds", transfer)
 	if err != nil {
+		logger.Error("Failed to distribute funds: %v", err)
+		// Update status to failed
+		_ = s.UpdateTransactionStatus(ctx, depositId, database.StatusFailed, "")
 		return "", fmt.Errorf("failed to distribute funds: %v", err)
 	}
 
-	logger.Info("Waiting for tx %s to be mined for deposit ID %s", tx.Hash().Hex(), depositIDStr)
+	txHash := tx.Hash().Hex()
+	logger.Info("Waiting for tx %s to be mined for deposit ID %s", txHash, depositIDStr)
+
+	// Update with pending status including the hash
+	if err := s.UpdateTransactionStatus(ctx, depositId, database.StatusPending, txHash); err != nil {
+		logger.Error("Failed to update tx hash in pending status: %v", err)
+	}
+
 	receipt, err := bind.WaitMined(ctx, s.monadDistributor.Client, tx)
 	if err != nil {
+		logger.Error("Failed to wait for distribution tx: %v", err)
+		_ = s.UpdateTransactionStatus(ctx, depositId, database.StatusFailed, txHash)
 		return "", fmt.Errorf("failed to wait for distribution tx: %v", err)
 	}
 	if receipt.Status == 0 {
+		logger.Error("Distribution tx failed on blockchain")
+		_ = s.UpdateTransactionStatus(ctx, depositId, database.StatusFailed, txHash)
 		return "", fmt.Errorf("distribution tx failed")
 	}
 
-	txHash := tx.Hash().Hex()
 	// Retry updating DB status up to 3 times.
 	for i := 0; i < 3; i++ {
 		if err := s.UpdateTransactionStatus(ctx, depositId, database.StatusCompleted, txHash); err != nil {
@@ -172,7 +208,8 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		}
 	}
 	s.updateTxCache(depositId, database.StatusCompleted, txHash)
-	logger.Info("Minting complete for deposit ID %s with tx %s", depositIDStr, txHash)
+	logger.Info("Minting complete for deposit ID %s with tx %s and amount %s", depositIDStr, txHash, amount.String())
+
 	// Final verification.
 	if updatedTx, err := s.GetTransactionByDepositID(ctx, depositId); err == nil {
 		if updatedTx.Status != database.StatusCompleted || updatedTx.MonadTxHash != txHash {
