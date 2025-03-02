@@ -44,10 +44,15 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 	}
 
 	monAmount := calculateMonAmount(event.Amount, state.SwapRatios[event.Currency], event.Currency)
+	logger.Info("Calculated MON amount: %s from deposit amount: %s", monAmount.String(), event.Amount.String())
 
 	// Create or update a pending transaction.
 	existingTx, err := s.GetTransactionByDepositID(ctx, event.DepositId)
 	if err != nil || existingTx == nil {
+		// Create transaction record with detailed logging
+		logger.Info("Creating new transaction record for deposit ID %s with amount %s MON",
+			event.DepositId.String(), monAmount.String())
+
 		txRecord := &database.Transaction{
 			DepositID:     event.DepositId,
 			WalletAddress: event.Depositor,
@@ -57,12 +62,31 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 			Status:        database.StatusPending,
 			TxHash:        event.TxHash,
 		}
+
 		if err := s.db.CreateTransaction(txRecord); err != nil {
 			logger.Error("Failed to create transaction record: %v", err)
+			// Continue processing despite the error, we'll try to recover later
+		} else {
+			logger.Info("Transaction record created successfully with ID %d for deposit ID %s",
+				txRecord.ID, event.DepositId.String())
+
+			// Verify transaction was created
+			verifyTx, verifyErr := s.db.GetTransactionByDepositID(event.DepositId)
+			if verifyErr != nil {
+				logger.Error("Error verifying transaction creation: %v", verifyErr)
+			} else if verifyTx == nil {
+				logger.Error("Transaction verification failed: record not found after creation")
+			} else {
+				logger.Info("Transaction verified: ID=%d, DepositID=%s, Amount=%s, MonAmount=%s",
+					verifyTx.ID, verifyTx.DepositID.String(), verifyTx.Amount.String(), verifyTx.MonAmount.String())
+			}
 		}
 	} else if existingTx.Status == database.StatusCompleted {
 		logger.Info("Transaction for deposit ID %s already completed with Monad tx hash %s", event.DepositId.String(), existingTx.MonadTxHash)
 		return nil
+	} else {
+		logger.Info("Using existing transaction record for deposit ID %s (status: %s)",
+			event.DepositId.String(), existingTx.Status)
 	}
 
 	if err := s.validateDepositWithAmount(state, event, monAmount); err != nil {

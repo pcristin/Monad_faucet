@@ -53,6 +53,54 @@ func (s *BridgeService) GetCachedTransactionByDepositID(ctx context.Context, dep
 }
 
 func (s *BridgeService) UpdateTransactionStatusWithCache(ctx context.Context, depositID *big.Int, status, txHash string) error {
+	if depositID == nil {
+		return fmt.Errorf("depositID is nil")
+	}
+
+	logger.Info("Updating transaction status: depositID=%s, status=%s, txHash=%s", depositID.String(), status, txHash)
+
+	// First check if transaction exists
+	existingTx, err := s.db.GetTransactionByDepositID(depositID)
+	if err != nil || existingTx == nil {
+		logger.Error("Error checking for existing transaction: %v", err)
+		// Create a placeholder transaction if none exists and we're trying to mark it as completed
+		if status == database.StatusCompleted && txHash != "" {
+			logger.Info("Creating placeholder transaction for depositID=%s with status=%s", depositID.String(), status)
+			// Create a minimal transaction record
+			tx := &database.Transaction{
+				DepositID:     depositID,
+				WalletAddress: common.HexToAddress("0x0000000000000000000000000000000000000000"),
+				Amount:        big.NewInt(0),
+				Currency:      database.CurrencyETH,
+				MonAmount:     big.NewInt(0),
+				Status:        status,
+				MonadTxHash:   txHash,
+			}
+			if err := s.db.CreateTransaction(tx); err != nil {
+				logger.Error("Failed to create placeholder transaction: %v", err)
+				return fmt.Errorf("failed to create placeholder transaction: %w", err)
+			}
+			logger.Info("Created placeholder transaction for depositID=%s", depositID.String())
+			return nil
+		}
+	} else if status == database.StatusCompleted && existingTx.Status == database.StatusCompleted {
+		// If transaction is already completed, log and return
+		logger.Info("Transaction for depositID=%s is already completed with tx hash %s, skipping update",
+			depositID.String(), existingTx.MonadTxHash)
+
+		// If the existing record has a different hash but we have a new one, update it
+		if existingTx.MonadTxHash == "" && txHash != "" {
+			logger.Info("Updating missing Monad tx hash for completed transaction: %s", txHash)
+		} else if existingTx.MonadTxHash != txHash && txHash != "" {
+			logger.Warn("Different tx hash found for completed transaction: existing=%s, new=%s",
+				existingTx.MonadTxHash, txHash)
+		} else {
+			// Nothing to update
+			return nil
+		}
+	}
+
+	// Begin the database transaction
 	dbTx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin DB tx: %w", err)
@@ -65,18 +113,38 @@ func (s *BridgeService) UpdateTransactionStatusWithCache(ctx context.Context, de
 			}
 		}
 	}()
+
+	// Update transaction status
 	err = s.db.UpdateTransactionStatusWithTx(dbTx, depositID, status, txHash)
 	if err != nil {
 		return fmt.Errorf("failed to update status in DB: %w", err)
 	}
+
+	// Commit the transaction
 	if err = dbTx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit DB tx: %w", err)
 	}
+
+	// Verify the update was successful
+	verifyTx, verifyErr := s.db.GetTransactionByDepositID(depositID)
+	if verifyErr != nil {
+		logger.Error("Error verifying transaction update: %v", verifyErr)
+	} else if verifyTx.Status != status {
+		logger.Error("Transaction status update verification failed: expected=%s, actual=%s", status, verifyTx.Status)
+	} else if txHash != "" && verifyTx.MonadTxHash != txHash {
+		logger.Error("Transaction hash update verification failed: expected=%s, actual=%s", txHash, verifyTx.MonadTxHash)
+	} else {
+		logger.Info("Transaction update verified successfully: depositID=%s, status=%s, hash=%s",
+			depositID.String(), verifyTx.Status, verifyTx.MonadTxHash)
+	}
+
+	// Update cache based on status
 	if status == database.StatusCompleted {
 		s.updateTxCache(depositID, status, txHash)
 	} else {
 		s.clearTransactionCache(depositID.String())
 	}
+
 	return nil
 }
 
