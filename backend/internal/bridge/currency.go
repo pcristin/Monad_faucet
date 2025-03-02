@@ -59,18 +59,35 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 		ethUsdPrice := GetEthUsdPrice()            // 8 decimals
 		monUsdRatio := blockchain.GetMonUsdRatio() // 18 decimals
 
-		// depositAmount is in wei (18 decimals)
-		// Calculate depositAmount * ethUsdPrice => product has 26 decimals.
-		depositTimesPrice := new(big.Int).Mul(depositAmount, ethUsdPrice)
+		// Convert depositAmount from wei to ETH as a float for accurate calculation
+		depositEthFloat := new(big.Float).Quo(
+			new(big.Float).SetInt(depositAmount),
+			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+		)
 
-		// Divide by 1e8 to convert ethUsdPrice from 8 decimals to 0 decimals; now usdValue has 18 decimals.
-		usdValueWith18Decimals := new(big.Int).Div(depositTimesPrice, new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil))
+		// Convert ETH/USD price to a float
+		ethUsdPriceFloat := new(big.Float).Quo(
+			new(big.Float).SetInt(ethUsdPrice),
+			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil)),
+		)
 
-		// Multiply by 1e18 to scale USD value for MON calculation.
-		scaledUsdValue := new(big.Int).Mul(usdValueWith18Decimals, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+		// Convert MON/USD ratio to a float
+		monUsdRatioFloat := new(big.Float).Quo(
+			new(big.Float).SetInt(monUsdRatio),
+			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+		)
 
-		// Divide by monUsdRatio to get MON amount in wei.
-		monWeiInt := new(big.Int).Div(scaledUsdValue, monUsdRatio)
+		// Calculate USD value of the deposit
+		usdValueFloat := new(big.Float).Mul(depositEthFloat, ethUsdPriceFloat)
+
+		// Calculate MON tokens based on USD value and MON/USD ratio
+		monAmountFloat := new(big.Float).Quo(usdValueFloat, monUsdRatioFloat)
+
+		// Convert MON amount to wei (multiply by 10^18)
+		monWeiFloat := new(big.Float).Mul(monAmountFloat, new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)))
+
+		// Convert to big.Int
+		monWeiInt, _ := monWeiFloat.Int(nil)
 
 		// (Optional) Minimum value check
 		minMonWei := big.NewInt(1000000000000000) // 0.001 MON in wei
@@ -81,28 +98,13 @@ func calculateMonAmount(depositAmount *big.Int, swapRatio *big.Int, currencyType
 			}
 		}
 
-		// Logging for debugging (using float conversions for readability)
-		depositEthFloat := new(big.Float).Quo(
-			new(big.Float).SetInt(depositAmount),
-			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-		)
-		ethUsdPriceFloat := new(big.Float).Quo(
-			new(big.Float).SetInt(ethUsdPrice),
-			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil)),
-		)
-		monUsdRatioFloat := new(big.Float).Quo(
-			new(big.Float).SetInt(monUsdRatio),
-			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-		)
-		usdValue, _ := new(big.Float).Quo(new(big.Float).SetInt(usdValueWith18Decimals),
-			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))).Float64()
-		monAmountFloat, _ := new(big.Float).Quo(new(big.Float).SetInt(monWeiInt),
-			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))).Float64()
-		logger.Info("ETH -> MON: %s ETH ≈ $%.6f (ETH price: $%s) / $%s per MON = %s MON (%.6f MON, %s wei)",
+		// For logging
+		usdValue, _ := usdValueFloat.Float64()
+		calculatedMonAmount, _ := monAmountFloat.Float64()
+
+		logger.Info("ETH -> MON: %s ETH ≈ $%.6f (ETH price: $%s) / $%s per MON = %.6f MON (%s wei)",
 			depositEthFloat.Text('f', 18), usdValue, ethUsdPriceFloat.Text('f', 2),
-			monUsdRatioFloat.Text('f', 6), new(big.Float).Quo(new(big.Float).SetInt(monWeiInt),
-				new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))).Text('f', 6),
-			monAmountFloat, monWeiInt.String())
+			monUsdRatioFloat.Text('f', 6), calculatedMonAmount, monWeiInt.String())
 
 		return monWeiInt
 	} else {
