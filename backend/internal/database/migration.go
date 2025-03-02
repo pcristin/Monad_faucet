@@ -114,12 +114,14 @@ func (db *DB) SchemaMigration() error {
 		}
 
 		// Insert into deposits
-		_, err = tx.ExecContext(ctx, `
+		depositInsert := `
 			INSERT INTO deposits (deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (deposit_id) DO NOTHING
-		`, depositID, walletAddress, amount, currency, arbiTxHash, blockNumber, depositStatus, createdAt, updatedAt)
+		`
+		_, err = tx.ExecContext(ctx, depositInsert, depositID, walletAddress, amount, currency, arbiTxHash, blockNumber, depositStatus, createdAt, updatedAt)
 		if err != nil {
+			logger.Error("Failed to insert into deposits: %v", err)
 			return fmt.Errorf("failed to insert into deposits: %w", err)
 		}
 
@@ -138,12 +140,17 @@ func (db *DB) SchemaMigration() error {
 			monadHash = ""
 		}
 
-		_, err = tx.ExecContext(ctx, `
+		// Add a small delay between operations to avoid protocol errors
+		time.Sleep(10 * time.Millisecond)
+
+		distributionInsert := `
 			INSERT INTO distributions (deposit_id, wallet_address, mon_amount, status, monad_tx_hash, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
 			ON CONFLICT (deposit_id) DO NOTHING
-		`, depositID, walletAddress, monAmount, distributionStatus, monadHash, createdAt, updatedAt)
+		`
+		_, err = tx.ExecContext(ctx, distributionInsert, depositID, walletAddress, monAmount, distributionStatus, monadHash, createdAt, updatedAt)
 		if err != nil {
+			logger.Error("Failed to insert into distributions: %v", err)
 			return fmt.Errorf("failed to insert into distributions: %w", err)
 		}
 
@@ -196,21 +203,32 @@ func (db *DB) getTableRowCount(tableName string) (int, error) {
 
 // execSchemaSQL executes the schema SQL to create the new tables.
 func (db *DB) execSchemaSQL() error {
-	// Read schema SQL from file or embed it here
-	schema := `
-		-- Table for managing distributed locks to prevent race conditions
+	// Execute SQL statements individually to avoid protocol errors
+
+	// Create processing_locks table
+	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS processing_locks (
 			deposit_id VARCHAR(100) PRIMARY KEY,
 			instance_id VARCHAR(50) NOT NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			expires_at TIMESTAMP NOT NULL,
 			CONSTRAINT deposit_id_unique UNIQUE (deposit_id)
-		);
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create processing_locks table: %w", err)
+	}
 
-		-- Index for quick lookups and expirations
-		CREATE INDEX IF NOT EXISTS idx_processing_locks_expires_at ON processing_locks(expires_at);
+	// Create index on processing_locks
+	_, err = db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_processing_locks_expires_at ON processing_locks(expires_at)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create index on processing_locks: %w", err)
+	}
 
-		-- Table for storing deposit transactions from Arbitrum
+	// Create deposits table
+	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS deposits (
 			id SERIAL PRIMARY KEY,
 			deposit_id VARCHAR(100) NOT NULL,
@@ -223,9 +241,36 @@ func (db *DB) execSchemaSQL() error {
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			CONSTRAINT deposit_id_unique_deposits UNIQUE (deposit_id)
-		);
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create deposits table: %w", err)
+	}
 
-		-- Table for storing distribution transactions on Monad
+	// Create indexes on deposits
+	_, err = db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_deposits_wallet_address ON deposits(wallet_address)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create wallet_address index: %w", err)
+	}
+
+	_, err = db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_deposits_tx_hash ON deposits(tx_hash)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create tx_hash index: %w", err)
+	}
+
+	_, err = db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_deposits_status ON deposits(status)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create status index: %w", err)
+	}
+
+	// Create distributions table
+	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS distributions (
 			id SERIAL PRIMARY KEY,
 			deposit_id VARCHAR(100) NOT NULL,
@@ -237,17 +282,33 @@ func (db *DB) execSchemaSQL() error {
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			CONSTRAINT deposit_id_unique_distributions UNIQUE (deposit_id),
 			CONSTRAINT fk_deposit FOREIGN KEY (deposit_id) REFERENCES deposits(deposit_id)
-		);
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create distributions table: %w", err)
+	}
 
-		-- Create indexes for faster lookups
-		CREATE INDEX IF NOT EXISTS idx_deposits_wallet_address ON deposits(wallet_address);
-		CREATE INDEX IF NOT EXISTS idx_deposits_tx_hash ON deposits(tx_hash);
-		CREATE INDEX IF NOT EXISTS idx_deposits_status ON deposits(status);
-		CREATE INDEX IF NOT EXISTS idx_distributions_wallet_address ON distributions(wallet_address);
-		CREATE INDEX IF NOT EXISTS idx_distributions_status ON distributions(status);
-		CREATE INDEX IF NOT EXISTS idx_distributions_monad_tx_hash ON distributions(monad_tx_hash);
-	`
+	// Create indexes on distributions
+	_, err = db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_distributions_wallet_address ON distributions(wallet_address)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create distributions wallet_address index: %w", err)
+	}
 
-	_, err := db.Exec(schema)
-	return err
+	_, err = db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_distributions_status ON distributions(status)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create distributions status index: %w", err)
+	}
+
+	_, err = db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_distributions_monad_tx_hash ON distributions(monad_tx_hash)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create distributions monad_tx_hash index: %w", err)
+	}
+
+	return nil
 }
