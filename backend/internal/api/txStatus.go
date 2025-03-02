@@ -140,42 +140,50 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 						slog.String("error", err.Error()),
 						slog.String("deposit_id", tx.DepositID.String()),
 					)
-				} else if monadTxHash != "" && status == "completed" {
+				} else if monadTxHash != "" {
+					logger.Info("Found monad transaction hash from blockchain",
+						slog.String("monad_tx_hash", monadTxHash))
+
+					// Also check for Distribution event on Monad blockchain
+					distTxHash, err := h.BridgeService.FindMonadDistributionByDepositID(c, tx.DepositID)
+					if err == nil && distTxHash != "" {
+						logger.Info("Found distribution event",
+							slog.String("tx_hash", distTxHash),
+							slog.String("deposit_id", tx.DepositID.String()))
+
+						// Create distribution record if needed
+						_, err := h.BridgeService.CheckOrCreateDistributionTransaction(c, tx.DepositID)
+						if err != nil {
+							logger.Error("Failed to create distribution record",
+								slog.String("error", err.Error()))
+						}
+
+						// Update response with distribution transaction
+						monadTxHash = distTxHash
+						status = "completed"
+					}
+
 					// Transaction found on blockchain, update status
 					logger.Info("Transaction found on blockchain during status check",
 						slog.String("deposit_id", tx.DepositID.String()),
 						slog.String("monad_tx_hash", monadTxHash),
+						slog.String("status", status),
 					)
 
 					// Update transaction status in database
-					err = h.BridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, "completed", monadTxHash)
+					err = h.BridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, status, monadTxHash)
 					if err != nil {
 						logger.Error("Error updating transaction status", slog.String("error", err.Error()))
 					} else {
 						// Update tx object for response
-						tx.Status = "completed"
+						tx.Status = status
 						tx.MonadTxHash = monadTxHash
-
-						// Verify the update was successful
-						verifyTx, verifyErr := h.BridgeService.GetDB().GetTransactionByDepositID(tx.DepositID)
-						if verifyErr != nil {
-							logger.Error("Error verifying transaction update", slog.String("error", verifyErr.Error()))
-						} else if verifyTx.Status != "completed" || verifyTx.MonadTxHash != monadTxHash {
-							logger.Error("Transaction update verification failed",
-								slog.String("expected_status", "completed"),
-								slog.String("actual_status", verifyTx.Status),
-								slog.String("expected_hash", monadTxHash),
-								slog.String("actual_hash", verifyTx.MonadTxHash))
-						} else {
-							logger.Info("Transaction update verified successfully",
-								slog.String("status", verifyTx.Status),
-								slog.String("monad_tx_hash", verifyTx.MonadTxHash))
-						}
 
 						// Log that we found and are including the Monad hash
 						logger.Info("Including completed Monad transaction in response",
 							slog.String("deposit_id", tx.DepositID.String()),
-							slog.String("monad_tx_hash", monadTxHash))
+							slog.String("monad_tx_hash", monadTxHash),
+							slog.String("status", status))
 					}
 				}
 			}
@@ -278,42 +286,50 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 						slog.String("error", err.Error()),
 						slog.String("deposit_id", tx.DepositID.String()),
 					)
-				} else if monadTxHash != "" && status == "completed" {
+				} else if monadTxHash != "" {
+					logger.Info("Found monad transaction hash from blockchain",
+						slog.String("monad_tx_hash", monadTxHash))
+
+					// Also check for Distribution event on Monad blockchain
+					distTxHash, err := h.BridgeService.FindMonadDistributionByDepositID(c, tx.DepositID)
+					if err == nil && distTxHash != "" {
+						logger.Info("Found distribution event",
+							slog.String("tx_hash", distTxHash),
+							slog.String("deposit_id", tx.DepositID.String()))
+
+						// Create distribution record if needed
+						_, err := h.BridgeService.CheckOrCreateDistributionTransaction(c, tx.DepositID)
+						if err != nil {
+							logger.Error("Failed to create distribution record",
+								slog.String("error", err.Error()))
+						}
+
+						// Update response with distribution transaction
+						monadTxHash = distTxHash
+						status = "completed"
+					}
+
 					// Transaction found on blockchain, update status
 					logger.Info("Transaction found on blockchain during status check",
 						slog.String("deposit_id", tx.DepositID.String()),
 						slog.String("monad_tx_hash", monadTxHash),
+						slog.String("status", status),
 					)
 
 					// Update transaction status in database
-					err = h.BridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, "completed", monadTxHash)
+					err = h.BridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, status, monadTxHash)
 					if err != nil {
 						logger.Error("Error updating transaction status", slog.String("error", err.Error()))
 					} else {
 						// Update tx object for response
-						tx.Status = "completed"
+						tx.Status = status
 						tx.MonadTxHash = monadTxHash
-
-						// Verify the update was successful
-						verifyTx, verifyErr := h.BridgeService.GetDB().GetTransactionByDepositID(tx.DepositID)
-						if verifyErr != nil {
-							logger.Error("Error verifying transaction update", slog.String("error", verifyErr.Error()))
-						} else if verifyTx.Status != "completed" || verifyTx.MonadTxHash != monadTxHash {
-							logger.Error("Transaction update verification failed",
-								slog.String("expected_status", "completed"),
-								slog.String("actual_status", verifyTx.Status),
-								slog.String("expected_hash", monadTxHash),
-								slog.String("actual_hash", verifyTx.MonadTxHash))
-						} else {
-							logger.Info("Transaction update verified successfully",
-								slog.String("status", verifyTx.Status),
-								slog.String("monad_tx_hash", verifyTx.MonadTxHash))
-						}
 
 						// Log that we found and are including the Monad hash
 						logger.Info("Including completed Monad transaction in response",
 							slog.String("deposit_id", tx.DepositID.String()),
-							slog.String("monad_tx_hash", monadTxHash))
+							slog.String("monad_tx_hash", monadTxHash),
+							slog.String("status", status))
 					}
 				}
 			}
@@ -368,42 +384,50 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 						slog.String("error", err.Error()),
 						slog.String("deposit_id", tx.DepositID.String()),
 					)
-				} else if monadTxHash != "" && status == "completed" {
+				} else if monadTxHash != "" {
+					logger.Info("Found monad transaction hash from blockchain",
+						slog.String("monad_tx_hash", monadTxHash))
+
+					// Also check for Distribution event on Monad blockchain
+					distTxHash, err := h.BridgeService.FindMonadDistributionByDepositID(c, tx.DepositID)
+					if err == nil && distTxHash != "" {
+						logger.Info("Found distribution event",
+							slog.String("tx_hash", distTxHash),
+							slog.String("deposit_id", tx.DepositID.String()))
+
+						// Create distribution record if needed
+						_, err := h.BridgeService.CheckOrCreateDistributionTransaction(c, tx.DepositID)
+						if err != nil {
+							logger.Error("Failed to create distribution record",
+								slog.String("error", err.Error()))
+						}
+
+						// Update response with distribution transaction
+						monadTxHash = distTxHash
+						status = "completed"
+					}
+
 					// Transaction found on blockchain, update status
 					logger.Info("Transaction found on blockchain during status check",
 						slog.String("deposit_id", tx.DepositID.String()),
 						slog.String("monad_tx_hash", monadTxHash),
+						slog.String("status", status),
 					)
 
 					// Update transaction status in database
-					err = h.BridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, "completed", monadTxHash)
+					err = h.BridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, status, monadTxHash)
 					if err != nil {
 						logger.Error("Error updating transaction status", slog.String("error", err.Error()))
 					} else {
 						// Update tx object for response
-						tx.Status = "completed"
+						tx.Status = status
 						tx.MonadTxHash = monadTxHash
-
-						// Verify the update was successful
-						verifyTx, verifyErr := h.BridgeService.GetDB().GetTransactionByDepositID(tx.DepositID)
-						if verifyErr != nil {
-							logger.Error("Error verifying transaction update", slog.String("error", verifyErr.Error()))
-						} else if verifyTx.Status != "completed" || verifyTx.MonadTxHash != monadTxHash {
-							logger.Error("Transaction update verification failed",
-								slog.String("expected_status", "completed"),
-								slog.String("actual_status", verifyTx.Status),
-								slog.String("expected_hash", monadTxHash),
-								slog.String("actual_hash", verifyTx.MonadTxHash))
-						} else {
-							logger.Info("Transaction update verified successfully",
-								slog.String("status", verifyTx.Status),
-								slog.String("monad_tx_hash", verifyTx.MonadTxHash))
-						}
 
 						// Log that we found and are including the Monad hash
 						logger.Info("Including completed Monad transaction in response",
 							slog.String("deposit_id", tx.DepositID.String()),
-							slog.String("monad_tx_hash", monadTxHash))
+							slog.String("monad_tx_hash", monadTxHash),
+							slog.String("status", status))
 					}
 				}
 			}

@@ -456,3 +456,6 @@ func (s *BridgeService) findDepositIDFromContractLogs(ctx context.Context, txHas
 
 	return nil, fmt.Errorf("could not find deposit ID for tx hash %s in any deposit events", txHash.Hex())
 }
+
+// FindMonadDistributionByDepositID and CheckOrCreateDistributionTransaction functions
+// have been moved to events.go

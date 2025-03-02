@@ -205,3 +205,143 @@ func (s *BridgeService) searchAllDistributionEvents(ctx context.Context, targetD
 	logger.Info("Fallback scan complete: no matching deposit ID %s found after checking %d events in %d attempts", targetDepositId.String(), totalEventsChecked, attemptCount)
 	return nil
 }
+
+// FindMonadDistributionByDepositID searches for Distribution events in the distributor contract by deposit ID
+func (s *BridgeService) FindMonadDistributionByDepositID(ctx context.Context, depositID *big.Int) (string, error) {
+	logger.Info("Searching for Distribution event for deposit ID %s", depositID.String())
+
+	// Create a filter query for Distribution events with the specified deposit ID
+	distributionTopic := crypto.Keccak256Hash([]byte("Distribution(address,uint256,uint256)"))
+	depositIDBytes := common.LeftPadBytes(depositID.Bytes(), 32)
+
+	topicHash := common.BytesToHash(depositIDBytes)
+	logger.Debug("Using topic hash for query: topic_hash=%s, deposit_id_uint=%s, event_signature=%s",
+		topicHash.Hex(),
+		depositID.String(),
+		distributionTopic.Hex())
+
+	// Query for distribution events in batches to avoid timeouts
+	var maxAttempts = 3
+	var attempts = 0
+
+	for attempts < maxAttempts {
+		attempts++
+
+		// Determine the block range to query - start with a wider range initially
+		blockRange := uint64(10000) * uint64(attempts) // Increase range on each attempt
+		latestBlock, err := s.monadDistributor.Client.BlockNumber(ctx)
+		if err != nil {
+			logger.Error("Failed to get latest block number: %v", err)
+			continue
+		}
+
+		fromBlock := uint64(0)
+		if latestBlock > blockRange {
+			fromBlock = latestBlock - blockRange
+		}
+
+		query := ethereum.FilterQuery{
+			FromBlock: big.NewInt(int64(fromBlock)),
+			ToBlock:   big.NewInt(int64(latestBlock)),
+			Addresses: []common.Address{s.monadDistributor.Address},
+			Topics: [][]common.Hash{
+				{distributionTopic}, // Event signature
+				{},                  // Wildcard for recipient address
+				{},                  // Wildcard for amount
+				{topicHash},         // Deposit ID
+			},
+		}
+
+		logger.Info("Querying for Distribution events: from_block=%d, to_block=%d, distributor_address=%s",
+			fromBlock,
+			latestBlock,
+			s.monadDistributor.Address.Hex())
+
+		logs, err := s.monadDistributor.Client.FilterLogs(ctx, query)
+		if err != nil {
+			logger.Error("Failed to filter logs: %v (attempt %d/%d)",
+				err, attempts, maxAttempts)
+			continue
+		}
+
+		logger.Info("Found logs: count=%d", len(logs))
+
+		if len(logs) == 0 {
+			continue // Try with a larger block range
+		}
+
+		// Process the found logs
+		for _, log := range logs {
+			if len(log.Topics) < 4 {
+				logger.Warn("Event has insufficient topics: found=%d", len(log.Topics))
+				continue
+			}
+
+			// Topics[3] should be the deposit ID
+			logDepositID := log.Topics[3]
+			logDepositIDInt := new(big.Int).SetBytes(logDepositID.Bytes())
+
+			logger.Debug("Checking event topic against deposit ID: log_deposit_id=%s, target_deposit_id=%s",
+				logDepositIDInt.String(),
+				depositID.String())
+
+			// Compare the deposit IDs
+			if logDepositIDInt.Cmp(depositID) == 0 {
+				logger.Info("Found matching Distribution event: tx_hash=%s, deposit_id=%s",
+					log.TxHash.Hex(),
+					depositID.String())
+
+				return log.TxHash.Hex(), nil
+			}
+		}
+	}
+
+	logger.Warn("No matching Distribution event found for deposit ID %s", depositID.String())
+	return "", fmt.Errorf("no matching distribution event found for deposit ID %s", depositID.String())
+}
+
+// FindMonadDistributionTransactionByDepositID searches for a distribution transaction by finding the associated distribution event
+func (s *BridgeService) FindMonadDistributionTransactionByDepositID(ctx context.Context, depositID *big.Int) (string, error) {
+	return s.FindMonadDistributionByDepositID(ctx, depositID)
+}
+
+// CheckOrCreateDistributionTransaction checks if a distribution transaction exists for a deposit ID and creates a record if needed
+func (s *BridgeService) CheckOrCreateDistributionTransaction(ctx context.Context, depositID *big.Int) (*database.Transaction, error) {
+	logger.Info("Checking for distribution transaction: deposit_id=%s", depositID.String())
+
+	// Check if transaction exists
+	tx, err := s.db.GetTransactionByDepositID(depositID)
+	if err != nil {
+		logger.Error("Failed to get transaction from database: %v", err)
+		return nil, err
+	}
+
+	// If transaction already has a Monad tx hash and is marked completed, return it
+	if tx.Status == database.StatusCompleted && tx.MonadTxHash != "" {
+		logger.Info("Found existing completed transaction: monad_tx_hash=%s", tx.MonadTxHash)
+		return tx, nil
+	}
+
+	// Search for distribution event on blockchain
+	txHash, err := s.FindMonadDistributionByDepositID(ctx, depositID)
+	if err != nil {
+		logger.Warn("Failed to find distribution event: %v", err)
+		return tx, err
+	}
+
+	// Update transaction with distribution transaction hash
+	tx.MonadTxHash = txHash
+	tx.Status = database.StatusCompleted
+
+	// Update in database
+	err = s.db.UpdateTransactionStatus(depositID, database.StatusCompleted, txHash)
+	if err != nil {
+		logger.Error("Failed to update transaction status: %v", err)
+		return nil, err
+	}
+
+	logger.Info("Updated transaction with distribution information: monad_tx_hash=%s, status=%s",
+		txHash, database.StatusCompleted)
+
+	return tx, nil
+}
