@@ -44,7 +44,6 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 	}
 
 	monAmount := calculateMonAmount(event.Amount, state.SwapRatios[event.Currency], event.Currency)
-	logMonCalculation(event, monAmount)
 
 	// Create or update a pending transaction.
 	existingTx, err := s.GetTransactionByDepositID(ctx, event.DepositId)
