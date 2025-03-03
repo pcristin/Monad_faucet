@@ -60,16 +60,6 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 			// This means 1 smallest unit of USDC (0.000001 USDC) gives 10^19/10^6 = 10^13 MON wei
 			// To get USDC per 1 MON, we need: 10^6 / (10^19/10^18) = 10^6 / 10 = 0.1 USDC
 
-			var currencyDecimals int64
-			switch currency {
-			case blockchain.CurrencyETH:
-				currencyDecimals = 18 // ETH has 18 decimals
-			case blockchain.CurrencyUSDC, blockchain.CurrencyUSDT:
-				currencyDecimals = 6 // USDC/USDT have 6 decimals
-			default:
-				currencyDecimals = 18
-			}
-
 			// For USD-based tokens (USDC/USDT), the ratio directly represents MON/USD ratio
 			// For ETH, we need to calculate based on ETH/USD price
 			var currencyPerMon *big.Float
@@ -88,18 +78,18 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 					new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 				)
 			} else {
-				// For ETH: Calculate based on the ratio from contract
-				// First calculate smallest units per MON
-				smallestUnitsPerMon := new(big.Float).Quo(
-					new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+				// For ETH: The ratio represents how much ETH 1 MON costs
+				// The stored ratio is ETH/MON in wei, we need to convert to human-readable format
+
+				// For ETH exchange rate we actually want to directly use the ratio value
+				// ETHperMON = ratio / 10^18
+				currencyPerMon = new(big.Float).Quo(
 					new(big.Float).SetInt(ratio),
+					new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 				)
 
-				// Then convert to human-readable format
-				currencyPerMon = new(big.Float).Quo(
-					smallestUnitsPerMon,
-					new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(currencyDecimals), nil)),
-				)
+				logger.Debug("ETH exchange rate: ratio=%s, calculated=%s",
+					ratio.String(), currencyPerMon.Text('f', 18))
 			}
 
 			// For ETH, use 18 decimals of precision; for other currencies, use 6
