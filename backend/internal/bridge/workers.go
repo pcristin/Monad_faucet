@@ -198,14 +198,6 @@ func (pools *BridgeWorkerPools) SubmitDepositEvent(event blockchain.DepositEvent
 	pools.DepositPool.Submit(&DepositJob{Event: event})
 }
 
-// isProcessingDeposit checks if a deposit is already being processed
-func (pools *BridgeWorkerPools) isProcessingDeposit(depositID *big.Int) bool {
-	depositIDStr := depositID.String()
-	pools.mu.Lock()
-	defer pools.mu.Unlock()
-	return pools.processingDeposits[depositIDStr]
-}
-
 // finishProcessingDeposit marks a deposit as done processing
 func (pools *BridgeWorkerPools) finishProcessingDeposit(depositID *big.Int) {
 	depositIDStr := depositID.String()
@@ -520,8 +512,25 @@ func (pools *BridgeWorkerPools) processDBJob(ctx context.Context, job *DBWorkerJ
 		}
 
 	case JobUpdateDepositStatus:
+		logger.Info("Processing JobUpdateDepositStatus for deposit ID %s to status %s",
+			job.Deposit.DepositID.String(), job.Deposit.Status)
+
 		if err := pools.service.db.UpdateDepositStatus(job.Deposit.DepositID, job.Deposit.Status); err != nil {
 			logger.Error("Failed to update deposit status: %v", err)
+		} else {
+			logger.Info("Successfully queued update of deposit status for ID %s to %s",
+				job.Deposit.DepositID.String(), job.Deposit.Status)
+
+			// Verify the update was successful by checking the database
+			deposit, err := pools.service.db.GetDepositByID(job.Deposit.DepositID)
+			if err != nil {
+				logger.Error("Failed to verify deposit status update: %v", err)
+			} else if deposit == nil {
+				logger.Error("Failed to verify deposit status update: deposit not found")
+			} else {
+				logger.Info("Verified deposit status for ID %s: current status is %s",
+					job.Deposit.DepositID.String(), deposit.Status)
+			}
 		}
 
 	case JobCreateDistribution:

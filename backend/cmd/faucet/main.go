@@ -33,6 +33,14 @@ func main() {
 		logger.Fatal("Configuration validation failed: %v", err)
 	}
 
+	// Set production mode for logging if running in production environment
+	if os.Getenv("PRODUCTION") == "true" || os.Getenv("RENDER") == "true" {
+		logger.SetProduction(true)
+		logger.Info("Running in production mode - verbose logging disabled")
+	} else {
+		logger.Info("Running in development mode - verbose logging enabled")
+	}
+
 	// Create application context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

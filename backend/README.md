@@ -8,16 +8,19 @@ This is the backend service for the Monad Faucet, which facilitates token swaps 
 - Validates deposits and checks contract states
 - Dynamic swap ratio calculation:
   - ETH/MON: Based on Chainlink ETH/USD price feed and current MON/USD ratio
-  - USDC/MON and USDT/MON: Based on current MON/USD ratio
+  - USDC/MON and USDT/MON: Based on current MON/USD ratio (accounts for 6 decimal places in stablecoins)
 - Mints MON tokens on the Monad network
 - Provides REST API for frontend integration
 - Handles automated refunds for failed transactions
 - Admin API for dynamic MON/USD ratio updates
 - Wallet-based distribution limits to prevent abuse (configurable percentage of total MON balance per transaction)
+- Robust transaction status tracking with database storage
+- Production-ready logging with configurable verbosity
 
 ## Prerequisites
 
 - Go 1.22 or newer
+- PostgreSQL database (for transaction tracking)
 - Access to Arbitrum and Monad networks
 - API keys for Arbitrum RPC (if using Alchemy or Infura)
 
@@ -30,9 +33,14 @@ backend/
 ├── config/              # Configuration management
 ├── internal/            # Private application code
 │   ├── api/             # HTTP API handlers
-│   └── blockchain/      # Blockchain interaction code
+│   ├── blockchain/      # Blockchain interaction code
+│   ├── bridge/          # Bridge service and logic
+│   ├── database/        # Database operations
+│   └── core/            # Core interfaces and types
 ├── pkg/                 # Public packages
 │   └── logger/          # Structured logging
+├── scripts/             # Utility scripts
+├── utils/               # Helper utilities
 ├── .env.example         # Example environment variables
 ├── go.mod               # Go module definition
 └── README.md            # Project documentation
@@ -43,20 +51,57 @@ backend/
 1. Clone the repository
 2. Copy `.env.example` to `.env` and fill in the required values:
    ```env
+   # HTTP server port
    PORT=8080
-   ARB_RPC_URL=your-arbitrum-rpc-url
-   ARB_DEPOSITOR_ADDRESS=your-arbitrum-contract-address
-   MONAD_RPC_URL=your-monad-rpc-url
-   MONAD_DISTRIBUTOR_ADDRESS=your-monad-contract-address
+   
+   # Arbitrum network configuration
+   ARB_RPC_URL=wss://arb-goerli.g.alchemy.com/v2/your-api-key
+   ARB_DEPOSITOR_ADDRESS=0x487177c3278faa36dd317dbb4ca97425a4f4ee31
+   
+   # Monad network configuration
+   MONAD_RPC_URL=https://rpc-testnet.monad.xyz/
+   MONAD_DISTRIBUTOR_ADDRESS=0xc11350Fd29aC48181b0117bd1935dBE781cdd03d
+   
+   # Wallet configuration
    WALLET_PRIVATE_KEY=your-private-key-here
+   
+   # Admin configuration
    ADMIN_API_KEY_1=your-first-admin-key-here
    ADMIN_API_KEY_2=your-second-admin-key-here
+   
+   # Database configuration
+   DB_HOST=localhost
+   DB_PORT=5432
+   DB_USER=postgres
+   DB_PASSWORD=postgres
+   DB_NAME=bridgedb
+   DB_SSLMODE=disable
+   
+   # Worker pool configuration
+   DEPOSIT_WORKERS=5
+   CALCULATION_WORKERS=3
+   DISTRIBUTION_WORKERS=5
+   DB_WORKERS=2
+   
+   # Optional: Set to "true" for production mode logging
+   PRODUCTION=false
    ```
-3. Install dependencies:
+
+3. Set up the database:
+   ```bash
+   # Using Docker
+   docker run --name postgres-bridge -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=bridgedb -p 5432:5432 -d postgres
+   
+   # Or use existing PostgreSQL instance and create the database
+   createdb bridgedb
+   ```
+
+4. Install dependencies:
    ```bash
    go mod download
    ```
-4. Build and run the service:
+
+5. Build and run the service:
    ```bash
    go build -o faucet ./cmd/faucet
    ./faucet
@@ -69,24 +114,18 @@ backend/
 
 ## API Endpoints
 
-### GET /api/state
-Returns the current state of the bridge.
+### GET /bridge/health
+Health check endpoint to verify the service is running.
 
 Response:
 ```json
 {
-  "is_paused": false,
-  "min_amount": "1000000000000000",
-  "mon_balance": "1000000000000000000000",
-  "swap_ratios": {
-    "ETH": "300000000000000000000000",
-    "USDC": "10000000000000000000",
-    "USDT": "10000000000000000000"
-  }
+  "status": "ok",
+  "timestamp": "2025-03-04T01:02:43Z"
 }
 ```
 
-### GET /api/info
+### GET /bridge/api/info
 Returns simplified faucet information.
 
 Response:
@@ -104,28 +143,42 @@ Response:
 }
 ```
 
-### POST /api/estimate
-Estimates the amount of MON tokens to be received.
+### GET /bridge/api/v1/info
+Updated version of the faucet info endpoint with the same response format.
+
+### POST /bridge/api/tx-status
+Retrieves the status of a transaction by its Arbitrum transaction hash. Only transactions processed by our system will be found.
 
 Request:
 ```json
 {
-  "amount": "1000000000000000000",
-  "currency": "ETH"
+  "tx_hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
 }
 ```
 
 Response:
 ```json
 {
-  "input_amount": "1000000000000000000",
-  "input_currency": "ETH",
-  "mon_amount": "300000000000000000000000",
-  "swap_ratio": "300000000000000000000000"
+  "status": "success",
+  "message": "MON tokens have been distributed to your wallet",
+  "txs": {
+    "Arbitrum": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+    "Monad": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+  }
 }
 ```
 
-### POST /api/admin/ratio
+### POST /bridge/api/v1/transaction/status
+Updated version of the transaction status endpoint with the same request/response format.
+
+Possible status values:
+- `success`: Transaction was successful, MON tokens were distributed
+- `pending`: Transaction is still being processed
+- `error`: Transaction execution reverted
+- `refunded`: Deposit was successful, but MON couldn't be distributed and was refunded
+- `not_found`: Transaction was not found in our system
+
+### POST /bridge/api/admin/ratio
 Updates the MON/USD ratio (requires admin authentication).
 
 Request:
@@ -147,7 +200,7 @@ Response:
 }
 ```
 
-### POST /api/admin/pause
+### POST /bridge/api/admin/pause
 Pauses deposit functionality on the Arbitrum contract (requires admin authentication).
 
 Headers:
@@ -162,7 +215,7 @@ Response:
 }
 ```
 
-### POST /api/admin/resume
+### POST /bridge/api/admin/resume
 Resumes deposit functionality on the Arbitrum contract (requires admin authentication).
 
 Headers:
@@ -177,7 +230,7 @@ Response:
 }
 ```
 
-### POST /api/admin/wallet-limit
+### POST /bridge/api/admin/wallet-limit
 Updates the wallet limit percentage (requires admin authentication).
 
 Request:
@@ -199,107 +252,134 @@ Response:
 }
 ```
 
-> Note: Setting `limit_percentage` to 0 disables the wallet limit entirely. The limit is applied per transaction rather than over a time period.
+### GET /bridge/metrics
+Returns system metrics for monitoring (requires admin authentication).
 
-### POST /api/tx-status
-### POST /api/v1/transaction/status
-Retrieves the status of a transaction by its Arbitrum transaction hash. Only transactions processed by our system will be found.
-
-Request:
-```json
-{
-  "tx_hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-}
+Headers:
+```
+X-Admin-Key: your-admin-key-here
 ```
 
 Response:
 ```json
 {
-  "status": "success",
-  "message": "MON tokens have been distributed to your wallet",
-  "txs": {
-    "Arbitrum": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-  }
+  "uptime": "3h27m15s",
+  "requests": 1527,
+  "depositEvents": 142,
+  "distributionEvents": 138,
+  "pendingDistributions": 4,
+  "failedDistributions": 0,
+  "monBalance": "3.429538"
 }
 ```
 
-Possible status values:
-- `success`: Transaction was successful, MON tokens were distributed
-- `pending`: Transaction is still being processed
-- `error`: Transaction execution reverted
-- `refunded`: Deposit was successful, but MON couldn't be distributed and was refunded
-- `not_found`: Transaction was not found in our system
+## Database Schema
 
-## Transaction Processing
+The service uses a PostgreSQL database with the following tables:
 
-The faucet processes transactions in several steps:
+1. **deposits** - Tracks deposit events from Arbitrum
+   - `deposit_id`: Unique identifier for the deposit
+   - `wallet_address`: Address that made the deposit
+   - `amount`: Amount deposited
+   - `currency`: Currency type (0=ETH, 1=USDC, 2=USDT)
+   - `tx_hash`: Transaction hash from Arbitrum
+   - `block_number`: Block number of the transaction
+   - `status`: Current status (pending, processed, failed, refunded)
 
-1. User initiates a deposit on Arbitrum network
-2. Backend detects the deposit event
-3. System validates the deposit and waits for confirmations
-4. MON tokens are minted on Monad network
-5. Transaction status is updated in the database
+2. **distributions** - Tracks MON token distributions on Monad
+   - `deposit_id`: Linked to deposit ID
+   - `wallet_address`: Recipient address
+   - `mon_amount`: Amount of MON tokens distributed
+   - `status`: Current status (pending, completed, failed)
+   - `monad_tx_hash`: Transaction hash on Monad
 
-The transaction status endpoint allows users to check the current status of their transaction. Only transactions initiated through our system will be found in the transaction status endpoint.
+3. **transaction_history** - Legacy table for backward compatibility
+   - Combines deposit and distribution information
 
-## Price Calculation
+4. **processing_locks** - Prevents duplicate processing of deposits
+   - `deposit_id`: Deposit being processed
+   - `instance_id`: Instance processing the deposit
+   - `expires_at`: When the lock expires
 
-The service calculates token swap ratios based on:
+## Transaction Processing Flow
 
-1. MON/USD ratio (configurable via admin API)
-   - Example: If 1 MON = $0.1, then 1 USDC/USDT = 10 MON
+The bridge service processes transactions through a multi-stage pipeline:
 
-2. ETH price from Chainlink oracle
-   - Example: If ETH = $3000 and 1 MON = $0.1, then 1 ETH = 30000 MON
+1. **Event Listener**:
+   - Monitors Arbitrum blockchain for deposit events
+   - Validates and queues events for processing
 
-## Architecture
+2. **Deposit Processing**:
+   - Verifies deposit details and status
+   - Creates database records for tracking
+   - Calculates MON amount based on current exchange rates
 
-The backend consists of several key components:
+3. **Distribution**:
+   - Sends MON tokens to the recipient wallet on Monad
+   - Handles transaction gas estimation and management
+   - Manages nonce for transaction ordering
 
-1. **Event Listener**: Monitors the Arbitrum network for deposit events
-2. **Bridge Service**: Handles the business logic for processing deposits and refunds
-3. **Contract Interfaces**: Interacts with smart contracts on both networks
-4. **API Layer**: Provides HTTP endpoints for frontend integration
-5. **Price Oracle**: Integrates with Chainlink for ETH/USD price feeds
-6. **Admin System**: Manages MON/USD ratio updates securely
-7. **Configuration**: Centralized configuration management
-8. **Logging**: Structured logging with different levels (INFO, WARN, ERROR)
+4. **Status Tracking**:
+   - Updates transaction status in the database
+   - Makes status available via API for frontend integration
+   - Handles error cases and recovery
 
-## Error Handling
+5. **Error Recovery**:
+   - Automatically refunds failed distributions
+   - Retries transactions with appropriate backoff
 
-The service implements robust error handling:
+## Production Deployment
 
-- Failed deposits are automatically queued for refund
-- Network issues trigger automatic reconnection
-- Invalid requests receive appropriate error responses
-- All errors are logged for monitoring
-- Price feed failures fallback to last known good price
+### Docker
+
+The service can be deployed using Docker:
+
+```bash
+docker build -t monad-faucet-backend -f backend/Dockerfile .
+docker run -p 8080:8080 --env-file .env monad-faucet-backend
+```
+
+### Render
+
+The service is configured for deployment on Render:
+
+1. Connect your GitHub repository to Render
+2. Create a new Web Service with:
+   - Environment: Docker
+   - Dockerfile Path: backend/Dockerfile
+   - Add your environment variables in the Render dashboard
 
 ## Logging
 
-The service uses structured logging with different levels:
+The service uses structured logging with different verbosity levels:
 
-- INFO: Normal operation events
-- WARN: Potential issues that don't affect operation
-- ERROR: Critical issues that require attention
-- FATAL: Issues that cause the service to terminate
+- **Production Mode**: Enable by setting `PRODUCTION=true` or when deployed on Render
+  - INFO: Important business events only
+  - ERROR/WARN: All error conditions
+  - DEBUG: Suppressed in production
 
-Important events that are logged include:
-- Deposit events
-- Processing status
-- Refund operations
-- Contract state changes
-- Network connectivity issues
-- Price ratio updates
-- Admin operations
+- **Development Mode**: Default when `PRODUCTION` is not set
+  - Verbose logging of all operations
+  - Detailed calculation information
+  - Transaction processing steps
 
-## Security
+## Monitoring
+
+The service exposes metrics for monitoring via the `/bridge/metrics` endpoint.
+
+Key metrics include:
+- System uptime
+- Request count
+- Distribution success rate
+- Pending transactions
+- Current MON balance
+
+## Security Considerations
 
 1. **Admin Access**:
    - Two separate admin keys for redundancy and security
-   - API key authentication required for ratio updates
-   - Keys stored in environment variables
-   - Recommended to use long, random strings (32+ characters)
+   - API key authentication required for admin operations
+   - Keys should be long, random strings (32+ characters)
 
 2. **Transaction Safety**:
    - Gas price estimation with safety buffer
@@ -307,31 +387,10 @@ Important events that are logged include:
    - Receipt verification for all transactions
    - Automatic refunds for failed operations
 
-## Development
-
-To run the service in development mode:
-
-```bash
-go run cmd/faucet/main.go
-```
-
-For testing:
-
-```bash
-go test ./...
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a new Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+3. **Database Security**:
+   - Connection pooling with configurable limits
+   - Parameterized queries to prevent SQL injection
+   - Transaction-level consistency for critical operations
 
 ## Wallet Limits
 
@@ -347,17 +406,14 @@ The service implements wallet-based distribution limits to prevent abuse:
    - No time-based tracking of wallet usage
    - Each transaction is evaluated independently
 
-3. **Validation**:
-   - Deposits are validated against wallet limits before processing
-   - If a wallet exceeds its limit, the deposit is rejected and refunded
-   - Detailed error messages indicate the maximum allowed amount
+## Contributing
 
-4. **Admin Control**:
-   - Administrators can adjust the limit percentage via API
-   - Setting the limit to 0 disables the limit entirely
-   - Useful for promotional periods or adjusting to demand
+1. Fork the repository
+2. Create your feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a new Pull Request
 
-5. **Transparency**:
-   - Current wallet limit is included in the `/api/info` endpoint
-   - Frontend can display this information to users
-   - When limits are disabled, the API returns "No limit" for the wallet limit 
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details. 

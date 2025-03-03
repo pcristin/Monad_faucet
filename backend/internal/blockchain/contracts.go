@@ -124,7 +124,7 @@ func calculateSwapRatios(ethUsdPrice *big.Int) map[CurrencyType]*big.Int {
 	)
 
 	// Log this value for debugging
-	logger.Info("MON per USD (float calculation): %s", monPerUsd.Text('f', 6))
+	logger.Debug("MON per USD (float calculation): %s", monPerUsd.Text('f', 6))
 
 	// Calculate MON wei per smallest USD unit (divide by 10^6 since USDT/USDC have 6 decimals)
 	// For 5.88 MON per USD, this would be 5.88 * 10^18 / 10^6 = 5.88 * 10^12 wei
@@ -162,27 +162,32 @@ func calculateSwapRatios(ethUsdPrice *big.Int) map[CurrencyType]*big.Int {
 	ratios[CurrencyETH] = new(big.Int).Div(monUsdScaled, ethUsdPriceScaled)
 
 	// Log detailed calculation values for debugging
-	logger.Info("MON/USD ratio: %s (%s USD per 1 MON)",
+	logger.Debug("MON/USD ratio: %s (%s USD per 1 MON)",
 		monUsdRatio.String(),
 		formatBigIntAsFloat(monUsdRatio, 18))
-	logger.Info("ETH/USD price: %s (%s USD per 1 ETH)",
+	logger.Debug("ETH/USD price: %s (%s USD per 1 ETH)",
 		ethUsdPrice.String(),
 		formatBigIntAsFloat(ethUsdPrice, 8))
-	logger.Info("Calculated ETH/MON ratio: %s (1 MON = %s ETH)",
+	logger.Debug("Calculated ETH/MON ratio: %s (1 MON = %s ETH)",
 		ratios[CurrencyETH].String(),
 		formatBigIntAsFloat(ratios[CurrencyETH], 18))
 
-	// Log USD token ratio values with more details
-	logger.Info("USDT/USDC ratio: %s (MON wei per smallest USDT/USDC unit)",
+	// Log only important exchange rates at INFO level
+	logger.Info("Exchange rates: 1 MON = %s USD, 1 MON = %s ETH",
+		formatBigIntAsFloat(monUsdRatio, 18),
+		formatBigIntAsFloat(ratios[CurrencyETH], 18))
+
+	// Log USD token ratio values with more details at DEBUG level
+	logger.Debug("USDT/USDC ratio: %s (MON wei per smallest USDT/USDC unit)",
 		monWeiPerSmallestUsd.String())
 
 	// Pre-calculate and log what 0.25 USDT (250000 units) would yield for debugging
 	expectedMon := new(big.Int).Mul(monWeiPerSmallestUsd, big.NewInt(250000))
-	logger.Info("Expect 0.25 USDT to yield approximately %s MON",
+	logger.Debug("Expect 0.25 USDT to yield approximately %s MON",
 		formatBigIntAsFloat(expectedMon, 18))
 
 	// Also log the theoretical calculation for 1 USDT to yield how many MON
-	logger.Info("Float calculation: 1 USD should yield %s MON (theoretical)", monPerUsd.Text('f', 6))
+	logger.Debug("Float calculation: 1 USD should yield %s MON (theoretical)", monPerUsd.Text('f', 6))
 
 	return ratios
 }

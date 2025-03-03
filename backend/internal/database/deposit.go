@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
 // Deposit represents a deposit transaction from Arbitrum
@@ -54,21 +55,21 @@ func (db *DB) UpdateDepositStatus(depositID *big.Int, status string) error {
 	}
 
 	depositIDStr := depositID.String()
-	fmt.Printf("Updating deposit status for ID %s to %s\n", depositIDStr, status)
+	logger.Info("Updating deposit status for ID %s to %s", depositIDStr, status)
 
 	// First check if the deposit exists
 	var exists bool
 	err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM deposits WHERE deposit_id = $1)", depositIDStr).Scan(&exists)
 	if err != nil {
-		fmt.Printf("Error checking if deposit exists: %v\n", err)
+		logger.Error("Error checking if deposit exists: %v", err)
 		// Continue anyway to try the update
 	} else if !exists {
-		fmt.Printf("Deposit ID %s not found in deposits table. Attempting to create from transaction record.\n", depositIDStr)
+		logger.Warn("Deposit ID %s not found in deposits table. Attempting to create from transaction record.", depositIDStr)
 
 		// Try to find the transaction record to get the data we need
 		tx, err := db.GetTransactionByDepositID(depositID)
 		if err != nil || tx == nil {
-			fmt.Printf("Could not find transaction record for deposit ID %s: %v\n", depositIDStr, err)
+			logger.Error("Could not find transaction record for deposit ID %s: %v", depositIDStr, err)
 			return fmt.Errorf("deposit does not exist and could not create: %w", err)
 		}
 
@@ -83,20 +84,49 @@ func (db *DB) UpdateDepositStatus(depositID *big.Int, status string) error {
 			Status:        status,
 		}
 
-		fmt.Printf("Creating deposit record for ID %s with wallet %s, amount %s\n",
+		logger.Info("Creating deposit record for ID %s with wallet %s, amount %s",
 			depositIDStr, deposit.WalletAddress.Hex(), deposit.Amount.String())
 
 		if err := db.CreateDeposit(deposit); err != nil {
-			fmt.Printf("Failed to create deposit record: %v\n", err)
+			logger.Error("Failed to create deposit record: %v", err)
 			// Continue with the update anyway in case the error was due to race condition
 		} else {
-			fmt.Printf("Successfully created deposit record for ID %s\n", depositIDStr)
+			logger.Info("Successfully created deposit record for ID %s", depositIDStr)
 			return nil // We've created with the correct status, so no need to update
 		}
 	}
 
 	// Proceed with the update
-	result, err := db.Exec(
+	// Use a transaction to ensure atomicity
+	dbTx, err := db.Begin()
+	if err != nil {
+		logger.Error("Failed to begin transaction for updating deposit status: %v", err)
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
+	defer func() {
+		if err != nil {
+			if rbErr := dbTx.Rollback(); rbErr != nil {
+				logger.Error("Failed to rollback transaction: %v", rbErr)
+			}
+		}
+	}()
+
+	// Get current status for logging
+	var currentStatus string
+	err = dbTx.QueryRow("SELECT status FROM deposits WHERE deposit_id = $1", depositIDStr).Scan(&currentStatus)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			logger.Warn("Deposit ID %s not found when checking current status", depositIDStr)
+		} else {
+			logger.Error("Error getting current status: %v", err)
+		}
+		// Continue with update anyway
+	} else {
+		logger.Info("Current status for deposit ID %s is %s, updating to %s", depositIDStr, currentStatus, status)
+	}
+
+	result, err := dbTx.Exec(
 		`UPDATE deposits 
 		SET status = $1, updated_at = CURRENT_TIMESTAMP 
 		WHERE deposit_id = $2`,
@@ -104,17 +134,34 @@ func (db *DB) UpdateDepositStatus(depositID *big.Int, status string) error {
 		depositIDStr,
 	)
 	if err != nil {
-		fmt.Printf("Error updating deposit status: %v\n", err)
+		logger.Error("Error updating deposit status: %v", err)
 		return fmt.Errorf("failed to update deposit status: %w", err)
 	}
 
 	rows, err := result.RowsAffected()
 	if err != nil {
-		fmt.Printf("Error getting affected rows: %v\n", err)
+		logger.Error("Error getting affected rows: %v", err)
 	} else if rows == 0 {
-		fmt.Printf("Warning: No rows affected when updating deposit ID %s. Deposit might not exist.\n", depositIDStr)
+		logger.Warn("No rows affected when updating deposit ID %s. Deposit might not exist.", depositIDStr)
 	} else {
-		fmt.Printf("Successfully updated status for deposit ID %s to %s (%d rows affected)\n", depositIDStr, status, rows)
+		logger.Info("Successfully updated status for deposit ID %s to %s (%d rows affected)", depositIDStr, status, rows)
+	}
+
+	// Commit the transaction
+	if err = dbTx.Commit(); err != nil {
+		logger.Error("Failed to commit transaction: %v", err)
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// Double-check the update was successful
+	var updatedStatus string
+	err = db.QueryRow("SELECT status FROM deposits WHERE deposit_id = $1", depositIDStr).Scan(&updatedStatus)
+	if err != nil {
+		logger.Error("Failed to verify deposit status update: %v", err)
+	} else if updatedStatus != status {
+		logger.Error("Status verification failed: expected %s but got %s", status, updatedStatus)
+	} else {
+		logger.Info("Verified deposit status update: ID %s now has status %s", depositIDStr, updatedStatus)
 	}
 
 	return nil
