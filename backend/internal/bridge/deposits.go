@@ -19,6 +19,7 @@ import (
 // processDeposit processes a single deposit event.
 func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 	startTime := time.Now()
+	logger.Info("Starting deposit processing for ID %s, amount %s", event.DepositId.String(), event.Amount.String())
 	if s.isProcessingDeposit(event.DepositId) {
 		logger.Warn("Skipping duplicate processing for deposit ID %s", event.DepositId.String())
 		return nil
@@ -39,11 +40,14 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 	ctx, cancel := context.WithTimeout(s.ctx, 3*time.Minute)
 	defer cancel()
 
+	logger.Info("Getting bridge state for deposit ID %s", event.DepositId.String())
 	state, err := s.GetState(ctx)
 	if err != nil {
+		logger.Error("Failed to get bridge state: %v", err)
 		return fmt.Errorf("failed to get bridge state: %w", err)
 	}
 	if state.IsPaused {
+		logger.Error("Bridge is paused, rejecting deposit ID %s", event.DepositId.String())
 		return fmt.Errorf("bridge is currently paused")
 	}
 
@@ -56,12 +60,14 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 	}
 
 	// Calculate MON amount with detailed logging
+	logger.Info("Calculating MON amount for deposit ID %s", event.DepositId.String())
 	monAmount := calculateMonAmount(event.Amount, swapRatio, event.Currency)
 	logger.Info("Calculated MON amount: %s from deposit amount: %s %s",
 		formatMonAmount(monAmount), event.Amount.String(),
 		blockchain.CurrencyTypeToString(event.Currency))
 
 	// Create or update transaction record in database
+	logger.Info("Ensuring transaction record exists for deposit ID %s", event.DepositId.String())
 	dbTransaction, err := s.ensureTransactionRecord(event, monAmount)
 	if err != nil {
 		logger.Error("Failed to ensure transaction record: %v", err)
@@ -72,26 +78,36 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 		return nil
 	}
 
+	logger.Info("Validating deposit ID %s", event.DepositId.String())
 	if err := s.validateDepositWithAmount(state, event, monAmount); err != nil {
+		logger.Error("Deposit validation failed for ID %s: %v", event.DepositId.String(), err)
+		logger.Info("Updating transaction status to failed for deposit ID %s", event.DepositId.String())
 		_ = s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusFailed, "")
+		logger.Info("Queueing refund for deposit ID %s", event.DepositId.String())
 		s.QueueRefund(event.DepositId)
 		return fmt.Errorf("invalid deposit: %w", err)
 	}
 
+	logger.Info("Waiting for confirmations for deposit ID %s, block %d", event.DepositId.String(), event.BlockNumber)
 	if err := s.waitForConfirmations(ctx, event.BlockNumber, 10); err != nil {
+		logger.Error("Failed to wait for confirmations for deposit ID %s: %v", event.DepositId.String(), err)
+		logger.Info("Updating transaction status to failed for deposit ID %s", event.DepositId.String())
 		_ = s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusFailed, "")
+		logger.Info("Queueing refund for deposit ID %s", event.DepositId.String())
 		s.QueueRefund(event.DepositId)
 		return fmt.Errorf("failed to wait for confirmations: %w", err)
 	}
 
-	logger.Info("Minting %s MON tokens for wallet %s", formatMonAmount(monAmount), event.Depositor.Hex())
+	logger.Info("Minting %s MON tokens for wallet %s (deposit ID %s)", formatMonAmount(monAmount), event.Depositor.Hex(), event.DepositId.String())
 
 	// Last-minute duplicate prevention.
+	logger.Info("Checking for existing transaction for deposit ID %s", event.DepositId.String())
 	if txHash, exists := s.checkExistingTransaction(ctx, event.DepositId); exists {
 		logger.Info("Duplicate prevention: deposit ID %s already processed with tx %s", event.DepositId.String(), txHash)
 		return nil
 	}
 
+	logger.Info("Initiating token minting for deposit ID %s", event.DepositId.String())
 	txHash, err := s.mintTokens(ctx, event.Depositor, monAmount, event.DepositId)
 	if err != nil {
 		if strings.Contains(err.Error(), "already completed") ||
@@ -99,14 +115,15 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 			strings.Contains(err.Error(), "duplicate mint attempt") {
 			logger.Warn("Skipping refund for duplicate mint attempt: %v", err)
 			if txHash != "" {
-				logger.Info("Found completed tx %s, updating status", txHash)
+				logger.Info("Found completed tx %s, updating status for deposit ID %s", txHash, event.DepositId.String())
 				_ = s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusCompleted, txHash)
 			}
 			return fmt.Errorf("duplicate mint attempt: %w", err)
 		}
-		logger.Error("Mint tokens failed: %v. Deposit: %v", err, event)
-		// Update status to failed
+		logger.Error("Mint tokens failed for deposit ID %s: %v", event.DepositId.String(), err)
+		logger.Info("Updating transaction status to failed for deposit ID %s", event.DepositId.String())
 		_ = s.UpdateTransactionStatus(ctx, event.DepositId, database.StatusFailed, "")
+		logger.Info("Queueing refund for deposit ID %s", event.DepositId.String())
 		s.QueueRefund(event.DepositId)
 		return fmt.Errorf("failed to mint tokens: %w", err)
 	}
@@ -146,16 +163,20 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 // If a record exists, it returns it. If not, it creates a new record.
 func (s *BridgeService) ensureTransactionRecord(event blockchain.DepositEvent, monAmount *big.Int) (*database.Transaction, error) {
 	// First check if the transaction already exists
+	logger.Info("Checking for existing transaction record for deposit ID %s", event.DepositId.String())
 	existingTx, err := s.db.GetTransactionByDepositID(event.DepositId)
 	if err == nil && existingTx != nil {
 		logger.Info("Found existing transaction record for deposit ID %s: status=%s",
 			event.DepositId.String(), existingTx.Status)
 		return existingTx, nil
+	} else if err != nil {
+		logger.Warn("Error looking up existing transaction for deposit ID %s: %v (will create new record)",
+			event.DepositId.String(), err)
 	}
 
 	// Create a new transaction record
-	logger.Info("Creating new transaction record for deposit ID %s from wallet %s",
-		event.DepositId.String(), event.Depositor.Hex())
+	logger.Info("Creating new transaction record for deposit ID %s from wallet %s, amount %s",
+		event.DepositId.String(), event.Depositor.Hex(), event.Amount.String())
 
 	txRecord := &database.Transaction{
 		DepositID:     event.DepositId,
@@ -167,12 +188,33 @@ func (s *BridgeService) ensureTransactionRecord(event blockchain.DepositEvent, m
 		TxHash:        event.TxHash,
 	}
 
-	if err := s.db.CreateTransaction(txRecord); err != nil {
-		logger.Error("Failed to create transaction record: %v", err)
-		return nil, fmt.Errorf("failed to create transaction record: %w", err)
+	// Try multiple times to create the transaction
+	var createErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		logger.Info("Attempt %d/3: Creating transaction record for deposit ID %s",
+			attempt, event.DepositId.String())
+
+		if err := s.db.CreateTransaction(txRecord); err != nil {
+			createErr = err
+			logger.Error("Failed to create transaction record (attempt %d/3): %v",
+				attempt, err)
+			time.Sleep(time.Duration(attempt*100) * time.Millisecond)
+			continue
+		}
+
+		// Creation successful
+		createErr = nil
+		break
+	}
+
+	if createErr != nil {
+		logger.Error("All attempts to create transaction record failed for deposit ID %s: %v",
+			event.DepositId.String(), createErr)
+		return nil, fmt.Errorf("failed to create transaction record: %w", createErr)
 	}
 
 	// Verify the transaction was created
+	logger.Info("Verifying transaction record was created for deposit ID %s", event.DepositId.String())
 	verifyTx, err := s.db.GetTransactionByDepositID(event.DepositId)
 	if err != nil {
 		logger.Error("Failed to verify transaction creation: %v", err)

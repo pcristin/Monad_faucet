@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
 // CurrencyType represents the type of currency
@@ -77,7 +78,7 @@ func (db *DB) UpdateTransactionStatus(depositID *big.Int, status, txHash string)
 	depositIDStr := depositID.String()
 
 	// Add explicit logging for debugging
-	fmt.Printf("Updating transaction status for deposit ID %s: status=%s, txHash=%s\n",
+	logger.Info("Updating transaction status for deposit ID %s: status=%s, txHash=%s",
 		depositIDStr, status, txHash)
 
 	// Implement retry logic (3 attempts)
