@@ -116,27 +116,23 @@ func calculateSwapRatios(ethUsdPrice *big.Int) map[CurrencyType]*big.Int {
 	ratios[CurrencyUSDC] = usdTokenRatio
 	ratios[CurrencyUSDT] = usdTokenRatio
 
-	// For ETH: amount = (ETH/USD price) / (MON/USD ratio)
-	// This gives us the ETH/MON ratio (how much ETH equals 1 MON)
+	// For ETH: We need to calculate how much ETH 1 MON costs
 	// ETH/USD is returned with 8 decimals from Chainlink
-	// We need to scale our calculations appropriately
+	// monUsdRatio has 18 decimals
 
-	// To calculate ETH/MON we need:
-	// ETH/MON = (MON/USD) / (ETH/USD) * 10^18
-	// If 1 ETH = $2000 and 1 MON = $0.17, then:
-	// 1 MON = 0.000085 ETH ($0.17/$2000)
+	// To calculate ETH per 1 MON:
+	// formula: ETH/MON = (MON/USD) / (ETH/USD)
+	// If 1 MON = $0.17 and 1 ETH = $2000, then 1 MON = 0.000085 ETH ($0.17/$2000)
 
-	// First, we need a scaled version of monUsdRatio to ensure precision
-	// monUsdRatio is MON/USD with 18 decimals (e.g., 0.17 * 10^18)
-	// ETH/USD from Chainlink has 8 decimals (e.g., 2000 * 10^8)
+	// With decimal scaling:
+	// monUsdRatio is 0.17 * 10^18
+	// ethUsdPrice is 2000 * 10^8
+	// We need to scale monUsdRatio by 10^10 to match decimal places after division
 
-	// To get ETH per 1 MON:
-	// (MON/USD * 10^18) * 10^18 / (ETH/USD * 10^8) = MON/USD * 10^28 / ETH/USD
+	// Scale monUsdRatio by 10^10 (to account for ETH/USD having 8 decimals instead of 18)
+	monUsdScaled := new(big.Int).Mul(monUsdRatio, new(big.Int).Exp(big.NewInt(10), big.NewInt(10), nil))
 
-	// Scale monUsdRatio further (add 10 more decimals) to maintain precision after division
-	monUsdScaled := new(big.Int).Mul(monUsdRatio, new(big.Int).Exp(big.NewInt(10), big.NewInt(28), nil))
-
-	// Divide by ETH/USD to get ETH/MON ratio with 18 decimals precision
+	// Divide to get ETH/MON ratio in wei (18 decimals)
 	ratios[CurrencyETH] = new(big.Int).Div(monUsdScaled, ethUsdPrice)
 
 	// Log the calculated ratio for debugging
