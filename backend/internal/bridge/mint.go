@@ -26,26 +26,10 @@ func (s *BridgeService) validateDepositWithAmount(state *blockchain.ContractStat
 	if state.MonBalance.Cmp(monAmount) < 0 {
 		return fmt.Errorf("insufficient MON balance in distributor")
 	}
-	var out []interface{}
-	var method string
-	switch event.Currency {
-	case blockchain.CurrencyETH:
-		method = "minEthDeposit"
-	case blockchain.CurrencyUSDC:
-		method = "minUsdcDeposit"
-	case blockchain.CurrencyUSDT:
-		method = "minUsdtDeposit"
-	default:
-		return fmt.Errorf("unsupported currency type")
-	}
-	err := s.arbDepositor.BoundContract.Call(&bind.CallOpts{Context: s.ctx}, &out, method)
-	if err != nil {
-		return fmt.Errorf("failed to get min amount for %s: %v", blockchain.CurrencyTypeToString(event.Currency), err)
-	}
-	minAmount := out[0].(*big.Int)
-	if event.Amount.Cmp(minAmount) < 0 {
-		return fmt.Errorf("deposit amount below minimum for %s", blockchain.CurrencyTypeToString(event.Currency))
-	}
+
+	// Minimum deposit validation removed - this check is already done at the smart contract level.
+	// If a deposit event was emitted, it means the minimum amount check has already passed on-chain.
+
 	return nil
 }
 
