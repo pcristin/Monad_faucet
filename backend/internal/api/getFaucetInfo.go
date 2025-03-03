@@ -72,30 +72,34 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 				// Get the MON/USD ratio (e.g., 0.1 * 10^18 for 0.1 USD per 1 MON)
 				monUsdRatio := blockchain.GetMonUsdRatio()
 
-				// Convert to USDC/USDT per MON
-				currencyPerMon = new(big.Float).Quo(
-					new(big.Float).SetInt(monUsdRatio),
-					new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-				)
-			} else {
-				// For ETH: The ETH/MON ratio represents how much ETH equals 1 MON
-				// The stored ratio is ETH/MON in wei with 18 decimals precision
-				// We display this directly as the exchange rate
-				currencyPerMon = new(big.Float).Quo(
-					new(big.Float).SetInt(ratio),
-					new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-				)
+				// Scale appropriately with USDC/USDT's 6 decimals
+				currencyDecimals := int64(6)
+				usdScalingFactor := new(big.Int).Exp(big.NewInt(10), big.NewInt(currencyDecimals), nil)
 
-				logger.Debug("ETH exchange rate: ratio=%s, calculated=%s ETH per MON",
-					ratio.String(), currencyPerMon.Text('f', 18))
-			}
+				// Calculate USDC/USDT per MON
+				scaledMonUsdRatio := new(big.Int).Mul(monUsdRatio, usdScalingFactor)
+				currencyPerMon = new(big.Float).SetInt(scaledMonUsdRatio)
+				divisorUsd := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18+currencyDecimals), nil))
+				currencyPerMon = new(big.Float).Quo(currencyPerMon, divisorUsd)
 
-			// For ETH, use 18 decimals of precision; for other currencies, use 6
-			decimals := 6
-			if currency == blockchain.CurrencyETH {
-				decimals = 18
+				logger.Debug("Calculated %s per 1 MON: %s", blockchain.CurrencyTypeToString(currency), currencyPerMon.Text('f', 6))
+
+				// Format with 6 decimal places for USD-based tokens
+				exchangeRates[blockchain.CurrencyTypeToString(currency)] = currencyPerMon.Text('f', 6)
+			} else if currency == blockchain.CurrencyETH {
+				// For ETH, the ratio directly represents how much ETH 1 MON costs
+				// The ratio is already in wei (10^18 decimals)
+
+				// Create a big.Float from the ratio
+				currencyPerMon = new(big.Float).SetInt(ratio)
+
+				// Format with 18 decimal places for ETH (standard ETH precision)
+				// This displays the ETH amount in its standard representation
+				logger.Debug("ETH/MON ratio from state: %s (represents how much ETH equals 1 MON)", ratio.String())
+				logger.Debug("Formatted ETH per 1 MON: %s ETH", currencyPerMon.Text('f', 18))
+
+				exchangeRates[blockchain.CurrencyTypeToString(currency)] = currencyPerMon.Text('f', 18)
 			}
-			exchangeRates[blockchain.CurrencyTypeToString(currency)] = currencyPerMon.Text('f', decimals)
 		} else {
 			// For ETH, use 18 decimals of precision; for other currencies, use 6
 			if currency == blockchain.CurrencyETH {
