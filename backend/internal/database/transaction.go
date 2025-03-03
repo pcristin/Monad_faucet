@@ -214,11 +214,17 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 
 	tx.Currency = CurrencyType(currencyInt)
 
-	tx.MonAmount, ok = new(big.Int).SetString(monAmountStr, 10)
-	if !ok {
-		logger.Warn("Failed to parse MON amount: %s for deposit ID %s, defaulting to 0",
-			monAmountStr, depositIDStr)
+	// Handle potentially NULL mon_amount better
+	if monAmountStr == "<nil>" || monAmountStr == "" {
+		logger.Debug("MON amount is NULL for deposit ID %s, defaulting to 0", depositIDStr)
 		tx.MonAmount = big.NewInt(0)
+	} else {
+		tx.MonAmount, ok = new(big.Int).SetString(monAmountStr, 10)
+		if !ok {
+			logger.Warn("Failed to parse MON amount: %s for deposit ID %s, defaulting to 0",
+				monAmountStr, depositIDStr)
+			tx.MonAmount = big.NewInt(0)
+		}
 	}
 
 	logger.Debug("Found transaction for deposit ID %s: status=%s, monadTxHash=%s, monAmount=%s",

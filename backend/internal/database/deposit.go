@@ -49,16 +49,74 @@ func (db *DB) CreateDeposit(deposit *Deposit) error {
 
 // UpdateDepositStatus updates the status of a deposit
 func (db *DB) UpdateDepositStatus(depositID *big.Int, status string) error {
-	_, err := db.Exec(
+	if depositID == nil {
+		return fmt.Errorf("deposit ID is nil")
+	}
+
+	depositIDStr := depositID.String()
+	fmt.Printf("Updating deposit status for ID %s to %s\n", depositIDStr, status)
+
+	// First check if the deposit exists
+	var exists bool
+	err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM deposits WHERE deposit_id = $1)", depositIDStr).Scan(&exists)
+	if err != nil {
+		fmt.Printf("Error checking if deposit exists: %v\n", err)
+		// Continue anyway to try the update
+	} else if !exists {
+		fmt.Printf("Deposit ID %s not found in deposits table. Attempting to create from transaction record.\n", depositIDStr)
+
+		// Try to find the transaction record to get the data we need
+		tx, err := db.GetTransactionByDepositID(depositID)
+		if err != nil || tx == nil {
+			fmt.Printf("Could not find transaction record for deposit ID %s: %v\n", depositIDStr, err)
+			return fmt.Errorf("deposit does not exist and could not create: %w", err)
+		}
+
+		// Create a minimal deposit record
+		deposit := &Deposit{
+			DepositID:     depositID,
+			WalletAddress: tx.WalletAddress,
+			Amount:        tx.Amount,
+			Currency:      tx.Currency,
+			TxHash:        tx.TxHash,
+			BlockNumber:   0, // We don't have this info, but it's not critical
+			Status:        status,
+		}
+
+		fmt.Printf("Creating deposit record for ID %s with wallet %s, amount %s\n",
+			depositIDStr, deposit.WalletAddress.Hex(), deposit.Amount.String())
+
+		if err := db.CreateDeposit(deposit); err != nil {
+			fmt.Printf("Failed to create deposit record: %v\n", err)
+			// Continue with the update anyway in case the error was due to race condition
+		} else {
+			fmt.Printf("Successfully created deposit record for ID %s\n", depositIDStr)
+			return nil // We've created with the correct status, so no need to update
+		}
+	}
+
+	// Proceed with the update
+	result, err := db.Exec(
 		`UPDATE deposits 
 		SET status = $1, updated_at = CURRENT_TIMESTAMP 
 		WHERE deposit_id = $2`,
 		status,
-		depositID.String(),
+		depositIDStr,
 	)
 	if err != nil {
+		fmt.Printf("Error updating deposit status: %v\n", err)
 		return fmt.Errorf("failed to update deposit status: %w", err)
 	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		fmt.Printf("Error getting affected rows: %v\n", err)
+	} else if rows == 0 {
+		fmt.Printf("Warning: No rows affected when updating deposit ID %s. Deposit might not exist.\n", depositIDStr)
+	} else {
+		fmt.Printf("Successfully updated status for deposit ID %s to %s (%d rows affected)\n", depositIDStr, status, rows)
+	}
+
 	return nil
 }
 
