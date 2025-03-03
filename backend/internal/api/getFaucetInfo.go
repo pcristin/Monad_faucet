@@ -88,15 +88,18 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 				exchangeRates[blockchain.CurrencyTypeToString(currency)] = currencyPerMon.Text('f', 6)
 			} else if currency == blockchain.CurrencyETH {
 				// For ETH, the ratio directly represents how much ETH 1 MON costs
-				// The ratio is already in wei (10^18 decimals)
+				// The ratio is in wei with 18 decimals precision
 
 				// Create a big.Float from the ratio
 				currencyPerMon = new(big.Float).SetInt(ratio)
 
-				// Format with 18 decimal places for ETH (standard ETH precision)
-				// This displays the ETH amount in its standard representation
-				logger.Debug("ETH/MON ratio from state: %s (represents how much ETH equals 1 MON)", ratio.String())
-				logger.Debug("Formatted ETH per 1 MON: %s ETH", currencyPerMon.Text('f', 18))
+				// Divide by 10^18 to convert from wei to ETH
+				divisor := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+				currencyPerMon = new(big.Float).Quo(currencyPerMon, divisor)
+
+				logger.Debug("ETH/MON ratio from state: %s (1 MON = %s ETH)",
+					ratio.String(),
+					currencyPerMon.Text('f', 18))
 
 				exchangeRates[blockchain.CurrencyTypeToString(currency)] = currencyPerMon.Text('f', 18)
 			}
