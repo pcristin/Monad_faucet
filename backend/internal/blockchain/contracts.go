@@ -109,13 +109,27 @@ func calculateSwapRatios(ethUsdPrice *big.Int) map[CurrencyType]*big.Int {
 	ratios := make(map[CurrencyType]*big.Int)
 	monUsdRatio := GetMonUsdRatio()
 
-	// For USDC/USDT: amount = (1 USD) / (MON/USD ratio)
-	usdTokenRatio := new(big.Int).Div(
+	// For USDC/USDT which have 6 decimal places:
+	// We want to find how many MON wei (10^18) per smallest USDT unit (10^6)
+	// monUsdRatio is "USD price per 1 MON" in 18 decimals (e.g., 0.17 * 10^18)
+
+	// Step 1: Calculate how many MON you get per 1 USD (smallest unit = 10^6)
+	// monPerUsd = 10^18 / monUsdRatio (this is a value like 5.88 * 10^18)
+	monPerUsd := new(big.Int).Div(
 		new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil),
 		monUsdRatio,
 	)
-	ratios[CurrencyUSDC] = usdTokenRatio
-	ratios[CurrencyUSDT] = usdTokenRatio
+
+	// Step 2: Calculate how many MON wei you get per smallest USD unit (USDT/USDC have 6 decimals)
+	// monWeiPerSmallestUsd = monPerUsd / 10^6 = MON wei per smallest USDT/USDC unit
+	monWeiPerSmallestUsd := new(big.Int).Div(
+		monPerUsd,
+		new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil),
+	)
+
+	// This gives us the number of MON wei per smallest USDT/USDC unit
+	ratios[CurrencyUSDC] = new(big.Int).Set(monWeiPerSmallestUsd)
+	ratios[CurrencyUSDT] = new(big.Int).Set(monWeiPerSmallestUsd)
 
 	// For ETH: To calculate how much ETH 1 MON costs:
 	// If 1 ETH = $2000 (ethUsdPrice) and 1 MON = $0.17 (monUsdRatio)
@@ -145,6 +159,14 @@ func calculateSwapRatios(ethUsdPrice *big.Int) map[CurrencyType]*big.Int {
 	logger.Info("Calculated ETH/MON ratio: %s (1 MON = %s ETH)",
 		ratios[CurrencyETH].String(),
 		formatBigIntAsFloat(ratios[CurrencyETH], 18))
+
+	// Log USD token ratio values
+	logger.Info("USDT/USDC ratio: %s (MON wei per smallest USDT/USDC unit)",
+		monWeiPerSmallestUsd.String())
+	logger.Info("Expect 0.25 USDT to yield approximately %s MON",
+		formatBigIntAsFloat(
+			new(big.Int).Mul(monWeiPerSmallestUsd, big.NewInt(250000)),
+			18))
 
 	return ratios
 }

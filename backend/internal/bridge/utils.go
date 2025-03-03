@@ -62,27 +62,18 @@ func calculateMonAmount(amount *big.Int, swapRatio *big.Int, currency blockchain
 
 	if currency == blockchain.CurrencyUSDT || currency == blockchain.CurrencyUSDC {
 		// USDT and USDC have 6 decimals
-		// The swap ratio is defined as MON wei per USD (with full precision)
+		// The swap ratio is now defined as MON wei per smallest USD unit
+		// So we can directly multiply the amount by the swap ratio
 
 		// First log the raw amount in smallest units
 		logger.Info("Raw USD token amount in smallest units: %s", amountCopy.String())
 
-		// Get USD token decimals (6)
+		// Get USD token decimals (6) for float calculations
 		usdTokenDecimals := new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)
 
-		// Step 1: Calculate the MON amount directly
-		// MON amount = USD amount * (MON/USD ratio)
-		// Where:
-		// - USD amount is in smallest units (e.g., 250000 = 0.25 USDT)
-		// - MON/USD ratio is in wei per 1 full USD
-
-		// Calculate MON wei per smallest USD unit
-		// monPerSmallestUsd = swap_ratio / 10^6
-		monPerSmallestUsd := new(big.Int).Div(swapRatio, usdTokenDecimals)
-		logger.Info("MON wei per smallest USD unit: %s", monPerSmallestUsd.String())
-
-		// Apply ratio: amount of smallest USD units * MON wei per smallest USD unit
-		monAmount = new(big.Int).Mul(amountCopy, monPerSmallestUsd)
+		// Direct calculation: MON amount = USD amount * swap ratio
+		// Where swap ratio is now MON wei per smallest USD unit
+		monAmount = new(big.Int).Mul(amountCopy, swapRatio)
 		logger.Info("Final MON amount in wei: %s", monAmount.String())
 
 		// Validate calculation with float-based approach
@@ -90,17 +81,15 @@ func calculateMonAmount(amount *big.Int, swapRatio *big.Int, currency blockchain
 		depositUsd := new(big.Float).SetInt(amountCopy)
 		depositUsd = new(big.Float).Quo(depositUsd, new(big.Float).SetInt(usdTokenDecimals))
 
-		// Convert swap ratio to MON per USD (float)
-		swapRatioFloat := new(big.Float).SetInt(swapRatio)
-		swapRatioFloat = new(big.Float).Quo(swapRatioFloat, new(big.Float).SetInt(monDecimals))
-
-		// MON = USD value * (MON/USD ratio)
-		expectedMon := new(big.Float).Mul(depositUsd, swapRatioFloat)
+		// Expected MON in USD
+		monUsdRatioValue := new(big.Float).SetInt(blockchain.GetMonUsdRatio())
+		monUsdRatioValue = new(big.Float).Quo(monUsdRatioValue, new(big.Float).SetInt(monDecimals))
+		expectedMon := new(big.Float).Quo(depositUsd, monUsdRatioValue)
 		expectedMonFloat, _ := expectedMon.Float64()
 
 		// Log validation values
 		logger.Info("Deposit amount in USD: %f", depositUsd)
-		logger.Info("Swap ratio (MON per USD): %f", swapRatioFloat)
+		logger.Info("MON/USD ratio: %f", monUsdRatioValue)
 		logger.Info("Expected MON (float check): %f", expectedMonFloat)
 
 		// Convert to a string with fixed decimal places for better logging
@@ -146,7 +135,29 @@ func calculateMonAmount(amount *big.Int, swapRatio *big.Int, currency blockchain
 
 	// Log the final amount to be distributed in a human-readable format
 	monString := formatMonAmount(monAmount)
-	logger.Info("Final MON amount to distribute: %s (%s wei)", monString, monAmount.String())
+	logger.Info("Calculated MON amount: %s from deposit amount: %s %s",
+		monString,
+		formatBigIntAsFloat(amountCopy, blockchain.GetCurrencyDecimals(currency)),
+		blockchain.CurrencyTypeToString(currency))
 
 	return monAmount
+}
+
+// formatBigIntAsFloat formats a big.Int with decimals as a human-readable string
+func formatBigIntAsFloat(value *big.Int, decimals int) string {
+	if value == nil {
+		return "0"
+	}
+
+	// Convert to a big.Float for easier decimal handling
+	floatValue := new(big.Float).SetInt(value)
+
+	// Divide by 10^decimals
+	divisor := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil))
+	result := new(big.Float).Quo(floatValue, divisor)
+
+	// Convert to string with appropriate precision
+	str := result.Text('f', 6) // 6 decimal places should be enough for display
+
+	return str
 }
