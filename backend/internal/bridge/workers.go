@@ -260,7 +260,7 @@ func (pools *BridgeWorkerPools) processDepositJob(ctx context.Context, job *Depo
 		return
 	}
 
-	// 5. Wait for confirmations
+	// 5. Wait for confirmations and mark as processed if successful
 	if err := pools.service.waitForConfirmations(ctx, job.Event.BlockNumber, 10); err != nil {
 		logger.Error("Failed to wait for confirmations: %v", err)
 		pools.DBPool.Submit(&DBWorkerJob{
@@ -271,6 +271,14 @@ func (pools *BridgeWorkerPools) processDepositJob(ctx context.Context, job *Depo
 			},
 		})
 		return
+	} else {
+		pools.DBPool.Submit(&DBWorkerJob{
+			JobType: JobUpdateDepositStatus,
+			Deposit: &database.Deposit{
+				DepositID: job.Event.DepositId,
+				Status:    database.StatusProcessed,
+			},
+		})
 	}
 
 	// 6. Submit to calculation pool
