@@ -55,31 +55,23 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 	exchangeRates := make(map[string]string)
 	for currency, ratio := range state.SwapRatios {
 		if ratio.Sign() > 0 {
-			// The contract returns ratio as "MON wei per smallest unit of currency"
-			// For USDC/USDT with 1 MON = 0.1 USD, the ratio is 10^18 / 0.1 = 10^19
-			// This means 1 smallest unit of USDC (0.000001 USDC) gives 10^19/10^6 = 10^13 MON wei
-			// To get USDC per 1 MON, we need: 10^6 / (10^19/10^18) = 10^6 / 10 = 0.1 USDC
-
-			// For USD-based tokens (USDC/USDT), the ratio directly represents MON/USD ratio
-			// For ETH, we need to calculate based on ETH/USD price
+			// The swap ratio format has changed:
+			// For USDC/USDT: The ratio now represents "MON wei per smallest unit of USDT/USDC"
+			// For ETH: The ratio directly represents how much ETH 1 MON costs in wei
 			var currencyPerMon *big.Float
 
 			if currency == blockchain.CurrencyUSDC || currency == blockchain.CurrencyUSDT {
-				// For USDC/USDT: 1 MON = 0.1 USD, so we need 0.1 USDC/USDT per 1 MON
-				// The ratio is 10^18 / monUsdRatio, so to get USDC per MON:
-				// 10^6 (USDC decimals) / (10^18 / monUsdRatio) * 10^18 = monUsdRatio / 10^12
+				// For USDC/USDT: The ratio is "MON wei per smallest USDT/USDC unit"
+				// We want to display "USDT/USDC per 1 MON"
 
-				// Get the MON/USD ratio (e.g., 0.1 * 10^18 for 0.1 USD per 1 MON)
+				// Get the MON/USD ratio (e.g., 0.17 * 10^18 for 0.17 USD per 1 MON)
 				monUsdRatio := blockchain.GetMonUsdRatio()
 
-				// Scale appropriately with USDC/USDT's 6 decimals
-				currencyDecimals := int64(6)
-				usdScalingFactor := new(big.Int).Exp(big.NewInt(10), big.NewInt(currencyDecimals), nil)
-
-				// Calculate USDC/USDT per MON
-				scaledMonUsdRatio := new(big.Int).Mul(monUsdRatio, usdScalingFactor)
-				currencyPerMon = new(big.Float).SetInt(scaledMonUsdRatio)
-				divisorUsd := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18+currencyDecimals), nil))
+				// Calculate USDC/USDT per MON = MON/USD ratio / 10^(18-decimals)
+				// For USDT/USDC with 6 decimals and MON/USD ratio of 0.17:
+				// USD per MON = 0.17 USD
+				currencyPerMon = new(big.Float).SetInt(monUsdRatio)
+				divisorUsd := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 				currencyPerMon = new(big.Float).Quo(currencyPerMon, divisorUsd)
 
 				logger.Debug("Calculated %s per 1 MON: %s", blockchain.CurrencyTypeToString(currency), currencyPerMon.Text('f', 6))
