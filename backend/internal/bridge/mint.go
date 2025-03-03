@@ -153,11 +153,11 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 
 	// Proceed with minting.
 	transfer := []struct {
-		Recipient common.Address `abi:"recipient"`
-		Amount    *big.Int       `abi:"amount"`
-		ID        *big.Int       `abi:"id"`
+		Recipient common.Address
+		Amount    big.Int
+		Id        big.Int
 	}{
-		{Recipient: recipient, Amount: amount, ID: depositId},
+		{Recipient: recipient, Amount: *amount, Id: *depositId},
 	}
 
 	opts, err := s.monadDistributor.GetTransactOpts(ctx)
