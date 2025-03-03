@@ -138,7 +138,12 @@ func main() {
 				logger.Info("Deposit event received: ID=%s, Amount=%s, Wallet=%s, Currency=%s",
 					deposit.DepositId.String(), deposit.Amount.String(), deposit.Depositor.Hex(),
 					blockchain.CurrencyTypeToString(deposit.Currency))
+
+				// Forward the deposit to the bridge service for processing
+				logger.Info("Forwarding deposit ID=%s to bridge service for immediate database recording and processing",
+					deposit.DepositId.String())
 				bridgeService.HandleDeposit(deposit)
+
 			case err := <-errChan:
 				logger.Error("Error listening for deposits: %v", err)
 			case <-ctx.Done():

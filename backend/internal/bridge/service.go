@@ -9,7 +9,6 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
 	"github.com/pcristin/monad-faucet/internal/database"
-	"github.com/pcristin/monad-faucet/internal/workers"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
@@ -24,10 +23,19 @@ func (s *BridgeService) Start() error {
 		logger.Warn("No worker manager set, skipping worker initialization")
 	}
 
+	// Start deposit processor goroutine
+	s.wg.Add(1)
+	go s.processDeposits()
+
+	// Start refund processor goroutine
+	s.wg.Add(1)
+	go s.processRefunds()
+
 	// Start recovery process for stuck transactions
 	s.wg.Add(1)
 	go s.recoverStuckTransactionsPeriodically()
 
+	logger.Info("Bridge service started successfully, all processors running")
 	return nil
 }
 
@@ -48,21 +56,85 @@ func (s *BridgeService) Stop() error {
 
 // HandleDeposit queues a deposit for processing.
 func (s *BridgeService) HandleDeposit(event blockchain.DepositEvent) {
-	// Create a deposit task and submit it to the worker pool
-	depositTask := &workers.DepositTask{
-		BaseTask:    workers.NewBaseTask("deposit"),
-		DepositID:   event.DepositId.String(),
-		UserAddress: event.Depositor.Hex(),
-		Amount:      event.Amount.String(),
-		TxHash:      event.TxHash,
+	// First ensure the deposit is recorded in the database immediately
+	if err := s.recordDepositImmediately(event); err != nil {
+		logger.Error("Failed to immediately record deposit %s: %v", event.DepositId.String(), err)
 	}
 
+	// Then handle the full processing through the appropriate channel
+	// Check if we're using the worker manager or the direct channel approach
 	if wm := s.GetWorkerManager(); wm != nil {
-		wm.SubmitTask(workers.DepositPool, depositTask)
+		// For worker manager, we need to provide a meaningful task implementation
+		// Since DepositTask.Process() is empty, we're bypassing that worker pool
+		// and directly queuing the event to the deposit channel for processing
+		logger.Info("Queueing deposit ID %s for full processing", event.DepositId.String())
+
+		// Using a separate goroutine to avoid blocking the event listener
+		go func() {
+			select {
+			case s.depositChan <- event:
+				logger.Info("Successfully queued deposit ID %s to processing channel", event.DepositId.String())
+			default:
+				logger.Error("Deposit processing channel full, deposit ID %s may not be processed",
+					event.DepositId.String())
+			}
+		}()
 	} else {
-		// Fallback to the old direct channel approach if no worker manager
+		// Direct channel approach (fallback)
+		logger.Info("Using direct channel for deposit ID %s", event.DepositId.String())
 		s.depositChan <- event
 	}
+}
+
+// recordDepositImmediately creates a deposit record in the database as soon as an event is detected
+// This ensures we don't miss deposits even if the full processing pipeline fails
+func (s *BridgeService) recordDepositImmediately(event blockchain.DepositEvent) error {
+	// Check if this deposit has already been recorded
+	existing, err := s.db.GetDepositByID(event.DepositId)
+	if err == nil && existing != nil {
+		logger.Info("Deposit ID %s already recorded in database", event.DepositId.String())
+		return nil
+	}
+
+	// Create a new deposit record with pending status
+	deposit := &database.Deposit{
+		DepositID:     event.DepositId,
+		WalletAddress: event.Depositor,
+		Amount:        event.Amount,
+		Currency:      database.CurrencyType(event.Currency),
+		TxHash:        event.TxHash,
+		BlockNumber:   event.BlockNumber,
+		Status:        database.StatusPending,
+	}
+
+	// Write to database
+	logger.Info("Immediately recording deposit ID %s from wallet %s, amount %s, tx %s",
+		event.DepositId.String(), event.Depositor.Hex(), event.Amount.String(), event.TxHash)
+
+	if err := s.db.CreateDeposit(deposit); err != nil {
+		return fmt.Errorf("failed to create immediate deposit record: %w", err)
+	}
+
+	// Also create a corresponding transaction record so status lookups work
+	txRecord := &database.Transaction{
+		DepositID:     event.DepositId,
+		WalletAddress: event.Depositor,
+		Amount:        event.Amount,
+		Currency:      database.CurrencyType(event.Currency),
+		Status:        database.StatusPending,
+		TxHash:        event.TxHash,
+	}
+
+	if err := s.db.CreateTransaction(txRecord); err != nil {
+		logger.Warn("Failed to create immediate transaction record for deposit ID %s: %v",
+			event.DepositId.String(), err)
+		// Don't return an error here, the deposit is already recorded which is the main goal
+	} else {
+		logger.Info("Successfully created transaction record for deposit ID %s", event.DepositId.String())
+	}
+
+	logger.Info("Successfully recorded deposit ID %s in database", event.DepositId.String())
+	return nil
 }
 
 // GetState returns the current state of both contracts.

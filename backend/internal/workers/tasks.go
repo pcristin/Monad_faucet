@@ -64,7 +64,16 @@ func (t *DepositTask) Process() error {
 	logger.Info("Processing deposit task %s for user %s, amount %s, tx %s",
 		t.DepositID, t.UserAddress, t.Amount, t.TxHash)
 
-	// TODO: Implement actual deposit processing
+	// Implementation note: This should trigger the creation of a deposit record in the database
+	// immediately to ensure the transaction is recorded. The main BridgeService implementation
+	// will handle the complete processing flow, but we need to ensure we at least write to
+	// the deposits table as soon as the event is detected.
+	//
+	// This is a placeholder for actual implementation that should be provided by the
+	// service this task is submitted to. For now, it just logs the attempt.
+
+	logger.Info("Deposit task %s processed - expecting database record to be created by service",
+		t.DepositID)
 
 	return nil
 }
