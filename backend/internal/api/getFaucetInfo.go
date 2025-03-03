@@ -54,22 +54,21 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 	// Convert swap ratios to exchange rates
 	exchangeRates := make(map[string]string)
 	for currency, ratio := range state.SwapRatios {
-		if ratio.Sign() > 0 {
+		if ratio.Sign() > 0 || currency == blockchain.CurrencyUSDC || currency == blockchain.CurrencyUSDT {
 			// The swap ratio format has changed:
 			// For USDC/USDT: The ratio now represents "MON wei per smallest unit of USDT/USDC"
 			// For ETH: The ratio directly represents how much ETH 1 MON costs in wei
 			var currencyPerMon *big.Float
 
 			if currency == blockchain.CurrencyUSDC || currency == blockchain.CurrencyUSDT {
-				// For USDC/USDT: The ratio is "MON wei per smallest USDT/USDC unit"
+				// For USDC/USDT: We directly use the MON/USD ratio, not the swap ratio
 				// We want to display "USDT/USDC per 1 MON"
 
 				// Get the MON/USD ratio (e.g., 0.17 * 10^18 for 0.17 USD per 1 MON)
 				monUsdRatio := blockchain.GetMonUsdRatio()
 
-				// Calculate USDC/USDT per MON = MON/USD ratio / 10^(18-decimals)
-				// For USDT/USDC with 6 decimals and MON/USD ratio of 0.17:
-				// USD per MON = 0.17 USD
+				// MON/USD ratio directly tells us USD per 1 MON
+				// We just need to convert from wei (10^18) to human-readable form
 				currencyPerMon = new(big.Float).SetInt(monUsdRatio)
 				divisorUsd := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 				currencyPerMon = new(big.Float).Quo(currencyPerMon, divisorUsd)

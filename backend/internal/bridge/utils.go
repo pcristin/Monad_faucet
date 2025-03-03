@@ -73,8 +73,58 @@ func calculateMonAmount(amount *big.Int, swapRatio *big.Int, currency blockchain
 
 		// Direct calculation: MON amount = USD amount * swap ratio
 		// Where swap ratio is now MON wei per smallest USD unit
+		if swapRatio.Sign() == 0 {
+			logger.Warn("Swap ratio for %s is zero! This will result in zero MON distribution.",
+				blockchain.CurrencyTypeToString(currency))
+		}
+
 		monAmount = new(big.Int).Mul(amountCopy, swapRatio)
 		logger.Info("Final MON amount in wei: %s", monAmount.String())
+
+		// Double-check with a manual calculation based on current MON/USD ratio
+		monUsdRatio := blockchain.GetMonUsdRatio()
+		logger.Info("Current MON/USD ratio: %s (%s USD per MON)",
+			monUsdRatio.String(),
+			formatBigIntAsFloat(monUsdRatio, 18))
+
+		// Calculate how many MON you should get from this USD amount
+		// Step 1: Convert amount to USD value
+		usdValue := new(big.Float).Quo(
+			new(big.Float).SetInt(amountCopy),
+			new(big.Float).SetInt(usdTokenDecimals),
+		)
+
+		// Step 2: Calculate theoretical MON amount (USD amount / USD per MON)
+		theoreticalMon := new(big.Float).Quo(
+			usdValue,
+			new(big.Float).Quo(
+				new(big.Float).SetInt(monUsdRatio),
+				new(big.Float).SetInt(monDecimals),
+			),
+		)
+
+		// Step 3: Convert to MON wei
+		theoreticalMonWei := new(big.Float).Mul(
+			theoreticalMon,
+			new(big.Float).SetInt(monDecimals),
+		)
+
+		// Convert to big.Int for comparison
+		theoreticalMonWeiBig, _ := theoreticalMonWei.Int(nil)
+		logger.Info("Theoretical MON amount (calculated from MON/USD ratio): %s wei",
+			theoreticalMonWeiBig.String())
+
+		// Validate that our calculation is reasonable
+		// Allow for some minor difference due to rounding
+		diff := new(big.Int).Sub(monAmount, theoreticalMonWeiBig)
+		diffAbs := new(big.Int).Abs(diff)
+		threshold := new(big.Int).Div(theoreticalMonWeiBig, big.NewInt(100)) // 1% difference threshold
+
+		if diffAbs.Cmp(threshold) > 0 && theoreticalMonWeiBig.Sign() > 0 {
+			logger.Warn("Calculated MON amount differs from theoretical value by more than 1%%!")
+			logger.Warn("Calculated: %s wei, Theoretical: %s wei, Diff: %s wei",
+				monAmount.String(), theoreticalMonWeiBig.String(), diff.String())
+		}
 
 		// Validate calculation with float-based approach
 		// Convert deposit amount to USD value
