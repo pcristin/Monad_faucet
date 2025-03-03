@@ -447,9 +447,6 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 
 // TransactWithGasBuffer is a wrapper around BoundContract.Transact that adds a buffer to gas estimation
 func (m *MonadDistributor) TransactWithGasBuffer(opts *bind.TransactOpts, method string, params ...interface{}) (*types.Transaction, error) {
-	// Store the original gas limit
-	originalGasLimit := opts.GasLimit
-
 	// Set gas limit to 0 to force estimation
 	opts.GasLimit = 0
 
@@ -473,20 +470,37 @@ func (m *MonadDistributor) TransactWithGasBuffer(opts *bind.TransactOpts, method
 		Data: input,
 	}
 
-	// Estimate gas
-	estimatedGas, err := m.Client.EstimateGas(estCtx, msg)
+	// Define maximum reasonable gas limit for Monad
+	// Monad has a lower block gas limit than Ethereum
+	const maxGasLimit uint64 = 1000000    // 1 million gas is a safe upper bound for Monad
+	const defaultGasLimit uint64 = 300000 // Default gas limit if estimation fails
+
+	// Estimate gas with fallback
+	var estimatedGas uint64
+	estimatedGas, err = m.Client.EstimateGas(estCtx, msg)
 	if err != nil {
-		opts.GasLimit = originalGasLimit // restore original gas limit
-		return nil, fmt.Errorf("failed to estimate gas: %v", err)
+		logger.Warn("Gas estimation failed: %v, using default gas limit", err)
+		opts.GasLimit = defaultGasLimit
+		logger.Info("Using default gas limit: %d", defaultGasLimit)
+		// Still continue with the transaction with default gas limit
+	} else {
+		// Add 20% buffer to gas limit
+		bufferedGas := estimatedGas * 12 / 10
+
+		// Ensure gas limit doesn't exceed max
+		if bufferedGas > maxGasLimit {
+			logger.Warn("Estimated gas with buffer (%d) exceeds max limit, capping at %d",
+				bufferedGas, maxGasLimit)
+			opts.GasLimit = maxGasLimit
+		} else {
+			opts.GasLimit = bufferedGas
+		}
+
+		logger.Debug("Gas estimation for %s: estimated=%d, with buffer=%d, final=%d",
+			method, estimatedGas, bufferedGas, opts.GasLimit)
 	}
 
-	// Add 20% buffer to gas limit
-	opts.GasLimit = estimatedGas * 12 / 10
-
-	logger.Debug("Gas estimation for %s: estimated=%d, with buffer=%d",
-		method, estimatedGas, opts.GasLimit)
-
-	// Call the actual Transact method with the buffered gas limit
+	// Call the actual Transact method with our calculated gas limit
 	return m.BoundContract.Transact(opts, method, params...)
 }
 
