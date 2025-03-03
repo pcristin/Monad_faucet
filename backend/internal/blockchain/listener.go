@@ -47,7 +47,7 @@ type EventListener struct {
 	address     common.Address
 }
 
-func NewEventListener(rpcURL string) (*EventListener, error) {
+func NewEventListener(rpcURL string, contractAddress common.Address) (*EventListener, error) {
 	client, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Web3 client: %v", err)
@@ -63,10 +63,19 @@ func NewEventListener(rpcURL string) (*EventListener, error) {
 	listener := &EventListener{
 		client:      client,
 		contractABI: DepositorABI,
-		address:     common.HexToAddress(BridgeAddress),
+		address:     contractAddress,
 	}
 
+	logger.Info("Event listener created for contract address: %s", contractAddress.Hex())
 	return listener, nil
+}
+
+// min returns the smaller of x or y
+func min(x, y int64) int64 {
+	if x < y {
+		return x
+	}
+	return y
 }
 
 func (l *EventListener) ListenToDeposits(ctx context.Context) (<-chan DepositEvent, <-chan error) {
@@ -80,38 +89,74 @@ func (l *EventListener) ListenToDeposits(ctx context.Context) (<-chan DepositEve
 		},
 	}
 
+	logger.Info("Setting up deposit event subscription for contract: %s", l.address.Hex())
+	logger.Info("Event signature: %s", l.contractABI.Events["DepositEvent"].ID.Hex())
+
 	go func() {
 		defer close(events)
 		defer close(errors)
 
+		reconnectAttempt := 0
+		maxReconnectDelay := 60 * time.Second
+		baseReconnectDelay := 5 * time.Second
+
 		for {
 			select {
 			case <-ctx.Done():
+				logger.Info("Context done, stopping deposit event listener")
 				return
 			default:
+				reconnectDelay := time.Duration(min(int64(reconnectAttempt), 10)) * baseReconnectDelay
+				if reconnectDelay > maxReconnectDelay {
+					reconnectDelay = maxReconnectDelay
+				}
+
+				if reconnectAttempt > 0 {
+					logger.Info("Reconnect attempt %d, waiting %v before reconnecting",
+						reconnectAttempt, reconnectDelay)
+					time.Sleep(reconnectDelay)
+				}
+
+				logger.Info("Creating new subscription for deposit events (attempt %d)", reconnectAttempt+1)
 				logs := make(chan types.Log)
 				sub, err := l.client.SubscribeFilterLogs(ctx, query, logs)
 				if err != nil {
+					reconnectAttempt++
+					logger.Error("Failed to subscribe to deposit events (attempt %d): %v",
+						reconnectAttempt, err)
 					errors <- fmt.Errorf("subscription error: %v", err)
-					time.Sleep(5 * time.Second)
 					continue
 				}
+
+				// Reset reconnect counter on successful connection
+				reconnectAttempt = 0
+				logger.Info("Subscription created successfully, waiting for deposit events")
 
 				for {
 					select {
 					case err := <-sub.Err():
+						reconnectAttempt++
+						logger.Error("Subscription error received (attempt %d): %v",
+							reconnectAttempt, err)
 						errors <- fmt.Errorf("subscription error: %v", err)
 						sub.Unsubscribe()
-						time.Sleep(5 * time.Second)
+						logger.Info("Unsubscribed due to error, will reconnect")
 						goto RECONNECT
 					case vLog := <-logs:
+						logger.Info("Received blockchain log event: txHash=%s blockNumber=%d",
+							vLog.TxHash.Hex(), vLog.BlockNumber)
 						event, err := l.parseDepositEvent(vLog)
 						if err != nil {
+							logger.Error("Failed to parse deposit event: %v", err)
 							errors <- fmt.Errorf("parse error: %v", err)
 							continue
 						}
+						logger.Info("Successfully parsed deposit event: ID=%s, Amount=%s, Currency=%s",
+							event.DepositId.String(), event.Amount.String(),
+							CurrencyTypeToString(event.Currency))
 						events <- event
 					case <-ctx.Done():
+						logger.Info("Context done, stopping active subscription")
 						sub.Unsubscribe()
 						return
 					}

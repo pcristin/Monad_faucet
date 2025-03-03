@@ -118,7 +118,8 @@ func main() {
 	defer bridgeService.Stop()
 
 	// Create event listener for Arbitrum deposits
-	listener, err := blockchain.NewEventListener(cfg.ArbRpcURL)
+	logger.Info("Creating event listener for Arbitrum deposits with contract address: %s", cfg.ArbDepositorAddr)
+	listener, err := blockchain.NewEventListener(cfg.ArbRpcURL, common.HexToAddress(cfg.ArbDepositorAddr))
 	if err != nil {
 		logger.Fatal("Failed to create event listener: %v", err)
 	}
@@ -126,6 +127,7 @@ func main() {
 
 	// Start listening for deposit events
 	go func() {
+		logger.Info("Starting to listen for deposit events from Arbitrum contract: %s", cfg.ArbDepositorAddr)
 		// Get deposit events channel
 		depositChan, errChan := listener.ListenToDeposits(ctx)
 
@@ -133,6 +135,9 @@ func main() {
 		for {
 			select {
 			case deposit := <-depositChan:
+				logger.Info("Deposit event received: ID=%s, Amount=%s, Wallet=%s, Currency=%s",
+					deposit.DepositId.String(), deposit.Amount.String(), deposit.Depositor.Hex(),
+					blockchain.CurrencyTypeToString(deposit.Currency))
 				bridgeService.HandleDeposit(deposit)
 			case err := <-errChan:
 				logger.Error("Error listening for deposits: %v", err)
