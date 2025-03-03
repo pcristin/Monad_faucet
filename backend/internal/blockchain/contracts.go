@@ -116,26 +116,31 @@ func calculateSwapRatios(ethUsdPrice *big.Int) map[CurrencyType]*big.Int {
 	ratios[CurrencyUSDC] = usdTokenRatio
 	ratios[CurrencyUSDT] = usdTokenRatio
 
-	// For ETH: We need to calculate how much ETH 1 MON costs
-	// ETH/USD is returned with 8 decimals from Chainlink
-	// monUsdRatio has 18 decimals
-
-	// To calculate ETH per 1 MON:
-	// formula: ETH/MON = (MON/USD) / (ETH/USD)
-	// If 1 MON = $0.17 and 1 ETH = $2000, then 1 MON = 0.000085 ETH ($0.17/$2000)
+	// For ETH: To calculate how much ETH 1 MON costs:
+	// If 1 ETH = $2000 (ethUsdPrice) and 1 MON = $0.17 (monUsdRatio)
+	// Then 1 MON = 0.17/2000 ETH = 0.000085 ETH
 
 	// With decimal scaling:
-	// monUsdRatio is 0.17 * 10^18
-	// ethUsdPrice is 2000 * 10^8
-	// We need to scale monUsdRatio by 10^10 to match decimal places after division
+	// ethUsdPrice from Chainlink has 8 decimals (e.g., 2000 * 10^8)
+	// monUsdRatio has 18 decimals (e.g., 0.17 * 10^18)
 
-	// Scale monUsdRatio by 10^10 (to account for ETH/USD having 8 decimals instead of 18)
-	monUsdScaled := new(big.Int).Mul(monUsdRatio, new(big.Int).Exp(big.NewInt(10), big.NewInt(10), nil))
+	// First convert ethUsdPrice to 18 decimal places to match MON
+	ethUsdPriceScaled := new(big.Int).Mul(ethUsdPrice, new(big.Int).Exp(big.NewInt(10), big.NewInt(10), nil))
 
-	// Divide to get ETH/MON ratio in wei (18 decimals)
-	ratios[CurrencyETH] = new(big.Int).Div(monUsdScaled, ethUsdPrice)
+	// We want (MON/USD) / (ETH/USD) * 10^18 to get the ETH/MON ratio with 18 decimals
+	// This is simplified to: (monUsdRatio * 10^18) / ethUsdPriceScaled
+	monUsdScaled := new(big.Int).Mul(monUsdRatio, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 
-	// Log the calculated ratio for debugging
+	// Calculate ETH/MON ratio
+	ratios[CurrencyETH] = new(big.Int).Div(monUsdScaled, ethUsdPriceScaled)
+
+	// Log detailed calculation values for debugging
+	logger.Info("MON/USD ratio: %s (%s USD per 1 MON)",
+		monUsdRatio.String(),
+		formatBigIntAsFloat(monUsdRatio, 18))
+	logger.Info("ETH/USD price: %s (%s USD per 1 ETH)",
+		ethUsdPrice.String(),
+		formatBigIntAsFloat(ethUsdPrice, 8))
 	logger.Info("Calculated ETH/MON ratio: %s (1 MON = %s ETH)",
 		ratios[CurrencyETH].String(),
 		formatBigIntAsFloat(ratios[CurrencyETH], 18))
