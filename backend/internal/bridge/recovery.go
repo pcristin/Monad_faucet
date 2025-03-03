@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/pcristin/monad-faucet/internal/database"
@@ -70,6 +71,27 @@ func (s *BridgeService) recoverStuckTransactionsPeriodically() {
 }
 
 func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) error {
+	// Check if this deposit has already been refunded to prevent duplicates
+	tx, err := s.db.GetTransactionByDepositID(depositId)
+	if err == nil && (tx.Status == database.StatusRefunded || strings.Contains(tx.Status, "refund")) {
+		logger.Info("Deposit ID %s has already been refunded, skipping duplicate refund", depositId.String())
+		return nil
+	}
+
+	// Update status to "refunding" to prevent concurrent refunds
+	if err := s.UpdateTransactionStatus(ctx, depositId, "refunding", ""); err != nil {
+		logger.Warn("Failed to update status for deposit ID %s: %v, but continuing with refund", depositId.String(), err)
+	}
+
 	logger.Info("Delegating refund for deposit ID %s to ArbitrumDepositor", depositId.String())
-	return s.arbDepositor.RefundDeposit(ctx, depositId)
+	err = s.arbDepositor.RefundDeposit(ctx, depositId)
+
+	// If refund was successful, update status
+	if err == nil {
+		if updateErr := s.UpdateTransactionStatus(ctx, depositId, database.StatusRefunded, ""); updateErr != nil {
+			logger.Warn("Failed to update status after refund for deposit ID %s: %v", depositId.String(), updateErr)
+		}
+	}
+
+	return err
 }
