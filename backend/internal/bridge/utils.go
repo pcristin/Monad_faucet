@@ -100,13 +100,15 @@ func calculateMonAmount(amount *big.Int, swapRatio *big.Int, currency blockchain
 
 	} else if currency == blockchain.CurrencyETH {
 		// ETH has 18 decimals, same as MON
-		// For ETH, the swap ratio already accounts for ETH's USD price and MON's USD price
-		monAmount = new(big.Int).Mul(amountCopy, swapRatio)
-		logger.Info("After applying ETH swap ratio: %s", monAmount.String())
+		// For ETH, the swap ratio is (ETH/USD * 1/MON/USD) with 18 decimals precision
+		// To get MON amount, we need to divide deposit amount by swap ratio:
+		// MON = ETH amount / swap ratio
 
-		// Normalize to MON 18 decimals
-		monAmount = new(big.Int).Div(monAmount, monDecimals)
-		logger.Info("Final normalized ETH->MON amount: %s", monAmount.String())
+		// Make sure we're working with full precision by multiplying first
+		// MON amount = (Deposit amount in wei * 10^18) / swap ratio
+		scaledAmount := new(big.Int).Mul(amountCopy, monDecimals)
+		monAmount = new(big.Int).Div(scaledAmount, swapRatio)
+		logger.Info("After applying ETH swap ratio: %s", monAmount.String())
 
 	} else {
 		logger.Warn("Unknown currency type %d, using default calculation", currency)

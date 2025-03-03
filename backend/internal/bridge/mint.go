@@ -178,6 +178,13 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		return "", fmt.Errorf("distribution tx failed")
 	}
 
+	// Create distribution record
+	err = s.createDistributionRecord(depositId, recipient, amount, database.DistStatusCompleted, txHash)
+	if err != nil {
+		logger.Error("Failed to create distribution record: %v", err)
+		// Continue anyway since the actual transaction was successful
+	}
+
 	// Retry updating DB status up to 3 times.
 	for i := 0; i < 3; i++ {
 		if err := s.UpdateTransactionStatus(ctx, depositId, database.StatusCompleted, txHash); err != nil {
@@ -205,4 +212,27 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		logger.Error("Failed to verify tx status: %v", err)
 	}
 	return txHash, nil
+}
+
+// createDistributionRecord creates a record in the distributions table
+func (s *BridgeService) createDistributionRecord(depositId *big.Int, recipient common.Address, amount *big.Int, status, txHash string) error {
+	// First check if a record already exists to avoid duplicates
+	existingDist, err := s.db.GetDistributionByDepositID(depositId)
+	if err == nil && existingDist != nil {
+		logger.Info("Distribution record already exists for deposit ID %s, updating status", depositId.String())
+		return s.db.UpdateDistributionStatus(depositId, status, txHash)
+	}
+
+	// Create new distribution record
+	dist := &database.Distribution{
+		DepositID:     depositId,
+		WalletAddress: recipient,
+		MonAmount:     amount,
+		Status:        status,
+		MonadTxHash:   txHash,
+	}
+
+	logger.Info("Creating distribution record for deposit ID %s with amount %s and status %s",
+		depositId.String(), amount.String(), status)
+	return s.db.CreateDistribution(dist)
 }

@@ -207,7 +207,8 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 
 	tx.Amount, ok = new(big.Int).SetString(amountStr, 10)
 	if !ok {
-		fmt.Printf("Failed to parse amount: %s\n", amountStr)
+		logger.Warn("Failed to parse amount: %s for deposit ID %s, defaulting to 0",
+			amountStr, depositIDStr)
 		tx.Amount = big.NewInt(0)
 	}
 
@@ -215,11 +216,12 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 
 	tx.MonAmount, ok = new(big.Int).SetString(monAmountStr, 10)
 	if !ok {
-		fmt.Printf("Failed to parse MON amount: %s\n", monAmountStr)
+		logger.Warn("Failed to parse MON amount: %s for deposit ID %s, defaulting to 0",
+			monAmountStr, depositIDStr)
 		tx.MonAmount = big.NewInt(0)
 	}
 
-	fmt.Printf("Found transaction for deposit ID %s: status=%s, monadTxHash=%s, monAmount=%s\n",
+	logger.Debug("Found transaction for deposit ID %s: status=%s, monadTxHash=%s, monAmount=%s",
 		depositIDStr, tx.Status, tx.MonadTxHash, tx.MonAmount.String())
 
 	return &tx, nil

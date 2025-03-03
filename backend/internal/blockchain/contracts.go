@@ -116,12 +116,41 @@ func calculateSwapRatios(ethUsdPrice *big.Int) map[CurrencyType]*big.Int {
 	ratios[CurrencyUSDC] = usdTokenRatio
 	ratios[CurrencyUSDT] = usdTokenRatio
 
-	// For ETH: amount = (ETH/USD price) * (1/MON/USD ratio)
+	// For ETH: amount = (ETH/USD price) / (MON/USD ratio)
+	// This gives us the ETH/MON ratio (how much ETH per 1 MON)
 	ethUsdPriceWith18Decimals := new(big.Int).Mul(ethUsdPrice, new(big.Int).Exp(big.NewInt(10), big.NewInt(10), nil))
-	ratios[CurrencyETH] = new(big.Int).Mul(ethUsdPriceWith18Decimals, usdTokenRatio)
-	ratios[CurrencyETH] = new(big.Int).Div(ratios[CurrencyETH], new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+
+	// First calculate ETH/USD * 10^18 to get full precision
+	ethUsdScaled := new(big.Int).Mul(ethUsdPriceWith18Decimals, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+
+	// Then divide by MON/USD to get ETH/MON ratio
+	ratios[CurrencyETH] = new(big.Int).Div(ethUsdScaled, monUsdRatio)
+
+	// Log the calculated ratio for debugging
+	logger.Info("Calculated ETH/MON ratio: %s (1 MON = %s ETH)",
+		ratios[CurrencyETH].String(),
+		formatBigIntAsFloat(ratios[CurrencyETH], 18))
 
 	return ratios
+}
+
+// formatBigIntAsFloat formats a big.Int with decimals as a human-readable string
+func formatBigIntAsFloat(value *big.Int, decimals int) string {
+	if value == nil {
+		return "0"
+	}
+
+	// Convert to a big.Float for easier decimal handling
+	floatValue := new(big.Float).SetInt(value)
+
+	// Divide by 10^decimals
+	divisor := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil))
+	result := new(big.Float).Quo(floatValue, divisor)
+
+	// Convert to string with appropriate precision
+	str := result.Text('f', 8) // 8 decimal places should be enough for display
+
+	return str
 }
 
 // Chainlink ETH/USD Price Feed address on Arbitrum
