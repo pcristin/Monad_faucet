@@ -109,27 +109,35 @@ func calculateSwapRatios(ethUsdPrice *big.Int) map[CurrencyType]*big.Int {
 	ratios := make(map[CurrencyType]*big.Int)
 	monUsdRatio := GetMonUsdRatio()
 
-	// For USDC/USDT which have 6 decimal places:
-	// We want to find how many MON wei (10^18) per smallest USDT unit (10^6)
+	// For USDC/USDT, we want to calculate MON wei per smallest USDT/USDC unit
 	// monUsdRatio is "USD price per 1 MON" in 18 decimals (e.g., 0.17 * 10^18)
 
-	// To prevent integer division loss of precision, we need to scale up before dividing
-	// monPerUsd = 10^36 / monUsdRatio, which gives us much higher precision
-	bigMultiplier := new(big.Int).Exp(big.NewInt(10), big.NewInt(36), nil) // 10^36
-	monPerUsd := new(big.Int).Div(bigMultiplier, monUsdRatio)
+	// Instead of integer division which loses precision, use a completely different approach
+	// 1. Calculate how many MON per USD (float): 1/0.17 = 5.88 MON per USD
+	// 2. Convert to MON wei per smallest USD unit
 
-	// Now divide by 10^6 (USDT/USDC decimals) to get MON wei per smallest USDT/USDC unit
-	// Final result will have 10^30 scaling (10^36 / 10^6)
-	monWeiPerSmallestUsd := new(big.Int).Div(
-		monPerUsd,
-		new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil),
+	// First, find MON per USD in wei
+	// monPerUsd = 10^36 / monUsdRatio (for 0.17, this is 5.88 * 10^18)
+	monPerUsd := new(big.Float).Quo(
+		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+		new(big.Float).SetInt(monUsdRatio),
 	)
 
-	// Remove extra scaling (divide by 10^12) to get proper MON wei (with 10^18 scaling)
-	monWeiPerSmallestUsd = new(big.Int).Div(
-		monWeiPerSmallestUsd,
-		new(big.Int).Exp(big.NewInt(10), big.NewInt(12), nil),
+	// Log this value for debugging
+	logger.Info("MON per USD (float calculation): %s", monPerUsd.Text('f', 6))
+
+	// Calculate MON wei per smallest USD unit (divide by 10^6 since USDT/USDC have 6 decimals)
+	// For 5.88 MON per USD, this would be 5.88 * 10^18 / 10^6 = 5.88 * 10^12 wei
+	monPerSmallestUsd := new(big.Float).Quo(
+		new(big.Float).Mul(
+			monPerUsd,
+			new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
+		),
+		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)),
 	)
+
+	// Convert the result to a big.Int for the ratio
+	monWeiPerSmallestUsd, _ := monPerSmallestUsd.Int(nil)
 
 	// This gives us the number of MON wei per smallest USDT/USDC unit
 	ratios[CurrencyUSDC] = new(big.Int).Set(monWeiPerSmallestUsd)
@@ -173,12 +181,8 @@ func calculateSwapRatios(ethUsdPrice *big.Int) map[CurrencyType]*big.Int {
 	logger.Info("Expect 0.25 USDT to yield approximately %s MON",
 		formatBigIntAsFloat(expectedMon, 18))
 
-	// Also log the theoretical calculation for 1 USDT to yield how many MON, bypassing integer division
-	theoreticalMonPerUsd := new(big.Float).Quo(
-		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
-		new(big.Float).SetInt(monUsdRatio),
-	)
-	logger.Info("Float calculation: 1 USD should yield %s MON (theoretical)", theoreticalMonPerUsd.Text('f', 6))
+	// Also log the theoretical calculation for 1 USDT to yield how many MON
+	logger.Info("Float calculation: 1 USD should yield %s MON (theoretical)", monPerUsd.Text('f', 6))
 
 	return ratios
 }

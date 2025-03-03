@@ -71,16 +71,6 @@ func calculateMonAmount(amount *big.Int, swapRatio *big.Int, currency blockchain
 		// Get USD token decimals (6) for float calculations
 		usdTokenDecimals := new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)
 
-		// Direct calculation: MON amount = USD amount * swap ratio
-		// Where swap ratio is now MON wei per smallest USD unit
-		if swapRatio.Sign() == 0 {
-			logger.Warn("Swap ratio for %s is zero! This will result in zero MON distribution.",
-				blockchain.CurrencyTypeToString(currency))
-		}
-
-		monAmount = new(big.Int).Mul(amountCopy, swapRatio)
-		logger.Info("Final MON amount in wei: %s", monAmount.String())
-
 		// Double-check with a manual calculation based on current MON/USD ratio
 		monUsdRatio := blockchain.GetMonUsdRatio()
 		logger.Info("Current MON/USD ratio: %s (%s USD per MON)",
@@ -114,16 +104,35 @@ func calculateMonAmount(amount *big.Int, swapRatio *big.Int, currency blockchain
 		logger.Info("Theoretical MON amount (calculated from MON/USD ratio): %s wei",
 			theoreticalMonWeiBig.String())
 
-		// Validate that our calculation is reasonable
-		// Allow for some minor difference due to rounding
-		diff := new(big.Int).Sub(monAmount, theoreticalMonWeiBig)
-		diffAbs := new(big.Int).Abs(diff)
-		threshold := new(big.Int).Div(theoreticalMonWeiBig, big.NewInt(100)) // 1% difference threshold
+		// Direct calculation using swap ratio
+		// Where swap ratio is now MON wei per smallest USD unit
+		if swapRatio.Sign() <= 0 || swapRatio.Cmp(big.NewInt(1000000)) < 0 {
+			// If the swap ratio is too small or zero, use the theoretical calculation
+			logger.Warn("Swap ratio for %s is too small: %s. Using theoretical calculation instead.",
+				blockchain.CurrencyTypeToString(currency),
+				swapRatio.String())
+			monAmount = theoreticalMonWeiBig
+		} else {
+			monAmount = new(big.Int).Mul(amountCopy, swapRatio)
+			logger.Info("Calculated MON amount using swap ratio: %s wei", monAmount.String())
 
-		if diffAbs.Cmp(threshold) > 0 && theoreticalMonWeiBig.Sign() > 0 {
-			logger.Warn("Calculated MON amount differs from theoretical value by more than 1%%!")
-			logger.Warn("Calculated: %s wei, Theoretical: %s wei, Diff: %s wei",
-				monAmount.String(), theoreticalMonWeiBig.String(), diff.String())
+			// Validate that our calculation is reasonable
+			// Allow for some minor difference due to rounding
+			diff := new(big.Int).Sub(monAmount, theoreticalMonWeiBig)
+			diffAbs := new(big.Int).Abs(diff)
+			threshold := new(big.Int).Div(theoreticalMonWeiBig, big.NewInt(100)) // 1% difference threshold
+
+			if diffAbs.Cmp(threshold) > 0 && theoreticalMonWeiBig.Sign() > 0 {
+				logger.Warn("Calculated MON amount differs from theoretical value by more than 1%%!")
+				logger.Warn("Calculated: %s wei, Theoretical: %s wei, Diff: %s wei",
+					monAmount.String(), theoreticalMonWeiBig.String(), diff.String())
+
+				// If the difference is huge, use the theoretical value instead
+				if diffAbs.Cmp(new(big.Int).Div(theoreticalMonWeiBig, big.NewInt(10))) > 0 {
+					logger.Warn("Difference is more than 10%%, using theoretical calculation instead")
+					monAmount = theoreticalMonWeiBig
+				}
+			}
 		}
 
 		// Validate calculation with float-based approach
