@@ -78,17 +78,15 @@ func (h *Handler) GetFaucetInfo(c *gin.Context) {
 					new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 				)
 			} else {
-				// For ETH: The ratio represents how much ETH 1 MON costs
-				// The stored ratio is ETH/MON in wei, we need to convert to human-readable format
-
-				// For ETH exchange rate we actually want to directly use the ratio value
-				// ETHperMON = ratio / 10^18
+				// For ETH: The ETH/MON ratio represents how much ETH equals 1 MON
+				// The stored ratio is ETH/MON in wei with 18 decimals precision
+				// We display this directly as the exchange rate
 				currencyPerMon = new(big.Float).Quo(
 					new(big.Float).SetInt(ratio),
 					new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 				)
 
-				logger.Debug("ETH exchange rate: ratio=%s, calculated=%s",
+				logger.Debug("ETH exchange rate: ratio=%s, calculated=%s ETH per MON",
 					ratio.String(), currencyPerMon.Text('f', 18))
 			}
 

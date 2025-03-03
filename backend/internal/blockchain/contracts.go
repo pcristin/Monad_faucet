@@ -118,13 +118,18 @@ func calculateSwapRatios(ethUsdPrice *big.Int) map[CurrencyType]*big.Int {
 
 	// For ETH: amount = (ETH/USD price) / (MON/USD ratio)
 	// This gives us the ETH/MON ratio (how much ETH per 1 MON)
+	// ETH/USD is returned with 8 decimals from Chainlink
+	// We need to scale to 18 decimals for consistent calculation
 	ethUsdPriceWith18Decimals := new(big.Int).Mul(ethUsdPrice, new(big.Int).Exp(big.NewInt(10), big.NewInt(10), nil))
 
-	// First calculate ETH/USD * 10^18 to get full precision
-	ethUsdScaled := new(big.Int).Mul(ethUsdPriceWith18Decimals, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	// To calculate ETH/MON we need:
+	// ETH/MON = ETH/USD ÷ MON/USD
+	// If 1 ETH = $2000 and 1 MON = $0.17, then:
+	// 1 MON = 0.000085 ETH ($0.17/$2000)
 
-	// Then divide by MON/USD to get ETH/MON ratio
-	ratios[CurrencyETH] = new(big.Int).Div(ethUsdScaled, monUsdRatio)
+	// Then calculate ETH amount per 1 MON:
+	// ETH/MON = (ETH/USD * 10^18) / (MON/USD * 10^18) = ETH/USD / MON/USD
+	ratios[CurrencyETH] = new(big.Int).Div(ethUsdPriceWith18Decimals, monUsdRatio)
 
 	// Log the calculated ratio for debugging
 	logger.Info("Calculated ETH/MON ratio: %s (1 MON = %s ETH)",
