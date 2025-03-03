@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -444,7 +445,51 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 	return nil
 }
 
-// GetTransactOpts returns properly configured transaction options for signing
+// TransactWithGasBuffer is a wrapper around BoundContract.Transact that adds a buffer to gas estimation
+func (m *MonadDistributor) TransactWithGasBuffer(opts *bind.TransactOpts, method string, params ...interface{}) (*types.Transaction, error) {
+	// Store the original gas limit
+	originalGasLimit := opts.GasLimit
+
+	// Set gas limit to 0 to force estimation
+	opts.GasLimit = 0
+
+	// Create a temporary context with deadline to use for gas estimation
+	// This prevents the gas estimation from hanging indefinitely
+	estCtx, cancel := context.WithTimeout(opts.Context, time.Second*10)
+	defer cancel()
+
+	// Pack the method and parameters to estimate gas
+	// Use the pre-defined ABI instead of parsing it again
+	input, err := DistributorABI.Pack(method, params...)
+	if err != nil {
+		logger.Error("failed to pack data: %v", err)
+		return nil, err
+	}
+
+	// Create a call message for gas estimation
+	msg := ethereum.CallMsg{
+		From: crypto.PubkeyToAddress(m.PrivateKey.PublicKey),
+		To:   &m.Address,
+		Data: input,
+	}
+
+	// Estimate gas
+	estimatedGas, err := m.Client.EstimateGas(estCtx, msg)
+	if err != nil {
+		opts.GasLimit = originalGasLimit // restore original gas limit
+		return nil, fmt.Errorf("failed to estimate gas: %v", err)
+	}
+
+	// Add 20% buffer to gas limit
+	opts.GasLimit = estimatedGas * 12 / 10
+
+	logger.Debug("Gas estimation for %s: estimated=%d, with buffer=%d",
+		method, estimatedGas, opts.GasLimit)
+
+	// Call the actual Transact method with the buffered gas limit
+	return m.BoundContract.Transact(opts, method, params...)
+}
+
 func (m *MonadDistributor) GetTransactOpts(ctx context.Context) (*bind.TransactOpts, error) {
 	chainID, err := m.Client.ChainID(ctx)
 	if err != nil {
@@ -455,6 +500,17 @@ func (m *MonadDistributor) GetTransactOpts(ctx context.Context) (*bind.TransactO
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transactor: %v", err)
 	}
+
+	// Instead of setting a fixed gas limit, we'll let the transaction be
+	// estimated when it's run. The Transact method in the bound contract
+	// will estimate gas if the gas limit is 0.
+	//
+	// We'll modify the BoundContract.Transact method to add a gas buffer
+	// in a wrapper function.
+
+	// Note: When gas=0, the bind package will automatically estimate gas
+	// when the transaction is submitted
+	auth.GasLimit = 0
 
 	auth.Context = ctx
 	return auth, nil

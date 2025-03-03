@@ -150,7 +150,9 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 	}
 
 	logger.Info("Submitting Monad tx for deposit ID %s with amount %s", depositIDStr, amount.String())
-	tx, err := s.monadDistributor.BoundContract.Transact(opts, "distributeFunds", transfer)
+	// Use our new TransactWithGasBuffer method instead of calling Transact directly
+	// This will estimate the gas and add a 20% buffer
+	tx, err := s.monadDistributor.TransactWithGasBuffer(opts, "distributeFunds", transfer)
 	if err != nil {
 		logger.Error("Failed to distribute funds: %v", err)
 		// Update status to failed
