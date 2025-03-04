@@ -12,7 +12,7 @@ import (
 // GetMetrics returns system metrics
 func (h *AdminHandler) GetMetrics(c *gin.Context) {
 	// Check if the request has the admin API key
-	apiKey := c.GetHeader("X-API-Key")
+	apiKey := c.GetHeader("X-Admin-Key")
 	if apiKey != h.Handler.GetAdminAPIKey() {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"status":  "error",
