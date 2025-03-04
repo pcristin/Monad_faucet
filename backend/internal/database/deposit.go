@@ -51,117 +51,105 @@ func (db *DB) CreateDeposit(deposit *Deposit) error {
 // UpdateDepositStatus updates the status of a deposit
 func (db *DB) UpdateDepositStatus(depositID *big.Int, status string) error {
 	if depositID == nil {
+		logger.Error("Cannot update deposit status: deposit ID is nil")
 		return fmt.Errorf("deposit ID is nil")
 	}
 
 	depositIDStr := depositID.String()
 	logger.Info("Updating deposit status for ID %s to %s", depositIDStr, status)
 
-	// First check if the deposit exists
-	var exists bool
-	err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM deposits WHERE deposit_id = $1)", depositIDStr).Scan(&exists)
+	// Start a transaction for atomicity
+	tx, err := db.Begin()
 	if err != nil {
-		logger.Error("Error checking if deposit exists: %v", err)
-		// Continue anyway to try the update
-	} else if !exists {
-		logger.Warn("Deposit ID %s not found in deposits table. Attempting to create from transaction record.", depositIDStr)
-
-		// Try to find the transaction record to get the data we need
-		tx, err := db.GetTransactionByDepositID(depositID)
-		if err != nil || tx == nil {
-			logger.Error("Could not find transaction record for deposit ID %s: %v", depositIDStr, err)
-			return fmt.Errorf("deposit does not exist and could not create: %w", err)
-		}
-
-		// Create a minimal deposit record
-		deposit := &Deposit{
-			DepositID:     depositID,
-			WalletAddress: tx.WalletAddress,
-			Amount:        tx.Amount,
-			Currency:      tx.Currency,
-			TxHash:        tx.TxHash,
-			BlockNumber:   0, // We don't have this info, but it's not critical
-			Status:        status,
-		}
-
-		logger.Info("Creating deposit record for ID %s with wallet %s, amount %s",
-			depositIDStr, deposit.WalletAddress.Hex(), deposit.Amount.String())
-
-		if err := db.CreateDeposit(deposit); err != nil {
-			logger.Error("Failed to create deposit record: %v", err)
-			// Continue with the update anyway in case the error was due to race condition
-		} else {
-			logger.Info("Successfully created deposit record for ID %s", depositIDStr)
-			return nil // We've created with the correct status, so no need to update
-		}
-	}
-
-	// Proceed with the update
-	// Use a transaction to ensure atomicity
-	dbTx, err := db.Begin()
-	if err != nil {
-		logger.Error("Failed to begin transaction for updating deposit status: %v", err)
+		logger.Error("Failed to begin transaction for deposit status update: %v", err)
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 
+	// Use defer with a named error return to handle rollback/commit
 	defer func() {
 		if err != nil {
-			if rbErr := dbTx.Rollback(); rbErr != nil {
+			if rbErr := tx.Rollback(); rbErr != nil {
 				logger.Error("Failed to rollback transaction: %v", rbErr)
 			}
 		}
 	}()
 
-	// Get current status for logging
-	var currentStatus string
-	err = dbTx.QueryRow("SELECT status FROM deposits WHERE deposit_id = $1", depositIDStr).Scan(&currentStatus)
+	// First check if the deposit exists
+	var exists bool
+	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM deposits WHERE deposit_id = $1)", depositIDStr).Scan(&exists)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			logger.Warn("Deposit ID %s not found when checking current status", depositIDStr)
-		} else {
-			logger.Error("Error getting current status: %v", err)
-		}
-		// Continue with update anyway
-	} else {
-		logger.Info("Current status for deposit ID %s is %s, updating to %s", depositIDStr, currentStatus, status)
+		logger.Error("Error checking if deposit exists: %v", err)
+		return fmt.Errorf("error checking deposit existence: %w", err)
 	}
 
-	result, err := dbTx.Exec(
-		`UPDATE deposits 
-		SET status = $1, updated_at = CURRENT_TIMESTAMP 
-		WHERE deposit_id = $2`,
+	if !exists {
+		logger.Warn("Deposit ID %s not found in deposits table. Attempting to create from transaction record.", depositIDStr)
+
+		// Try to find the transaction record to get the data we need
+		txData, txErr := db.GetTransactionByDepositID(depositID)
+		if txErr != nil || txData == nil {
+			logger.Error("Could not find transaction record for deposit ID %s: %v", depositIDStr, txErr)
+			return fmt.Errorf("deposit does not exist and could not create: %w", txErr)
+		}
+
+		// Create the deposit record with data from the transaction
+		_, err = tx.Exec(
+			`INSERT INTO deposits (deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, created_at, updated_at) 
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			depositIDStr,
+			txData.WalletAddress.Hex(),
+			txData.Amount.String(),
+			txData.Currency,
+			txData.TxHash,
+			0, // We don't know the block number here
+			status,
+			time.Now(),
+			time.Now(),
+		)
+
+		if err != nil {
+			logger.Error("Failed to create deposit record from transaction: %v", err)
+			return fmt.Errorf("failed to create deposit: %w", err)
+		}
+
+		logger.Info("Successfully created deposit record with ID %s and status %s", depositIDStr, status)
+
+		// Commit the transaction
+		if err = tx.Commit(); err != nil {
+			logger.Error("Failed to commit transaction for deposit creation: %v", err)
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+
+		return nil
+	}
+
+	// Deposit exists, update its status
+	result, err := tx.Exec(
+		"UPDATE deposits SET status = $1, updated_at = $2 WHERE deposit_id = $3",
 		status,
+		time.Now(),
 		depositIDStr,
 	)
+
 	if err != nil {
-		logger.Error("Error updating deposit status: %v", err)
+		logger.Error("Failed to update deposit status: %v", err)
 		return fmt.Errorf("failed to update deposit status: %w", err)
 	}
 
-	rows, err := result.RowsAffected()
+	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		logger.Error("Error getting affected rows: %v", err)
-	} else if rows == 0 {
-		logger.Warn("No rows affected when updating deposit ID %s. Deposit might not exist.", depositIDStr)
+		logger.Error("Error getting rows affected: %v", err)
+	} else if rowsAffected == 0 {
+		logger.Warn("No rows affected when updating deposit status for ID %s", depositIDStr)
 	} else {
-		logger.Info("Successfully updated status for deposit ID %s to %s (%d rows affected)", depositIDStr, status, rows)
+		logger.Info("Successfully updated status for deposit ID %s to %s (%d rows affected)",
+			depositIDStr, status, rowsAffected)
 	}
 
 	// Commit the transaction
-	if err = dbTx.Commit(); err != nil {
-		logger.Error("Failed to commit transaction: %v", err)
+	if err = tx.Commit(); err != nil {
+		logger.Error("Failed to commit transaction for deposit update: %v", err)
 		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
-	// Double-check the update was successful
-	var updatedStatus string
-	err = db.QueryRow("SELECT status FROM deposits WHERE deposit_id = $1", depositIDStr).Scan(&updatedStatus)
-	if err != nil {
-		logger.Error("Failed to verify deposit status update: %v", err)
-	} else if updatedStatus != status {
-		logger.Error("Status verification failed: expected %s but got %s", status, updatedStatus)
-	} else {
-		logger.Info("Verified deposit status update: ID %s now has status %s", depositIDStr, updatedStatus)
 	}
 
 	return nil

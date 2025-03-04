@@ -197,6 +197,25 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 			}
 		} else {
 			logger.Info("DB update confirmed for deposit ID %s with tx %s", depositIDStr, txHash)
+
+			// CRITICAL: Always ensure deposit status is updated after transaction update
+			logger.Info("Ensuring deposit status is updated to 'processed' for ID %s", depositIDStr)
+
+			// Directly update the deposit status
+			if err := s.db.UpdateDepositStatus(depositId, database.StatusProcessed); err != nil {
+				logger.Error("Failed to directly update deposit status for ID %s: %v", depositIDStr, err)
+			}
+
+			// Double check the deposit status after update
+			deposit, err := s.db.GetDepositByID(depositId)
+			if err != nil {
+				logger.Error("Failed to retrieve deposit after update: %v", err)
+			} else if deposit == nil {
+				logger.Error("Deposit ID %s not found after update", depositIDStr)
+			} else {
+				logger.Info("Deposit ID %s current status: %s", depositIDStr, deposit.Status)
+			}
+
 			break
 		}
 	}

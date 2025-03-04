@@ -766,7 +766,8 @@ func (db *DB) GetTransactionsByStatus(status string, limit, offset int) ([]*Tran
 	var transactions []*Transaction
 	for rows.Next() {
 		var tx Transaction
-		var depositIDStr, amountStr, monAmountStr, walletAddrStr string
+		var depositIDStr, amountStr, walletAddrStr string
+		var monAmountStr sql.NullString // Use sql.NullString to handle NULL values
 
 		err := rows.Scan(
 			&tx.ID,
@@ -774,7 +775,7 @@ func (db *DB) GetTransactionsByStatus(status string, limit, offset int) ([]*Tran
 			&walletAddrStr,
 			&amountStr,
 			&tx.Currency,
-			&monAmountStr,
+			&monAmountStr, // This will handle NULL values properly
 			&tx.Status,
 			&tx.TxHash,
 			&tx.MonadTxHash,
@@ -799,12 +800,19 @@ func (db *DB) GetTransactionsByStatus(status string, limit, offset int) ([]*Tran
 		}
 		tx.Amount = amount
 
-		// Convert mon_amount string to *big.Int
-		monAmount, ok := new(big.Int).SetString(monAmountStr, 10)
-		if !ok {
-			return nil, fmt.Errorf("failed to convert mon_amount %s to big.Int", monAmountStr)
+		// Convert mon_amount string to *big.Int - handle NULL values
+		if monAmountStr.Valid {
+			monAmount, ok := new(big.Int).SetString(monAmountStr.String, 10)
+			if !ok {
+				return nil, fmt.Errorf("failed to convert mon_amount %s to big.Int", monAmountStr.String)
+			}
+			tx.MonAmount = monAmount
+		} else {
+			// For NULL mon_amount, set to zero
+			tx.MonAmount = big.NewInt(0)
+			logger.Debug("Transaction ID %d for deposit ID %s has NULL mon_amount, setting to 0",
+				tx.ID, depositIDStr)
 		}
-		tx.MonAmount = monAmount
 
 		// Convert wallet address string to common.Address
 		tx.WalletAddress = common.HexToAddress(walletAddrStr)

@@ -201,5 +201,31 @@ func (s *BridgeService) GetTransactionByDepositID(ctx context.Context, depositID
 // UpdateTransactionStatus updates the status of a transaction.
 func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *big.Int, status, txHash string) error {
 	// This is for backward compatibility with the old schema
-	return s.db.UpdateTransactionStatus(depositID, status, txHash)
+	err := s.db.UpdateTransactionStatus(depositID, status, txHash)
+	if err != nil {
+		logger.Error("Failed to update transaction status: %v", err)
+		return err
+	}
+
+	// Also update the deposit status in the deposits table
+	// Map transaction status to deposit status
+	depositStatus := status
+	if status == database.StatusCompleted {
+		depositStatus = database.StatusProcessed
+	} else if status == database.StatusFailed || status == database.StatusRefunded {
+		depositStatus = status // Use the same status
+	}
+
+	logger.Info("Also updating deposit status for ID %s to %s (after transaction status update)",
+		depositID.String(), depositStatus)
+
+	if err := s.db.UpdateDepositStatus(depositID, depositStatus); err != nil {
+		logger.Error("Failed to update deposit status after updating transaction: %v", err)
+		// Don't return error here - we still successfully updated the transaction
+		// Just log the error and continue
+	} else {
+		logger.Info("Successfully updated both transaction and deposit status for ID %s", depositID.String())
+	}
+
+	return nil
 }

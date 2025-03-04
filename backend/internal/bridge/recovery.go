@@ -21,6 +21,45 @@ func (s *BridgeService) RecoverStuckTransactions(ctx context.Context) error {
 		return fmt.Errorf("failed to get pending transactions: %w", err)
 	}
 	logger.Info("Checking %d pending transactions for recovery", len(pendingTxs))
+
+	// Also check for stuck deposits
+	stuckDeposits, err := s.db.GetDepositsByStatus(database.StatusPending, 100, 0)
+	if err != nil {
+		logger.Error("Failed to get pending deposits: %v", err)
+		// Continue with transaction recovery anyway
+	} else {
+		logger.Info("Checking %d pending deposits for recovery", len(stuckDeposits))
+
+		// Create a map of deposit IDs for faster lookup
+		pendingDepositIDs := make(map[string]bool)
+		for _, deposit := range stuckDeposits {
+			pendingDepositIDs[deposit.DepositID.String()] = true
+		}
+
+		// Check if any of these deposits already have completed distributions
+		completedDistributions, err := s.db.GetDistributionsByStatus(database.DistStatusCompleted, 100, 0)
+		if err != nil {
+			logger.Error("Failed to get completed distributions: %v", err)
+		} else {
+			logger.Info("Found %d completed distributions to check against pending deposits", len(completedDistributions))
+
+			// Recover deposits with completed distributions
+			for _, dist := range completedDistributions {
+				depositIDStr := dist.DepositID.String()
+				if pendingDepositIDs[depositIDStr] {
+					logger.Info("Found completed distribution for pending deposit ID %s, updating status", depositIDStr)
+
+					if err := s.db.UpdateDepositStatus(dist.DepositID, database.StatusProcessed); err != nil {
+						logger.Error("Failed to update deposit status for ID %s: %v", depositIDStr, err)
+					} else {
+						logger.Info("Successfully recovered deposit status for ID %s to 'processed'", depositIDStr)
+					}
+				}
+			}
+		}
+	}
+
+	// Original transaction recovery logic
 	for _, tx := range pendingTxs {
 		if time.Since(tx.CreatedAt) < 5*time.Minute {
 			logger.Info("Skipping recent tx for deposit ID %s", tx.DepositID.String())
@@ -33,6 +72,13 @@ func (s *BridgeService) RecoverStuckTransactions(ctx context.Context) error {
 				logger.Error("Failed to update recovered tx: %v", updateErr)
 			} else {
 				logger.Info("Successfully recovered tx for deposit ID %s", tx.DepositID.String())
+
+				// Also ensure deposit status is updated
+				if depositErr := s.db.UpdateDepositStatus(tx.DepositID, database.StatusProcessed); depositErr != nil {
+					logger.Error("Failed to update deposit status during recovery: %v", depositErr)
+				} else {
+					logger.Info("Also updated deposit status to 'processed' during recovery")
+				}
 			}
 			continue
 		}

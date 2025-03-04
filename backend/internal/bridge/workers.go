@@ -523,10 +523,17 @@ func (pools *BridgeWorkerPools) processDBJob(ctx context.Context, job *DBWorkerJ
 		logger.Info("Processing JobUpdateDepositStatus for deposit ID %s to status %s",
 			job.Deposit.DepositID.String(), job.Deposit.Status)
 
+		// First check if the deposit exists and get current status
+		deposit, _ := pools.service.db.GetDepositByID(job.Deposit.DepositID)
+		if deposit != nil {
+			logger.Info("Current deposit status before update for ID %s: %s",
+				job.Deposit.DepositID.String(), deposit.Status)
+		}
+
 		if err := pools.service.db.UpdateDepositStatus(job.Deposit.DepositID, job.Deposit.Status); err != nil {
 			logger.Error("Failed to update deposit status: %v", err)
 		} else {
-			logger.Info("Successfully queued update of deposit status for ID %s to %s",
+			logger.Info("Successfully updated deposit status for ID %s to %s",
 				job.Deposit.DepositID.String(), job.Deposit.Status)
 
 			// Verify the update was successful by checking the database
