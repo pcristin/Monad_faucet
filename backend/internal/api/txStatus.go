@@ -63,10 +63,8 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		slog.String("arbitrum_tx_hash", arbitrumTxHash),
 	)
 
-	// Common response structure
-
 	// Helper function to create response
-	createResponse := func(tx *database.Transaction) *TransactionResponse {
+	createResponse := func(tx *database.TransactionView) *TransactionResponse {
 		response := &TransactionResponse{
 			Status:  tx.Status,
 			Message: "Transaction status retrieved successfully",
@@ -109,8 +107,8 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 			return
 		}
 
-		// Look up transaction by deposit ID
-		tx, err := h.BridgeService.GetDB().GetTransactionByDepositID(depositBigInt)
+		// Look up transaction by deposit ID using the new view function
+		tx, err := h.BridgeService.GetDB().GetTransactionViewByDepositID(depositBigInt)
 		if err != nil {
 			logger.Error("Error looking up transaction", slog.String("error", err.Error()))
 			c.JSON(http.StatusInternalServerError, gin.H{
@@ -176,21 +174,38 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 						slog.String("status", status),
 					)
 
-					// Update transaction status in database
-					err = h.BridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, status, monadTxHash)
+					// Update deposit status in database
+					err = h.BridgeService.GetDB().UpdateDepositStatus(tx.DepositID, status)
 					if err != nil {
-						logger.Error("Error updating transaction status", slog.String("error", err.Error()))
-					} else {
-						// Update tx object for response
-						tx.Status = status
-						tx.MonadTxHash = monadTxHash
-
-						// Log that we found and are including the Monad hash
-						logger.Info("Including completed Monad transaction in response",
-							slog.String("deposit_id", tx.DepositID.String()),
-							slog.String("monad_tx_hash", monadTxHash),
-							slog.String("status", status))
+						logger.Error("Error updating deposit status", slog.String("error", err.Error()))
 					}
+
+					// Update distribution status in database if monad tx hash is available
+					if monadTxHash != "" {
+						err = h.BridgeService.GetDB().UpdateDistributionStatus(tx.DepositID, status, monadTxHash)
+						if err != nil {
+							logger.Error("Error updating distribution status", slog.String("error", err.Error()))
+						}
+					}
+
+					// For backward compatibility, also update transaction_history if it exists
+					legacyTx, _ := h.BridgeService.GetDB().GetTransactionByDepositID(tx.DepositID)
+					if legacyTx != nil {
+						err = h.BridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, status, monadTxHash)
+						if err != nil {
+							logger.Error("Error updating legacy transaction status", slog.String("error", err.Error()))
+						}
+					}
+
+					// Update tx object for response
+					tx.Status = status
+					tx.MonadTxHash = monadTxHash
+
+					// Log that we found and are including the Monad hash
+					logger.Info("Including completed Monad transaction in response",
+						slog.String("deposit_id", tx.DepositID.String()),
+						slog.String("monad_tx_hash", monadTxHash),
+						slog.String("status", status))
 				}
 			}
 
@@ -235,7 +250,7 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 	// Handle Monad tx hash lookup
 	if txHash != "" {
 		logger.Info("Looking up transaction by Monad hash", slog.String("tx_hash", txHash))
-		tx, err := h.BridgeService.GetDB().GetTransactionByMonadTxHash(txHash)
+		tx, err := h.BridgeService.GetDB().GetTransactionViewByMonadTxHash(txHash)
 		if err != nil {
 			logger.Error("Error in DB lookup by Monad hash", slog.String("error", err.Error()))
 		} else if tx != nil {
@@ -268,121 +283,16 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		}
 	}
 
-	// Handle Arbitrum tx hash lookup
-	if arbitrumTxHash != "" {
-		logger.Info("Looking up transaction by Arbitrum hash", slog.String("arbitrum_tx_hash", arbitrumTxHash))
-		tx, err := h.BridgeService.GetDB().GetTransactionByArbitrumTxHash(arbitrumTxHash)
-		if err != nil {
-			logger.Error("Error in DB lookup by Arbitrum hash", slog.String("error", err.Error()))
-		} else if tx != nil {
-			logger.Info("Found transaction via Arbitrum hash",
-				slog.String("deposit_id", tx.DepositID.String()),
-				slog.String("status", tx.Status),
-				slog.String("monad_tx_hash", tx.MonadTxHash),
-			)
-
-			// If transaction is pending, attempt a blockchain verification
-			if tx.Status == "pending" {
-				logger.Info("Transaction is pending, checking blockchain for confirmation")
-
-				// Perform blockchain verification for all clients, not just mobile
-				status, monadTxHash, err := h.BridgeService.FindMonadTransactionByDepositID(c, tx.DepositID)
-				if err != nil {
-					logger.Warn("Error checking blockchain for transaction",
-						slog.String("error", err.Error()),
-						slog.String("deposit_id", tx.DepositID.String()),
-					)
-				} else if monadTxHash != "" {
-					logger.Info("Found monad transaction hash from blockchain",
-						slog.String("monad_tx_hash", monadTxHash))
-
-					// Also check for Distribution event on Monad blockchain
-					distTxHash, err := h.BridgeService.FindMonadDistributionByDepositID(c, tx.DepositID)
-					if err == nil && distTxHash != "" {
-						logger.Info("Found distribution event",
-							slog.String("tx_hash", distTxHash),
-							slog.String("deposit_id", tx.DepositID.String()))
-
-						// Create distribution record if needed
-						_, err := h.BridgeService.CheckOrCreateDistributionTransaction(c, tx.DepositID)
-						if err != nil {
-							logger.Error("Failed to create distribution record",
-								slog.String("error", err.Error()))
-						}
-
-						// Update response with distribution transaction
-						monadTxHash = distTxHash
-						status = "completed"
-					} else if err != nil {
-						// Log the error but continue - this is non-fatal
-						logger.Warn("Error checking for distribution events, will continue with mint tx",
-							slog.String("error", err.Error()),
-							slog.String("deposit_id", tx.DepositID.String()),
-							slog.String("mint_tx_hash", monadTxHash))
-					}
-
-					// Transaction found on blockchain, update status
-					logger.Info("Transaction found on blockchain during status check",
-						slog.String("deposit_id", tx.DepositID.String()),
-						slog.String("monad_tx_hash", monadTxHash),
-						slog.String("status", status),
-					)
-
-					// Update transaction status in database
-					err = h.BridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, status, monadTxHash)
-					if err != nil {
-						logger.Error("Error updating transaction status", slog.String("error", err.Error()))
-					} else {
-						// Update tx object for response
-						tx.Status = status
-						tx.MonadTxHash = monadTxHash
-
-						// Log that we found and are including the Monad hash
-						logger.Info("Including completed Monad transaction in response",
-							slog.String("deposit_id", tx.DepositID.String()),
-							slog.String("monad_tx_hash", monadTxHash),
-							slog.String("status", status))
-					}
-				}
-			}
-
-			response := createResponse(tx)
-
-			// Debug log the full response for completed transactions
-			if tx.Status == "completed" {
-				responseJSON, _ := json.Marshal(response)
-				logger.Info("Sending completed transaction response",
-					slog.String("response_body", string(responseJSON)),
-					slog.String("deposit_id", tx.DepositID.String()),
-					slog.String("monad_tx_hash", tx.MonadTxHash))
-			}
-
-			// Always log the final response JSON for any request
-			finalJSON, _ := json.Marshal(response)
-			logger.Info("Final API response", slog.String("json", string(finalJSON)))
-
-			c.JSON(http.StatusOK, response)
-			logger.Info("Response sent",
-				slog.String("duration", time.Since(startTime).String()),
-				slog.String("status", tx.Status),
-			)
-			return
-		}
-	}
-
-	// One final attempt - try direct DB lookup of Arbitrum hash
-	logger.Info("Attempting direct DB lookup for transaction")
-	hashToCheck := txHash
-	if arbitrumTxHash != "" {
-		hashToCheck = arbitrumTxHash
-	}
-
+	// One final attempt - try Arbitrum tx hash lookup
+	logger.Info("Attempting Arbitrum hash lookup for transaction")
+	hashToCheck := arbitrumTxHash
 	if hashToCheck != "" {
-		tx, err := h.BridgeService.GetDB().GetTransactionByArbitrumTxHash(hashToCheck)
+		// Use our new function to get transaction view by Arbitrum hash
+		tx, err := h.BridgeService.GetDB().GetTransactionViewByArbitrumTxHash(hashToCheck)
 		if err != nil {
-			logger.Error("Error in direct DB lookup for hash %s: %v", hashToCheck, err)
+			logger.Error("Error in transaction view lookup for Arbitrum hash", slog.String("error", err.Error()))
 		} else if tx != nil {
-			logger.Info("Found transaction via direct DB lookup: deposit_id=%s, status=%s",
+			logger.Info("Found transaction via Arbitrum hash: deposit_id=%s, status=%s",
 				tx.DepositID.String(), tx.Status)
 
 			// If transaction is pending, attempt a blockchain verification
@@ -432,21 +342,38 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 						slog.String("status", status),
 					)
 
-					// Update transaction status in database
-					err = h.BridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, status, monadTxHash)
+					// Update deposit status in database
+					err = h.BridgeService.GetDB().UpdateDepositStatus(tx.DepositID, status)
 					if err != nil {
-						logger.Error("Error updating transaction status", slog.String("error", err.Error()))
-					} else {
-						// Update tx object for response
-						tx.Status = status
-						tx.MonadTxHash = monadTxHash
-
-						// Log that we found and are including the Monad hash
-						logger.Info("Including completed Monad transaction in response",
-							slog.String("deposit_id", tx.DepositID.String()),
-							slog.String("monad_tx_hash", monadTxHash),
-							slog.String("status", status))
+						logger.Error("Error updating deposit status", slog.String("error", err.Error()))
 					}
+
+					// Update distribution status in database if monad tx hash is available
+					if monadTxHash != "" {
+						err = h.BridgeService.GetDB().UpdateDistributionStatus(tx.DepositID, status, monadTxHash)
+						if err != nil {
+							logger.Error("Error updating distribution status", slog.String("error", err.Error()))
+						}
+					}
+
+					// For backward compatibility, also update transaction_history if it exists
+					legacyTx, _ := h.BridgeService.GetDB().GetTransactionByDepositID(tx.DepositID)
+					if legacyTx != nil {
+						err = h.BridgeService.GetDB().UpdateTransactionStatus(tx.DepositID, status, monadTxHash)
+						if err != nil {
+							logger.Error("Error updating legacy transaction status", slog.String("error", err.Error()))
+						}
+					}
+
+					// Update tx object for response
+					tx.Status = status
+					tx.MonadTxHash = monadTxHash
+
+					// Log that we found and are including the Monad hash
+					logger.Info("Including completed Monad transaction in response",
+						slog.String("deposit_id", tx.DepositID.String()),
+						slog.String("monad_tx_hash", monadTxHash),
+						slog.String("status", status))
 				}
 			}
 
@@ -474,30 +401,16 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		}
 	}
 
-	// Check if it's a refund transaction
-	// This would need to be implemented if refunds are tracked separately
-
 	// If we got here, the transaction is not found
 	logger.Info("Transaction not found after all lookup attempts")
 	response := &TransactionResponse{
 		Status:  "not_found",
-		Message: "Transaction not found in our system",
+		Message: "No transaction found",
 		Txs:     make(map[string]string),
 	}
 
-	if arbitrumTxHash != "" {
-		response.Txs["Arbitrum"] = arbitrumTxHash
-	} else if txHash != "" {
-		response.Txs["Monad"] = txHash
-	}
-
-	// Always log the final response JSON for any request
-	finalJSON, _ := json.Marshal(response)
-	logger.Info("Final API response", slog.String("json", string(finalJSON)))
-
 	c.JSON(http.StatusOK, response)
-	logger.Info("Response sent",
+	logger.Info("Response sent with not_found status",
 		slog.String("duration", time.Since(startTime).String()),
-		slog.String("status", "not_found"),
 	)
 }

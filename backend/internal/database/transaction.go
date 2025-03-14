@@ -164,9 +164,10 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 	fmt.Printf("Getting transaction for deposit ID %s from database\n", depositIDStr)
 
 	var (
-		tx                                        Transaction
-		walletAddressStr, amountStr, monAmountStr string
-		currencyInt                               int
+		tx                          Transaction
+		walletAddressStr, amountStr string
+		monAmountStr                sql.NullString
+		currencyInt                 int
 	)
 
 	err := db.QueryRow(
@@ -214,17 +215,17 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 
 	tx.Currency = CurrencyType(currencyInt)
 
-	// Handle potentially NULL mon_amount better
-	if monAmountStr == "<nil>" || monAmountStr == "" {
-		logger.Debug("MON amount is NULL for deposit ID %s, defaulting to 0", depositIDStr)
-		tx.MonAmount = big.NewInt(0)
-	} else {
-		tx.MonAmount, ok = new(big.Int).SetString(monAmountStr, 10)
+	// Handle NULL mon_amount values using sql.NullString
+	if monAmountStr.Valid {
+		tx.MonAmount, ok = new(big.Int).SetString(monAmountStr.String, 10)
 		if !ok {
 			logger.Warn("Failed to parse MON amount: %s for deposit ID %s, defaulting to 0",
-				monAmountStr, depositIDStr)
+				monAmountStr.String, depositIDStr)
 			tx.MonAmount = big.NewInt(0)
 		}
+	} else {
+		logger.Debug("MON amount is NULL for deposit ID %s, defaulting to 0", depositIDStr)
+		tx.MonAmount = big.NewInt(0)
 	}
 
 	logger.Debug("Found transaction for deposit ID %s: status=%s, monadTxHash=%s, monAmount=%s",
@@ -237,9 +238,10 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 func (db *DB) GetTransactionByArbitrumTxHash(txHash string) (*Transaction, error) {
 	// First, check if we have a transaction with this hash as the tx_hash
 	var (
-		tx                                                      Transaction
-		depositIDStr, walletAddressStr, amountStr, monAmountStr string
-		currencyInt                                             int
+		tx                                        Transaction
+		depositIDStr, walletAddressStr, amountStr string
+		monAmountStr                              sql.NullString
+		currencyInt                               int
 	)
 
 	err := db.QueryRow(
@@ -300,7 +302,21 @@ func (db *DB) GetTransactionByArbitrumTxHash(txHash string) (*Transaction, error
 	tx.WalletAddress = common.HexToAddress(walletAddressStr)
 	tx.Amount, _ = new(big.Int).SetString(amountStr, 10)
 	tx.Currency = CurrencyType(currencyInt)
-	tx.MonAmount, _ = new(big.Int).SetString(monAmountStr, 10)
+
+	// Handle NULL mon_amount values
+	if monAmountStr.Valid {
+		var ok bool
+		tx.MonAmount, ok = new(big.Int).SetString(monAmountStr.String, 10)
+		if !ok {
+			logger.Warn("Failed to parse MON amount: %s for tx hash %s, defaulting to 0",
+				monAmountStr.String, txHash)
+			tx.MonAmount = big.NewInt(0)
+		}
+	} else {
+		tx.MonAmount = big.NewInt(0)
+		logger.Debug("Transaction ID %d for tx hash %s has NULL mon_amount, setting to 0",
+			tx.ID, txHash)
+	}
 
 	return &tx, nil
 }
@@ -325,9 +341,10 @@ func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) 
 	var transactions []*Transaction
 	for rows.Next() {
 		var (
-			tx                                                      Transaction
-			depositIDStr, walletAddressStr, amountStr, monAmountStr string
-			currencyInt                                             int
+			tx                                        Transaction
+			depositIDStr, walletAddressStr, amountStr string
+			monAmountStr                              sql.NullString
+			currencyInt                               int
 		)
 
 		err := rows.Scan(
@@ -352,7 +369,21 @@ func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) 
 		tx.WalletAddress = common.HexToAddress(walletAddressStr)
 		tx.Amount, _ = new(big.Int).SetString(amountStr, 10)
 		tx.Currency = CurrencyType(currencyInt)
-		tx.MonAmount, _ = new(big.Int).SetString(monAmountStr, 10)
+
+		// Handle NULL mon_amount values
+		if monAmountStr.Valid {
+			var ok bool
+			tx.MonAmount, ok = new(big.Int).SetString(monAmountStr.String, 10)
+			if !ok {
+				logger.Warn("Failed to parse MON amount: %s for wallet %s, defaulting to 0",
+					monAmountStr.String, wallet.Hex())
+				tx.MonAmount = big.NewInt(0)
+			}
+		} else {
+			tx.MonAmount = big.NewInt(0)
+			logger.Debug("Transaction ID %d for wallet %s has NULL mon_amount, setting to 0",
+				tx.ID, wallet.Hex())
+		}
 
 		transactions = append(transactions, &tx)
 	}
@@ -382,9 +413,10 @@ func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 	var transactions []*Transaction
 	for rows.Next() {
 		var (
-			tx                                                      Transaction
-			depositIDStr, walletAddressStr, amountStr, monAmountStr string
-			currencyInt                                             int
+			tx                                        Transaction
+			depositIDStr, walletAddressStr, amountStr string
+			monAmountStr                              sql.NullString
+			currencyInt                               int
 		)
 
 		err := rows.Scan(
@@ -409,7 +441,20 @@ func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 		tx.WalletAddress = common.HexToAddress(walletAddressStr)
 		tx.Amount, _ = new(big.Int).SetString(amountStr, 10)
 		tx.Currency = CurrencyType(currencyInt)
-		tx.MonAmount, _ = new(big.Int).SetString(monAmountStr, 10)
+
+		// Handle NULL mon_amount values
+		if monAmountStr.Valid {
+			var ok bool
+			tx.MonAmount, ok = new(big.Int).SetString(monAmountStr.String, 10)
+			if !ok {
+				logger.Warn("Failed to parse MON amount: %s for transaction ID %d, defaulting to 0",
+					monAmountStr.String, tx.ID)
+				tx.MonAmount = big.NewInt(0)
+			}
+		} else {
+			tx.MonAmount = big.NewInt(0)
+			logger.Debug("Transaction ID %d has NULL mon_amount, setting to 0", tx.ID)
+		}
 
 		transactions = append(transactions, &tx)
 	}
@@ -560,8 +605,9 @@ func (db *DB) UpdateMonadTransactionHash(depositID *big.Int, monadTxHash string)
 // GetTransactionByMonadTxHash retrieves a transaction by Monad transaction hash
 func (db *DB) GetTransactionByMonadTxHash(monadTxHash string) (*Transaction, error) {
 	var transaction Transaction
-	var depositIDStr, walletAddressStr, amountStr, monAmountStr string
+	var depositIDStr, walletAddressStr, amountStr string
 	var currencyInt int
+	var monAmountStr sql.NullString // Change to sql.NullString to handle NULL values
 
 	row := db.QueryRow(
 		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at
@@ -612,12 +658,21 @@ func (db *DB) GetTransactionByMonadTxHash(monadTxHash string) (*Transaction, err
 	// Set currency
 	transaction.Currency = CurrencyType(currencyInt)
 
-	// Parse MON amount
-	monAmount, success := new(big.Int).SetString(monAmountStr, 10)
-	if !success {
-		return nil, fmt.Errorf("failed to parse mon_amount: %s", monAmountStr)
+	// Parse MON amount - handle NULL values
+	if monAmountStr.Valid {
+		monAmount, success := new(big.Int).SetString(monAmountStr.String, 10)
+		if !success {
+			logger.Warn("Failed to parse MON amount: %s for Monad tx hash %s, defaulting to 0",
+				monAmountStr.String, monadTxHash)
+			transaction.MonAmount = big.NewInt(0)
+		} else {
+			transaction.MonAmount = monAmount
+		}
+	} else {
+		// For NULL mon_amount, set to zero
+		transaction.MonAmount = big.NewInt(0)
+		logger.Debug("Transaction ID %d has NULL mon_amount, setting to 0", transaction.ID)
 	}
-	transaction.MonAmount = monAmount
 
 	return &transaction, nil
 }

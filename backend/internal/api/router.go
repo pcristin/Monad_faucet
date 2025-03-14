@@ -23,6 +23,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		{
 			v1.POST("/transaction/status", h.GetTransactionStatus)
 			v1.GET("/info", h.GetFaucetInfo)
+			v1.GET("/wallet/transactions", h.GetWalletTransactions)
 		}
 
 		// Admin endpoints are registered separately to avoid import cycles
