@@ -36,7 +36,15 @@ func GetEthUsdPrice() *big.Int {
 		logger.Error("No Ethereum clients available for Chainlink price feed")
 		return new(big.Int).Mul(big.NewInt(3000), big.NewInt(100000000))
 	}
-	priceFeed := bind.NewBoundContract(common.HexToAddress(blockchain.ChainlinkEthUsdFeed), priceFeedAbi, client, client, client)
+
+	// Get the Chainlink ETH/USD feed address from environment variables
+	feedAddress := os.Getenv("CHAINLINK_ETH_USD_FEED")
+	if feedAddress == "" {
+		// Fallback to the default address
+		feedAddress = blockchain.ChainlinkEthUsdFeed
+	}
+
+	priceFeed := bind.NewBoundContract(common.HexToAddress(feedAddress), priceFeedAbi, client, client, client)
 	var out []interface{}
 	err = priceFeed.Call(&bind.CallOpts{Context: ctx}, &out, "latestRoundData")
 	if err != nil {
@@ -46,7 +54,7 @@ func GetEthUsdPrice() *big.Int {
 	ethUsdPrice := out[1].(*big.Int)
 	ethUsdPriceFloat := new(big.Float).Quo(new(big.Float).SetInt(ethUsdPrice), new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil)))
 	ethUsdPriceValue, _ := ethUsdPriceFloat.Float64()
-	logger.Info("Current ETH/USD price: $%.2f", ethUsdPriceValue)
+	logger.Info("Current ETH/USD price: $%.2f from feed %s", ethUsdPriceValue, feedAddress)
 	return ethUsdPrice
 }
 

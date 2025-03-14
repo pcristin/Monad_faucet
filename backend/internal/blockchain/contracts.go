@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"os"
 	"strings"
 	"time"
 
@@ -212,7 +213,16 @@ func formatBigIntAsFloat(value *big.Int, decimals int) string {
 }
 
 // Chainlink ETH/USD Price Feed address on Arbitrum
-const ChainlinkEthUsdFeed = "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612"
+var ChainlinkEthUsdFeed = getChainlinkEthUsdFeed()
+
+// getChainlinkEthUsdFeed returns the Chainlink ETH/USD price feed address from env vars or falls back to default
+func getChainlinkEthUsdFeed() string {
+	if feedAddress := os.Getenv("CHAINLINK_ETH_USD_FEED"); feedAddress != "" {
+		return feedAddress
+	}
+	// Fallback to Arbitrum mainnet feed if not specified
+	return "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612"
+}
 
 // Price feed ABI for Chainlink
 var PriceFeedABI = `[{"inputs":[],"name":"latestRoundData","outputs":[{"internalType":"uint80","name":"roundId","type":"uint80"},{"internalType":"int256","name":"answer","type":"int256"},{"internalType":"uint256","name":"startedAt","type":"uint256"},{"internalType":"uint256","name":"updatedAt","type":"uint256"},{"internalType":"uint80","name":"answeredInRound","type":"uint80"}],"stateMutability":"view","type":"function"}]`

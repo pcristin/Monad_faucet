@@ -57,6 +57,7 @@ backend/
    # Arbitrum network configuration
    ARB_RPC_URL=wss://arb-goerli.g.alchemy.com/v2/your-api-key
    ARB_DEPOSITOR_ADDRESS=0x487177c3278faa36dd317dbb4ca97425a4f4ee31
+   CHAINLINK_ETH_USD_FEED=0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612
    
    # Monad network configuration
    MONAD_RPC_URL=https://rpc-testnet.monad.xyz/

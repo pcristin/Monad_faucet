@@ -16,6 +16,7 @@ type Config struct {
 	MonadRpcURL          string           // Monad RPC URL
 	ArbDepositorAddr     string           // Arbitrum depositor contract address
 	MonadDistributorAddr string           // Monad distributor contract address
+	ChainlinkEthUsdFeed  string           // Chainlink ETH/USD price feed contract address
 	WalletPrivateKey     string           // Private key for transaction signing
 	AdminAPIKeys         []string         // API keys for admin endpoints
 	AdminPasswords       []string         // Passwords for admin auth
@@ -101,6 +102,7 @@ func Load() (*Config, error) {
 		MonadRpcURL:          getEnvOrFatal("MONAD_RPC_URL"),
 		ArbDepositorAddr:     getEnvOrDefault("ARB_DEPOSITOR_ADDRESS", "0x487177C3278FAA36dd317DBB4CA97425a4F4Ee31"),
 		MonadDistributorAddr: getEnvOrDefault("MONAD_DISTRIBUTOR_ADDRESS", "0xc11350Fd29aC48181b0117bd1935dBE781cdd03d"),
+		ChainlinkEthUsdFeed:  getEnvOrDefault("CHAINLINK_ETH_USD_FEED", "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612"),
 		WalletPrivateKey:     strings.TrimPrefix(getEnvOrFatal("WALLET_PRIVATE_KEY"), "0x"),
 		AdminAPIKeys:         filteredAPIKeys,
 		AdminPasswords:       filteredPasswords,
@@ -160,6 +162,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MonadDistributorAddr == "0xYourDistributorAddressHere" || c.MonadDistributorAddr == "" {
 		missingVars = append(missingVars, "MONAD_DISTRIBUTOR_ADDRESS")
+	}
+	if c.ChainlinkEthUsdFeed == "0xYourChainlinkContractAddressHere" || c.ChainlinkEthUsdFeed == "" {
+		missingVars = append(missingVars, "CHAINLINK_ETH_USD_FEED")
 	}
 
 	if len(missingVars) > 0 {
