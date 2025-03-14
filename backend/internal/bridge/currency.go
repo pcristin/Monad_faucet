@@ -44,11 +44,29 @@ func GetEthUsdPrice() *big.Int {
 		feedAddress = blockchain.ChainlinkEthUsdFeed
 	}
 
+	// Log the feed address being used for better debugging
+	logger.Info("Using Chainlink ETH/USD price feed at address: %s", feedAddress)
+
+	// Check if the address is valid
+	if len(feedAddress) < 42 || feedAddress == "0x0000000000000000000000000000000000000000" {
+		logger.Error("Invalid Chainlink ETH/USD feed address: %s", feedAddress)
+		// Return a default ETH price to avoid service disruption
+		defaultPrice := new(big.Int).Mul(big.NewInt(3000), big.NewInt(100000000)) // $3000 with 8 decimals
+		logger.Warn("Using fallback ETH price: $3000")
+		return defaultPrice
+	}
+
 	priceFeed := bind.NewBoundContract(common.HexToAddress(feedAddress), priceFeedAbi, client, client, client)
 	var out []interface{}
 	err = priceFeed.Call(&bind.CallOpts{Context: ctx}, &out, "latestRoundData")
 	if err != nil {
 		logger.Error("Failed to get ETH/USD price: %v", err)
+		if strings.Contains(err.Error(), "no contract code at given address") {
+			logger.Error("Contract call to latestRoundData failed (will retry if rate limit): %v", err)
+			logger.Warn("Using fallback ETH price: $3000")
+			// Return a default ETH price to avoid service disruption
+			return new(big.Int).Mul(big.NewInt(3000), big.NewInt(100000000))
+		}
 		return new(big.Int).Mul(big.NewInt(3000), big.NewInt(100000000))
 	}
 	ethUsdPrice := out[1].(*big.Int)

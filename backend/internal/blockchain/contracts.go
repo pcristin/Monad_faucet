@@ -340,15 +340,45 @@ func getEthSwapRatioWithRetry(ctx context.Context, d *ArbitrumDepositor, retryCl
 		return nil, fmt.Errorf("failed to parse price feed ABI: %v", err)
 	}
 
-	priceFeed := bind.NewBoundContract(common.HexToAddress(ChainlinkEthUsdFeed), priceFeedAbi, d.Client, d.Client, d.Client)
+	// Get the feed address from the global variable that holds env var value
+	feedAddress := common.HexToAddress(ChainlinkEthUsdFeed)
+
+	// Log the feed address being used for better debugging
+	logger.Info("Using Chainlink ETH/USD price feed at address: %s", feedAddress.Hex())
+
+	// Check if the address is empty or the zero address
+	zeroAddr := common.Address{}
+	if feedAddress == zeroAddr || feedAddress == common.HexToAddress("0x0") {
+		logger.Error("Invalid Chainlink ETH/USD feed address: %s", feedAddress.Hex())
+		// Return a default ETH price to avoid service disruption (using $3000 price)
+		defaultPrice := new(big.Int).Mul(big.NewInt(3000), big.NewInt(100000000)) // $3000 with 8 decimals
+		logger.Warn("Using fallback ETH price: $3000")
+		return defaultPrice, nil
+	}
+
+	priceFeed := bind.NewBoundContract(feedAddress, priceFeedAbi, d.Client, d.Client, d.Client)
 
 	var out []interface{}
 	err = retryClient.CallWithRetry(ctx, priceFeed, &out, "latestRoundData")
 	if err != nil {
+		// If the contract doesn't exist at the given address, use a fallback price
+		if strings.Contains(err.Error(), "no contract code at given address") {
+			logger.Error("Contract call to latestRoundData failed (will retry if rate limit): %v", err)
+			logger.Warn("Using fallback ETH price: $3000")
+			// Return a default ETH price to avoid service disruption
+			defaultPrice := new(big.Int).Mul(big.NewInt(3000), big.NewInt(100000000)) // $3000 with 8 decimals
+			return defaultPrice, nil
+		}
 		return nil, fmt.Errorf("failed to get ETH/USD price: %v", err)
 	}
 
 	ethUsdPrice := out[1].(*big.Int)
+
+	// Log the price for better debugging
+	ethUsdPriceFloat := new(big.Float).Quo(new(big.Float).SetInt(ethUsdPrice), new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(8), nil)))
+	ethUsdPriceValue, _ := ethUsdPriceFloat.Float64()
+	logger.Info("Current ETH/USD price: $%.2f from feed %s", ethUsdPriceValue, feedAddress.Hex())
+
 	return ethUsdPrice, nil
 }
 

@@ -35,6 +35,14 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 		return nil
 	}
 
+	// NEW CODE: Check if the deposit is already refunded or in the process of refunding
+	// This prevents the token minting after a refund has been initiated
+	if err == nil && tx != nil && (tx.Status == database.StatusRefunded || tx.Status == "refunding") {
+		logger.Warn("Deposit ID %s is already refunded or in process of refunding (status: %s). Skipping token minting.",
+			event.DepositId.String(), tx.Status)
+		return fmt.Errorf("deposit already refunded or refunding")
+	}
+
 	// Log the deposit details
 	logger.Info("Processing deposit %s from wallet %s, amount %s, currency %s",
 		event.DepositId.String(),

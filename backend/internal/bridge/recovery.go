@@ -124,10 +124,14 @@ func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) e
 		return nil
 	}
 
-	// Update status to "refunding" to prevent concurrent refunds
+	// IMPORTANT: Mark as refunding BEFORE attempting the refund to prevent race conditions
+	// This will stop any concurrent token minting process from proceeding
 	if err := s.UpdateTransactionStatus(ctx, depositId, "refunding", ""); err != nil {
 		logger.Warn("Failed to update status for deposit ID %s: %v, but continuing with refund", depositId.String(), err)
 	}
+
+	// Ensure the database changes have time to propagate
+	time.Sleep(500 * time.Millisecond)
 
 	logger.Info("Delegating refund for deposit ID %s to ArbitrumDepositor", depositId.String())
 	err = s.arbDepositor.RefundDeposit(ctx, depositId)
@@ -137,6 +141,16 @@ func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) e
 		if updateErr := s.UpdateTransactionStatus(ctx, depositId, database.StatusRefunded, ""); updateErr != nil {
 			logger.Warn("Failed to update status after refund for deposit ID %s: %v", depositId.String(), updateErr)
 		}
+
+		// NEW CODE: Release the processing lock for this deposit ID to ensure clean state
+		depositIdStr := depositId.String()
+		s.processingMutex.Lock()
+		delete(s.processingDeposits, depositIdStr)
+		s.processingMutex.Unlock()
+		logger.Info("Released processing lock for deposit ID %s after refund", depositIdStr)
+
+		// Also release any DB lock to ensure this deposit can be properly handled in the future if needed
+		s.releaseLock(depositId)
 	}
 
 	return err
