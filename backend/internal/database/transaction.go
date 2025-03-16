@@ -81,6 +81,20 @@ func (db *DB) UpdateTransactionStatus(depositID *big.Int, status, txHash string)
 	logger.Info("Updating transaction status for deposit ID %s: status=%s, txHash=%s",
 		depositIDStr, status, txHash)
 
+	// If the status is completed, try to get mon_amount from distributions table
+	var monAmount *big.Int
+	if status == StatusCompleted && txHash != "" {
+		dist, err := db.GetDistributionByDepositID(depositID)
+		if err == nil && dist != nil && dist.MonAmount != nil && dist.MonAmount.Cmp(big.NewInt(0)) > 0 {
+			monAmount = dist.MonAmount
+			logger.Info("Found mon_amount %s in distributions table for deposit ID %s",
+				monAmount.String(), depositIDStr)
+		} else {
+			logger.Warn("Could not find mon_amount in distributions table for deposit ID %s: %v",
+				depositIDStr, err)
+		}
+	}
+
 	// Implement retry logic (3 attempts)
 	var err error
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -99,15 +113,21 @@ func (db *DB) UpdateTransactionStatus(depositID *big.Int, status, txHash string)
 			fmt.Printf("Transaction for deposit ID %s does not exist in the database\n", depositIDStr)
 			// If transaction doesn't exist, create a minimal record to update later
 			if status == "completed" && txHash != "" {
+				// If we have monAmount from distributions, include it
+				monAmountStr := "0"
+				if monAmount != nil {
+					monAmountStr = monAmount.String()
+				}
+
 				_, insertErr := db.Exec(
 					`INSERT INTO transaction_history 
 					(deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash) 
 					VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 					depositIDStr,
 					"0x0000000000000000000000000000000000000000", // Placeholder, will be updated later
-					"0", // Placeholder
-					0,   // Default to ETH
-					"0", // Placeholder
+					"0",          // Placeholder
+					0,            // Default to ETH
+					monAmountStr, // Use found monAmount or 0
 					status,
 					"", // Will be filled later
 					txHash,
@@ -121,15 +141,31 @@ func (db *DB) UpdateTransactionStatus(depositID *big.Int, status, txHash string)
 			}
 		}
 
-		// Proceed with update
-		result, err := db.Exec(
-			`UPDATE transaction_history 
-			SET status = $1, monad_tx_hash = $2, updated_at = CURRENT_TIMESTAMP 
-			WHERE deposit_id = $3`,
-			status,
-			txHash,
-			depositIDStr,
-		)
+		// Proceed with update - include mon_amount if we have it
+		var result sql.Result
+		if monAmount != nil {
+			result, err = db.Exec(
+				`UPDATE transaction_history 
+				SET status = $1, monad_tx_hash = $2, mon_amount = $3, updated_at = CURRENT_TIMESTAMP 
+				WHERE deposit_id = $4`,
+				status,
+				txHash,
+				monAmount.String(),
+				depositIDStr,
+			)
+			logger.Info("Updated transaction record with mon_amount %s for deposit ID %s",
+				monAmount.String(), depositIDStr)
+		} else {
+			// Use original query without mon_amount
+			result, err = db.Exec(
+				`UPDATE transaction_history 
+				SET status = $1, monad_tx_hash = $2, updated_at = CURRENT_TIMESTAMP 
+				WHERE deposit_id = $3`,
+				status,
+				txHash,
+				depositIDStr,
+			)
+		}
 
 		if err != nil {
 			fmt.Printf("Error updating transaction status (attempt %d/3): %v\n", attempt, err)
@@ -217,13 +253,16 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 
 	// Handle NULL mon_amount values using sql.NullString
 	if monAmountStr.Valid {
+		// Only try to parse if we have a valid string
 		tx.MonAmount, ok = new(big.Int).SetString(monAmountStr.String, 10)
-		if !ok {
+		if !ok && monAmountStr.String != "" {
+			// Only log a warning if we have an actual string that fails to parse
 			logger.Warn("Failed to parse MON amount: %s for deposit ID %s, defaulting to 0",
 				monAmountStr.String, depositIDStr)
 			tx.MonAmount = big.NewInt(0)
 		}
 	} else {
+		// Use debug level for normal NULL values
 		logger.Debug("MON amount is NULL for deposit ID %s, defaulting to 0", depositIDStr)
 		tx.MonAmount = big.NewInt(0)
 	}
@@ -307,7 +346,8 @@ func (db *DB) GetTransactionByArbitrumTxHash(txHash string) (*Transaction, error
 	if monAmountStr.Valid {
 		var ok bool
 		tx.MonAmount, ok = new(big.Int).SetString(monAmountStr.String, 10)
-		if !ok {
+		if !ok && monAmountStr.String != "" {
+			// Only log a warning if we have an actual string that fails to parse
 			logger.Warn("Failed to parse MON amount: %s for tx hash %s, defaulting to 0",
 				monAmountStr.String, txHash)
 			tx.MonAmount = big.NewInt(0)
@@ -374,7 +414,8 @@ func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) 
 		if monAmountStr.Valid {
 			var ok bool
 			tx.MonAmount, ok = new(big.Int).SetString(monAmountStr.String, 10)
-			if !ok {
+			if !ok && monAmountStr.String != "" {
+				// Only log a warning if we have an actual string that fails to parse
 				logger.Warn("Failed to parse MON amount: %s for wallet %s, defaulting to 0",
 					monAmountStr.String, wallet.Hex())
 				tx.MonAmount = big.NewInt(0)
@@ -661,7 +702,8 @@ func (db *DB) GetTransactionByMonadTxHash(monadTxHash string) (*Transaction, err
 	// Parse MON amount - handle NULL values
 	if monAmountStr.Valid {
 		monAmount, success := new(big.Int).SetString(monAmountStr.String, 10)
-		if !success {
+		if !success && monAmountStr.String != "" {
+			// Only log a warning if we have an actual string that fails to parse
 			logger.Warn("Failed to parse MON amount: %s for Monad tx hash %s, defaulting to 0",
 				monAmountStr.String, monadTxHash)
 			transaction.MonAmount = big.NewInt(0)
@@ -742,14 +784,42 @@ func (db *DB) RefreshProcessingLock(depositID *big.Int, instanceID string, durat
 
 // UpdateTransactionStatusWithTx updates the status of a transaction within an existing database transaction
 func (db *DB) UpdateTransactionStatusWithTx(tx *sql.Tx, depositID *big.Int, status, txHash string) error {
-	_, err := tx.Exec(
-		`UPDATE transaction_history 
-		SET status = $1, monad_tx_hash = $2, updated_at = CURRENT_TIMESTAMP 
-		WHERE deposit_id = $3`,
-		status,
-		txHash,
-		depositID.String(),
-	)
+	// If we're completing a transaction, try to get mon_amount
+	var monAmount *big.Int
+	if status == StatusCompleted && txHash != "" {
+		// We need to query using the main DB connection, not the transaction
+		dist, err := db.GetDistributionByDepositID(depositID)
+		if err == nil && dist != nil && dist.MonAmount != nil && dist.MonAmount.Cmp(big.NewInt(0)) > 0 {
+			monAmount = dist.MonAmount
+			logger.Info("Found mon_amount %s in distributions table for deposit ID %s within Tx",
+				monAmount.String(), depositID.String())
+		}
+	}
+
+	var err error
+	if monAmount != nil {
+		// Update with mon_amount
+		_, err = tx.Exec(
+			`UPDATE transaction_history 
+			SET status = $1, monad_tx_hash = $2, mon_amount = $3, updated_at = CURRENT_TIMESTAMP 
+			WHERE deposit_id = $4`,
+			status,
+			txHash,
+			monAmount.String(),
+			depositID.String(),
+		)
+	} else {
+		// Use original query
+		_, err = tx.Exec(
+			`UPDATE transaction_history 
+			SET status = $1, monad_tx_hash = $2, updated_at = CURRENT_TIMESTAMP 
+			WHERE deposit_id = $3`,
+			status,
+			txHash,
+			depositID.String(),
+		)
+	}
+
 	if err != nil {
 		return fmt.Errorf("failed to update transaction status in transaction: %w", err)
 	}

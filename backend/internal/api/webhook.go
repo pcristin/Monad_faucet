@@ -139,12 +139,12 @@ func (h *Handler) HandleAlchemyWebhook(c *gin.Context) {
 	}
 
 	// Log the raw body for debugging
-	logger.Info("Raw webhook payload: %s", string(body))
+	logger.Debug("Raw webhook payload: %s", string(body))
 
 	// Log request headers for debugging
 	headers := c.Request.Header
 	headerJSON, _ := json.Marshal(headers)
-	logger.Info("Request headers: %s", string(headerJSON))
+	logger.Debug("Request headers: %s", string(headerJSON))
 
 	// First, try to parse as generic JSON to see what we received
 	var rawPayload map[string]interface{}
@@ -159,7 +159,7 @@ func (h *Handler) HandleAlchemyWebhook(c *gin.Context) {
 	for k := range rawPayload {
 		keys = append(keys, k)
 	}
-	logger.Info("Payload keys: %v", keys)
+	logger.Debug("Payload keys: %v", keys)
 
 	// Now try to parse as Alchemy webhook payload
 	var payload AlchemyWebhookPayload
@@ -171,15 +171,18 @@ func (h *Handler) HandleAlchemyWebhook(c *gin.Context) {
 
 	// Verify we have log data
 	if payload.Type != "GRAPHQL" || len(payload.Event.Data.Block.Logs) == 0 {
-		logger.Info("Received non-GRAPHQL type or empty logs array, ignoring")
+		logger.Debug("Received non-GRAPHQL type or empty logs array, ignoring")
 		c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Acknowledged but not processed"})
 		return
 	}
 
 	// Process all logs in the block
 	processedCount := 0
+	logger.Info("Processing %d logs from Alchemy webhook, block %s",
+		len(payload.Event.Data.Block.Logs), payload.Event.Data.Block.Number)
+
 	for i, logEvent := range payload.Event.Data.Block.Logs {
-		logger.Info("Processing log %d/%d from block %s", i+1, len(payload.Event.Data.Block.Logs), payload.Event.Data.Block.Number)
+		logger.Debug("Processing log %d/%d from block %s", i+1, len(payload.Event.Data.Block.Logs), payload.Event.Data.Block.Number)
 
 		// Try to decode Distribution event from the log
 		if err := h.processAlchemyGraphQLLog(webhookCtx, logEvent); err != nil {
@@ -191,6 +194,8 @@ func (h *Handler) HandleAlchemyWebhook(c *gin.Context) {
 	}
 
 	// Return success response
+	logger.Info("Completed processing Alchemy webhook: %d/%d logs processed successfully",
+		processedCount, len(payload.Event.Data.Block.Logs))
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "success",
 		"message":   "Processing completed",
@@ -211,7 +216,7 @@ func (h *Handler) processAlchemyGraphQLLog(ctx context.Context, log AlchemyLog) 
 	// This is likely the Monad distribution event signature
 	distributionEventSignature := log.Topics[0]
 
-	logger.Info("Processing event with signature: %s", distributionEventSignature)
+	logger.Debug("Processing event with signature: %s", distributionEventSignature)
 
 	// We need to extract the recipient, deposit ID, and amount from the event
 	// The format depends on the contract, but we can try to decode both from topics and data
@@ -238,7 +243,7 @@ func (h *Handler) processAlchemyGraphQLLog(ctx context.Context, log AlchemyLog) 
 	// For simplicity, let's use the transaction hash as primary key for tracking
 	txHash := log.Transaction.Hash
 
-	logger.Info("Processing Alchemy GraphQL event: Address=%s, Recipient=%s, TxHash=%s",
+	logger.Debug("Processing Alchemy GraphQL event: Address=%s, Recipient=%s, TxHash=%s",
 		log.Account.Address, recipient.Hex(), txHash)
 
 	// We need to extract the deposit ID from the data
@@ -252,7 +257,7 @@ func (h *Handler) processAlchemyGraphQLLog(ctx context.Context, log AlchemyLog) 
 
 	// If we don't have any pending transactions, just log and continue
 	if len(pendingTxs) == 0 {
-		logger.Info("No pending transactions to process")
+		logger.Debug("No pending transactions to process")
 		return nil
 	}
 
@@ -299,12 +304,12 @@ func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 	}
 
 	// Log the raw body for debugging
-	logger.Info("Raw webhook payload: %s", string(body))
+	logger.Debug("Raw webhook payload: %s", string(body))
 
 	// Log request headers for debugging
 	headers := c.Request.Header
 	headerJSON, _ := json.Marshal(headers)
-	logger.Info("Request headers: %s", string(headerJSON))
+	logger.Debug("Request headers: %s", string(headerJSON))
 
 	// First, try to parse as generic JSON to see what we received
 	var rawPayload map[string]interface{}
@@ -319,7 +324,7 @@ func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 	for k := range rawPayload {
 		keys = append(keys, k)
 	}
-	logger.Info("Payload keys: %v", keys)
+	logger.Debug("Payload keys: %v", keys)
 
 	// Now try to parse the expected payload structure
 	var payload QuickNodeWebhookPayload
@@ -334,16 +339,16 @@ func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 
 	// Check for events array
 	if len(payload.Events) > 0 {
-		logger.Info("Found %d events in 'events' array", len(payload.Events))
+		logger.Debug("Found %d events in 'events' array", len(payload.Events))
 		eventsToProcess = payload.Events
 	} else if payload.Event.TransactionHash != "" && payload.Event.Parameters.ID != "" {
 		// Check for single event in legacy format
-		logger.Info("Found single event in 'event' field with txHash: %s", payload.Event.TransactionHash)
+		logger.Debug("Found single event in 'event' field with txHash: %s", payload.Event.TransactionHash)
 		eventsToProcess = []QuickNodeDistributionEvent{payload.Event}
 	} else {
 		// Check event inside top-level structure
 		if rawEvent, ok := rawPayload["event"].(map[string]interface{}); ok {
-			logger.Info("Found event structure at top level, attempting to reparse")
+			logger.Debug("Found event structure at top level, attempting to reparse")
 
 			// Create a fake events wrapper
 			wrapper := map[string]interface{}{
@@ -355,7 +360,7 @@ func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 			var newPayload QuickNodeWebhookPayload
 			if err := json.Unmarshal(wrapperJSON, &newPayload); err == nil && len(newPayload.Events) > 0 {
 				eventsToProcess = newPayload.Events
-				logger.Info("Successfully reparsed event from top level")
+				logger.Debug("Successfully reparsed event from top level")
 			}
 		}
 	}
@@ -368,8 +373,9 @@ func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 	}
 
 	// Process each event
+	logger.Info("Processing %d events from QuickNode webhook", len(eventsToProcess))
 	for i, event := range eventsToProcess {
-		logger.Info("Processing event %d: tx=%s", i+1, event.TransactionHash)
+		logger.Debug("Processing event %d: tx=%s", i+1, event.TransactionHash)
 
 		// Safety check - we need parameters to process
 		if event.Parameters.ID == "" {
@@ -377,7 +383,7 @@ func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 
 			// If this is a legacy format with topics/data, we'll handle it differently
 			if len(event.Topics) > 0 && event.Data != "" {
-				logger.Info("Event %d appears to be in legacy format, not supported", i+1)
+				logger.Debug("Event %d appears to be in legacy format, not supported", i+1)
 				continue
 			}
 
@@ -386,7 +392,7 @@ func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 		}
 
 		// Log the parameters we're about to process
-		logger.Info("Event %d parameters: ID=%s, Recipient=%s, Amount=%s",
+		logger.Debug("Event %d parameters: ID=%s, Recipient=%s, Amount=%s",
 			i+1, event.Parameters.ID, event.Parameters.Recipient, event.Parameters.Amount)
 
 		// Process the distribution event
@@ -396,10 +402,11 @@ func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 			continue
 		}
 
-		logger.Info("Successfully processed event %d", i+1)
+		logger.Debug("Successfully processed event %d", i+1)
 	}
 
 	// Return success response
+	logger.Info("Completed processing QuickNode webhook: processed %d events", len(eventsToProcess))
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "success",
 		"processed": len(eventsToProcess),
@@ -427,25 +434,27 @@ func (h *Handler) processDistributionEvent(ctx context.Context, event QuickNodeD
 
 	txHash := event.TransactionHash
 
-	logger.Info("Processing distribution event: Recipient=%s, DepositID=%s, Amount=%s, TxHash=%s",
+	logger.Debug("Processing distribution event: Recipient=%s, DepositID=%s, Amount=%s, TxHash=%s",
 		recipient.Hex(), depositID.String(), event.Parameters.Amount, txHash)
 
 	// Before updating, check if transaction already completed
 	tx, err := h.BridgeService.GetTransactionByDepositID(ctx, depositID)
 	if err == nil && tx != nil && tx.Status == "completed" && tx.MonadTxHash != "" {
-		logger.Info("Transaction already completed for deposit ID %s with hash %s (skipping update)",
+		logger.Debug("Transaction already completed for deposit ID %s with hash %s (skipping update)",
 			depositID.String(), tx.MonadTxHash)
 		return nil
 	}
 
 	// Update transaction status in the database using the bridge service method
+	logger.Info("Updating transaction status for deposit ID %s to completed with txHash %s via QuickNode webhook",
+		depositID.String(), txHash)
 	if err := h.BridgeService.UpdateTransactionStatus(ctx, depositID, "completed", txHash); err != nil {
 		return fmt.Errorf("failed to update transaction status: %v", err)
 	}
 
 	// Log successful update
-	logger.Info("Successfully updated transaction status for deposit ID %s to %s with txHash %s via webhook",
-		depositID.String(), "completed", txHash)
+	logger.Info("Successfully updated transaction status for deposit ID %s to completed with txHash %s via QuickNode webhook",
+		depositID.String(), txHash)
 
 	return nil
 }

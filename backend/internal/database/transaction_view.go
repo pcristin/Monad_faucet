@@ -497,7 +497,8 @@ func (db *DB) GetTransactionViewByArbitrumTxHash(txHash string) (*TransactionVie
 	// Handle NULL mon_amount values using sql.NullString
 	if monAmountStr.Valid {
 		tx.MonAmount, ok = new(big.Int).SetString(monAmountStr.String, 10)
-		if !ok {
+		if !ok && monAmountStr.String != "" {
+			// Only log a warning if we have an actual string that fails to parse
 			logger.Warn("Failed to parse MON amount: %s for deposit ID %s, defaulting to 0",
 				monAmountStr.String, depositIDStr)
 			tx.MonAmount = big.NewInt(0)
