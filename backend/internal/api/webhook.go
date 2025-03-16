@@ -57,7 +57,7 @@ type EventParams struct {
 // HandleQuickNodeWebhook handles webhook callbacks from QuickNode
 func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 	// Set timeout for webhook processing
-	webhookCtx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	webhookCtx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
 	// Check if we're using webhook as primary distribution tracking method
