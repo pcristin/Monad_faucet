@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/gin-gonic/gin"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
@@ -93,38 +92,53 @@ func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 
 // decodeDistributionEvent decodes the event data from the payload
 func decodeDistributionEvent(event *QuickNodeDistributionEvent) error {
-	// Expected topics:
-	// [0] - event signature (keccak256 hash of the event signature)
-	// [1] - recipient address (indexed parameter)
-	// [2] - deposit ID (indexed parameter)
+	// Expected structure:
+	// topics[0] - event signature (keccak256 hash of the event signature)
+	// topics[1] - may contain recipient address (last 40 hex characters)
+	// data - contains both amount and deposit ID as consecutive 32-byte values
 
-	// Extract recipient from topics[1]
-	if len(event.Topics) < 3 {
-		return fmt.Errorf("invalid topics length: expected at least 3, got %d", len(event.Topics))
+	// Check if we have at least the event signature
+	if len(event.Topics) < 1 {
+		return fmt.Errorf("invalid topics length: expected at least 1, got %d", len(event.Topics))
 	}
 
-	// Parse recipient address (remove 0x prefix if present)
-	recipientHex := event.Topics[1]
-	recipient := common.HexToAddress(recipientHex)
+	// Parse recipient address from topics[1] if available
+	// Extract last 40 characters and prefix with 0x
+	var recipient common.Address
+	if len(event.Topics) > 1 && len(event.Topics[1]) >= 40 {
+		recipientHex := "0x" + event.Topics[1][len(event.Topics[1])-40:]
+		recipient = common.HexToAddress(recipientHex)
+	} else {
+		return fmt.Errorf("invalid recipient address in topics")
+	}
 
-	// Parse deposit ID from topics[2]
-	depositIDHex := event.Topics[2]
-	// Convert hex string to big.Int
+	// Parse amount and deposit ID from data field
+	// Remove '0x' prefix if present
+	dataStr := event.Data
+	if len(dataStr) < 2 {
+		return fmt.Errorf("invalid data field: too short")
+	}
+
+	// Remove 0x prefix if present
+	if dataStr[:2] == "0x" {
+		dataStr = dataStr[2:]
+	}
+
+	// Data should contain at least 128 hex chars (64 for amount + 64 for deposit ID)
+	if len(dataStr) < 128 {
+		return fmt.Errorf("invalid data field: expected at least 128 hex chars, got %d", len(dataStr))
+	}
+
+	// First 32 bytes (64 hex chars): amount
+	amountHex := "0x" + dataStr[:64]
+	amount := amountHex
+
+	// Second 32 bytes (64 hex chars): deposit ID
+	depositIDHex := "0x" + dataStr[64:128]
 	depositID, success := new(big.Int).SetString(depositIDHex[2:], 16) // Remove 0x prefix
 	if !success {
 		return fmt.Errorf("failed to convert deposit ID hex to big.Int: %s", depositIDHex)
 	}
-
-	// Parse amount from data field
-	// The data field contains the non-indexed parameters
-	amountBytes, err := hexutil.Decode(event.Data)
-	if err != nil {
-		return fmt.Errorf("failed to decode data field: %v", err)
-	}
-
-	// Assuming amount is the only non-indexed parameter
-	// and it's a uint256 (32 bytes)
-	amount := hexutil.Encode(amountBytes)
 
 	// Set decoded data
 	event.DecodedData = DistributionData{
@@ -132,6 +146,9 @@ func decodeDistributionEvent(event *QuickNodeDistributionEvent) error {
 		Amount:    amount,
 		DepositID: depositID,
 	}
+
+	logger.Info("Decoded Distribution event: Recipient=%s, Amount=%s, DepositID=%s",
+		recipient.Hex(), amount, depositID.String())
 
 	return nil
 }
