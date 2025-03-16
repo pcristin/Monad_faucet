@@ -34,7 +34,8 @@ type BridgeService struct {
 	lockRefreshers      map[string]context.CancelFunc
 	lockRefreshersMutex sync.Mutex
 	workerManager       *workers.Manager
-	UseQuickNodeWebhook bool // Flag to use QuickNode webhook for distribution events instead of polling
+	UseWebhook          bool   // Flag to use webhooks for distribution events instead of polling
+	WebhookProvider     string // The webhook provider (quicknode or alchemy)
 }
 
 // NewBridgeService creates a new instance of BridgeService.
@@ -64,8 +65,16 @@ func NewBridgeService(
 	}
 }
 
-// SetUseQuickNodeWebhook sets the UseQuickNodeWebhook flag
+// SetWebhookConfig sets the webhook configuration
+func (s *BridgeService) SetWebhookConfig(useWebhook bool, provider string) {
+	s.UseWebhook = useWebhook
+	s.WebhookProvider = provider
+	logger.Info("Webhook configuration: enabled=%v, provider=%s", useWebhook, provider)
+}
+
+// SetUseQuickNodeWebhook sets the UseQuickNodeWebhook flag (deprecated, use SetWebhookConfig instead)
 func (s *BridgeService) SetUseQuickNodeWebhook(useWebhook bool) {
-	s.UseQuickNodeWebhook = useWebhook
-	logger.Info("QuickNode webhook for distribution events: %v", useWebhook)
+	s.UseWebhook = useWebhook
+	s.WebhookProvider = "quicknode"
+	logger.Info("QuickNode webhook for distribution events: %v (legacy method)", useWebhook)
 }

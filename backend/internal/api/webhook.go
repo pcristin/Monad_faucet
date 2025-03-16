@@ -14,6 +14,62 @@ import (
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
+// AlchemyWebhookPayload represents the webhook payload from Alchemy
+type AlchemyWebhookPayload struct {
+	WebhookID      string       `json:"webhookId"`
+	ID             string       `json:"id"`
+	CreatedAt      string       `json:"createdAt"`
+	Type           string       `json:"type"`
+	Event          AlchemyEvent `json:"event"`
+	SequenceNumber int64        `json:"sequenceNumber"`
+}
+
+// AlchemyEvent represents an event in the Alchemy webhook payload
+type AlchemyEvent struct {
+	Network string      `json:"network"`
+	Data    AlchemyData `json:"data"`
+}
+
+// AlchemyData contains the actual event data
+type AlchemyData struct {
+	Block AlchemyBlock `json:"block,omitempty"`
+	Log   AlchemyLog   `json:"log,omitempty"`
+	Tx    AlchemyTx    `json:"transaction,omitempty"`
+}
+
+// AlchemyBlock contains block information
+type AlchemyBlock struct {
+	Hash       string `json:"hash"`
+	Number     string `json:"number"`
+	Timestamp  string `json:"timestamp"`
+	ParentHash string `json:"parentHash"`
+}
+
+// AlchemyLog contains log information
+type AlchemyLog struct {
+	Address          string   `json:"address"`
+	Data             string   `json:"data"`
+	Topics           []string `json:"topics"`
+	BlockHash        string   `json:"blockHash"`
+	BlockNumber      string   `json:"blockNumber"`
+	TransactionHash  string   `json:"transactionHash"`
+	TransactionIndex string   `json:"transactionIndex"`
+	LogIndex         string   `json:"logIndex"`
+	Removed          bool     `json:"removed"`
+}
+
+// AlchemyTx contains transaction information
+type AlchemyTx struct {
+	Hash      string `json:"hash"`
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Value     string `json:"value"`
+	Gas       string `json:"gas"`
+	GasPrice  string `json:"gasPrice"`
+	Input     string `json:"input"`
+	BlockHash string `json:"blockHash"`
+}
+
 // QuickNodeWebhookPayload represents the webhook payload from QuickNode filtered streams
 // Has both structures - direct event and events array
 type QuickNodeWebhookPayload struct {
@@ -54,6 +110,158 @@ type EventParams struct {
 	Recipient string `json:"recipient"`
 }
 
+// HandleAlchemyWebhook handles webhook callbacks from Alchemy
+func (h *Handler) HandleAlchemyWebhook(c *gin.Context) {
+	// Set timeout for webhook processing
+	webhookCtx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+
+	// Check if we're using webhook as primary distribution tracking method
+	usingWebhookAsPrimary := h.BridgeService != nil && h.BridgeService.UseWebhook &&
+		h.BridgeService.WebhookProvider == "alchemy"
+	if usingWebhookAsPrimary {
+		logger.Info("Alchemy webhook is configured as primary distribution event tracker (polling disabled)")
+	}
+
+	// Read full request body
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		logger.Error("Failed to read webhook body: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
+		return
+	}
+
+	// Log the raw body for debugging
+	logger.Info("Raw webhook payload: %s", string(body))
+
+	// Log request headers for debugging
+	headers := c.Request.Header
+	headerJSON, _ := json.Marshal(headers)
+	logger.Info("Request headers: %s", string(headerJSON))
+
+	// First, try to parse as generic JSON to see what we received
+	var rawPayload map[string]interface{}
+	if err := json.Unmarshal(body, &rawPayload); err != nil {
+		logger.Error("Failed to unmarshal raw payload as JSON: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON format"})
+		return
+	}
+
+	// Log the raw payload structure
+	keys := make([]string, 0, len(rawPayload))
+	for k := range rawPayload {
+		keys = append(keys, k)
+	}
+	logger.Info("Payload keys: %v", keys)
+
+	// Now try to parse as Alchemy webhook payload
+	var payload AlchemyWebhookPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		logger.Error("Failed to unmarshal Alchemy webhook payload: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload structure"})
+		return
+	}
+
+	// Verify we have log data (this is where our event data will be)
+	if payload.Type != "EVENT" || payload.Event.Data.Log.Address == "" {
+		logger.Info("Received non-log event or empty log data, ignoring")
+		c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Acknowledged but not processed"})
+		return
+	}
+
+	// Process the log event
+	logEvent := payload.Event.Data.Log
+
+	// Try to decode Distribution event from the log
+	if err := h.processAlchemyDistributionEvent(webhookCtx, logEvent); err != nil {
+		logger.Error("Failed to process Alchemy event: %v", err)
+		// Return 200 to acknowledge receipt even if processing failed
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "error",
+			"message": fmt.Sprintf("Failed to process event: %v", err),
+		})
+		return
+	}
+
+	// Return success response
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "success",
+		"message": "Event processed successfully",
+	})
+}
+
+// processAlchemyDistributionEvent processes a distribution event from Alchemy webhook
+func (h *Handler) processAlchemyDistributionEvent(ctx context.Context, log AlchemyLog) error {
+	// Check if this is our Distribution event - should have 4 topics (event signature + 3 indexed params)
+	// Distribution(address indexed recipient, uint256 indexed id, uint256 amount)
+	if len(log.Topics) != 4 {
+		return fmt.Errorf("not a Distribution event, has %d topics", len(log.Topics))
+	}
+
+	// First topic should be event signature
+	// keccak256("Distribution(address,uint256,uint256)")
+	distributionEventSignature := "0x91d1e7819d2a17603e5dbecbe46b351b4a49c578db0cafaeb9f5b5e18f148969"
+	if log.Topics[0] != distributionEventSignature {
+		return fmt.Errorf("not a Distribution event, signature mismatch: %s", log.Topics[0])
+	}
+
+	// Topic 1: recipient (address, indexed)
+	// Topic 2: id (uint256, indexed)
+	// Topic 3: amount (uint256, indexed)
+
+	// Parse recipient from topic 1 (remove leading zeros)
+	recipientHex := log.Topics[1]
+	if len(recipientHex) > 2 && recipientHex[:2] == "0x" {
+		// Keep 0x prefix but remove padding
+		recipientHex = "0x" + recipientHex[26:]
+	}
+	recipient := common.HexToAddress(recipientHex)
+
+	// Parse deposit ID from topic 2
+	depositIDHex := log.Topics[2]
+	if len(depositIDHex) > 2 && depositIDHex[:2] == "0x" {
+		depositIDHex = depositIDHex[2:] // Remove 0x prefix for parsing
+	}
+	depositID, ok := new(big.Int).SetString(depositIDHex, 16)
+	if !ok {
+		return fmt.Errorf("failed to parse deposit ID from topic: %s", log.Topics[2])
+	}
+
+	// Parse amount from topic 3
+	amountHex := log.Topics[3]
+	if len(amountHex) > 2 && amountHex[:2] == "0x" {
+		amountHex = amountHex[2:] // Remove 0x prefix for parsing
+	}
+	amount, ok := new(big.Int).SetString(amountHex, 16)
+	if !ok {
+		return fmt.Errorf("failed to parse amount from topic: %s", log.Topics[3])
+	}
+
+	txHash := log.TransactionHash
+
+	logger.Info("Processing Alchemy distribution event: Recipient=%s, DepositID=%s, Amount=%s, TxHash=%s",
+		recipient.Hex(), depositID.String(), amount.String(), txHash)
+
+	// Before updating, check if transaction already completed
+	tx, err := h.BridgeService.GetTransactionByDepositID(ctx, depositID)
+	if err == nil && tx != nil && tx.Status == "completed" && tx.MonadTxHash != "" {
+		logger.Info("Transaction already completed for deposit ID %s with hash %s (skipping update)",
+			depositID.String(), tx.MonadTxHash)
+		return nil
+	}
+
+	// Update transaction status in the database using the bridge service method
+	if err := h.BridgeService.UpdateTransactionStatus(ctx, depositID, "completed", txHash); err != nil {
+		return fmt.Errorf("failed to update transaction status: %v", err)
+	}
+
+	// Log successful update
+	logger.Info("Successfully updated transaction status for deposit ID %s to %s with txHash %s via Alchemy webhook",
+		depositID.String(), "completed", txHash)
+
+	return nil
+}
+
 // HandleQuickNodeWebhook handles webhook callbacks from QuickNode
 func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 	// Set timeout for webhook processing
@@ -61,9 +269,10 @@ func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 	defer cancel()
 
 	// Check if we're using webhook as primary distribution tracking method
-	usingWebhookAsPrimary := h.BridgeService != nil && h.BridgeService.UseQuickNodeWebhook
+	usingWebhookAsPrimary := h.BridgeService != nil && h.BridgeService.UseWebhook &&
+		h.BridgeService.WebhookProvider == "quicknode"
 	if usingWebhookAsPrimary {
-		logger.Info("Webhook is configured as primary distribution event tracker (polling disabled)")
+		logger.Info("QuickNode webhook is configured as primary distribution event tracker (polling disabled)")
 	}
 
 	// Read full request body

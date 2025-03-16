@@ -25,8 +25,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 			v1.GET("/info", h.GetFaucetInfo)
 			v1.GET("/wallet/transactions", h.GetWalletTransactions)
 
-			// Add webhook endpoint for QuickNode
+			// Add webhook endpoints
 			v1.POST("/webhook/quicknode", h.HandleQuickNodeWebhook)
+			v1.POST("/webhook/alchemy", h.HandleAlchemyWebhook)
 		}
 
 		// Admin endpoints are registered separately to avoid import cycles

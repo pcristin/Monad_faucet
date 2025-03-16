@@ -22,7 +22,8 @@ type Config struct {
 	AdminPasswords       []string         // Passwords for admin auth
 	LogLevel             string           // Logging level
 	WorkerPoolConfig     WorkerPoolConfig // Configuration for worker pools
-	UseQuickNodeWebhook  bool             // Flag to use QuickNode webhook for distribution events instead of polling
+	UseWebhook           bool             // Flag to use webhooks for distribution events instead of polling
+	WebhookProvider      string           // Which webhook provider to use ("quicknode" or "alchemy")
 }
 
 // WorkerPoolConfig holds configuration for all worker pools
@@ -96,6 +97,23 @@ func Load() (*Config, error) {
 		}
 	}
 
+	// Get webhook configuration
+	useWebhook := getEnvAsBoolOrDefault("USE_WEBHOOK", false)
+
+	// For backward compatibility
+	if !useWebhook {
+		useWebhook = getEnvAsBoolOrDefault("USE_QUICKNODE_WEBHOOK", false)
+	}
+
+	// Default to quicknode for backward compatibility
+	webhookProvider := getEnvOrDefault("WEBHOOK_PROVIDER", "quicknode")
+
+	// Validate webhook provider
+	if webhookProvider != "quicknode" && webhookProvider != "alchemy" {
+		fmt.Printf("Warning: Invalid WEBHOOK_PROVIDER '%s'. Defaulting to 'quicknode'\n", webhookProvider)
+		webhookProvider = "quicknode"
+	}
+
 	cfg := &Config{
 		ServerAddr:           serverAddr,
 		DatabaseURL:          dbURL,
@@ -114,7 +132,8 @@ func Load() (*Config, error) {
 			DistributionWorkers: distributionWorkers,
 			DBWorkers:           dbWorkers,
 		},
-		UseQuickNodeWebhook: getEnvAsBoolOrDefault("USE_QUICKNODE_WEBHOOK", false),
+		UseWebhook:      useWebhook,
+		WebhookProvider: webhookProvider,
 	}
 
 	return cfg, nil

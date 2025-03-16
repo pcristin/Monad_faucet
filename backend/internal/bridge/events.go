@@ -21,10 +21,11 @@ import (
 
 // checkMonadBlockchainForTransaction searches for a Distribution event on the Monad blockchain.
 func (s *BridgeService) checkMonadBlockchainForTransaction(ctx context.Context, depositId *big.Int) (string, error) {
-	// Check if we should use QuickNode webhook instead of RPC polling
-	if s.UseQuickNodeWebhook {
-		// When using QuickNode webhooks, we check the database directly instead of polling the blockchain
-		logger.Info("Using QuickNode webhook for distribution events (skipping blockchain polling for deposit ID %s)", depositId.String())
+	// Check if we should use webhook instead of RPC polling
+	if s.UseWebhook {
+		// When using webhooks, we check the database directly instead of polling the blockchain
+		logger.Info("Using %s webhook for distribution events (skipping blockchain polling for deposit ID %s)",
+			s.WebhookProvider, depositId.String())
 
 		// Get transaction from database to check if it's been updated by webhook
 		tx, err := s.db.GetTransactionByDepositID(depositId)
@@ -96,7 +97,7 @@ func (s *BridgeService) checkMonadBlockchainForTransaction(ctx context.Context, 
 				continue
 			} else {
 				// Only use fallback if webhooks are disabled
-				if !s.UseQuickNodeWebhook {
+				if !s.UseWebhook {
 					logger.Info("Falling back to manual event scanning")
 					if err := s.searchAllDistributionEvents(ctx, depositId); err != nil {
 						logger.Error("Fallback search error: %v", err)
@@ -130,7 +131,7 @@ func (s *BridgeService) checkMonadBlockchainForTransaction(ctx context.Context, 
 	}
 
 	// Only use fallback if webhooks are disabled
-	if !s.UseQuickNodeWebhook {
+	if !s.UseWebhook {
 		logger.Info("No Distribution event found via filtering; trying manual decoding")
 		if err := s.searchAllDistributionEvents(ctx, depositId); err != nil {
 			logger.Error("Final fallback search error: %v", err)
@@ -144,10 +145,11 @@ func (s *BridgeService) checkMonadBlockchainForTransaction(ctx context.Context, 
 
 // searchAllDistributionEvents performs a fallback scan of Distribution events.
 func (s *BridgeService) searchAllDistributionEvents(ctx context.Context, targetDepositId *big.Int) error {
-	// Check if we should use QuickNode webhook instead of RPC polling
-	if s.UseQuickNodeWebhook {
-		// When using QuickNode webhooks, we skip fallback scanning
-		logger.Info("Using QuickNode webhook for distribution events (skipping fallback scan for deposit ID %s)", targetDepositId.String())
+	// Check if we should use webhook instead of RPC polling
+	if s.UseWebhook {
+		// When using webhooks, we skip fallback scanning
+		logger.Info("Using %s webhook for distribution events (skipping fallback scan for deposit ID %s)",
+			s.WebhookProvider, targetDepositId.String())
 		return nil
 	}
 
@@ -257,11 +259,11 @@ func (s *BridgeService) FindMonadDistributionByDepositID(ctx context.Context, de
 
 	logger.Info("Searching for Distribution events for deposit ID %s", depositID.String())
 
-	// Check if we should use QuickNode webhook instead of RPC polling for stage environment
-	if s.UseQuickNodeWebhook {
-		// When using QuickNode webhooks, we check the database directly instead of polling the blockchain
+	// Check if we should use webhook instead of RPC polling for stage environment
+	if s.UseWebhook {
+		// When using webhooks, we check the database directly instead of polling the blockchain
 		// The webhook handler will have already updated the transaction status
-		logger.Info("Using QuickNode webhook for distribution events (skipping blockchain polling)")
+		logger.Info("Using %s webhook for distribution events (skipping blockchain polling)", s.WebhookProvider)
 
 		// Get transaction from database to check if it's been updated by webhook
 		tx, err := s.db.GetTransactionByDepositID(depositID)
