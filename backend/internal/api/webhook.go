@@ -16,32 +16,26 @@ import (
 
 // QuickNodeWebhookPayload represents the webhook payload from QuickNode filtered streams
 type QuickNodeWebhookPayload struct {
-	EventName string                     `json:"eventName"`
-	StreamID  string                     `json:"streamId"`
-	Event     QuickNodeDistributionEvent `json:"event"`
-	Network   string                     `json:"network"`
+	Events []QuickNodeDistributionEvent `json:"events"`
 }
 
 // QuickNodeDistributionEvent represents the Distribution event data
 type QuickNodeDistributionEvent struct {
-	BlockHash        string           `json:"blockHash"`
-	BlockNumber      string           `json:"blockNumber"`
-	BlockTimestamp   string           `json:"blockTimestamp"`
-	TransactionHash  string           `json:"transactionHash"`
-	TransactionIndex string           `json:"transactionIndex"`
-	LogIndex         string           `json:"logIndex"`
-	Address          string           `json:"address"`
-	Topics           []string         `json:"topics"`
-	Data             string           `json:"data"`
-	Removed          bool             `json:"removed"`
-	DecodedData      DistributionData `json:"decodedData,omitempty"`
+	Address         string      `json:"address"`
+	BlockHash       string      `json:"blockHash"`
+	BlockNumber     string      `json:"blockNumber"`
+	EventName       string      `json:"eventName"`
+	EventSignature  string      `json:"eventSignature"`
+	LogIndex        string      `json:"logIndex"`
+	Parameters      EventParams `json:"parameters"`
+	TransactionHash string      `json:"transactionHash"`
 }
 
-// DistributionData represents the decoded distribution event data
-type DistributionData struct {
-	Recipient common.Address `json:"recipient"`
-	Amount    string         `json:"amount"`
-	DepositID *big.Int       `json:"depositId"`
+// EventParams represents the already decoded parameters from the event
+type EventParams struct {
+	Amount    string `json:"amount"`
+	ID        string `json:"id"`
+	Recipient string `json:"recipient"`
 }
 
 // HandleQuickNodeWebhook handles webhook callbacks from QuickNode
@@ -58,6 +52,9 @@ func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 		return
 	}
 
+	// Log the raw payload for debugging
+	logger.Info("Received QuickNode webhook raw payload: %s", string(body))
+
 	// Parse webhook payload
 	var payload QuickNodeWebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -66,105 +63,46 @@ func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 		return
 	}
 
-	// Log the webhook event
-	logger.Info("Received QuickNode webhook event: %s for stream: %s",
-		payload.EventName, payload.StreamID)
-
-	// Handle distribution event
-	// We need to decode the event data from the payload
-	if err := decodeDistributionEvent(&payload.Event); err != nil {
-		logger.Error("Failed to decode distribution event: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to decode event data"})
+	// Check if we have any events
+	if len(payload.Events) == 0 {
+		logger.Warn("No events found in webhook payload")
+		c.JSON(http.StatusOK, gin.H{"status": "success", "message": "No events to process"})
 		return
 	}
 
-	// Process the distribution event
-	// This will be specific to your application logic
-	if err := h.processDistributionEvent(webhookCtx, payload.Event); err != nil {
-		logger.Error("Failed to process distribution event: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process distribution event"})
-		return
+	// Process each event
+	for i, event := range payload.Events {
+		logger.Info("Processing event %d: %s, tx: %s", i+1, event.EventName, event.TransactionHash)
+
+		// Process the distribution event
+		if err := h.processDistributionEvent(webhookCtx, event); err != nil {
+			logger.Error("Failed to process distribution event: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to process event %d: %v", i+1, err)})
+			return
+		}
 	}
 
 	// Return success response
-	c.JSON(http.StatusOK, gin.H{"status": "success"})
-}
-
-// decodeDistributionEvent decodes the event data from the payload
-func decodeDistributionEvent(event *QuickNodeDistributionEvent) error {
-	// Expected structure:
-	// topics[0] - event signature (keccak256 hash of the event signature)
-	// topics[1] - may contain recipient address (last 40 hex characters)
-	// data - contains both amount and deposit ID as consecutive 32-byte values
-
-	// Check if we have at least the event signature
-	if len(event.Topics) < 1 {
-		return fmt.Errorf("invalid topics length: expected at least 1, got %d", len(event.Topics))
-	}
-
-	// Parse recipient address from topics[1] if available
-	// Extract last 40 characters and prefix with 0x
-	var recipient common.Address
-	if len(event.Topics) > 1 && len(event.Topics[1]) >= 40 {
-		recipientHex := "0x" + event.Topics[1][len(event.Topics[1])-40:]
-		recipient = common.HexToAddress(recipientHex)
-	} else {
-		return fmt.Errorf("invalid recipient address in topics")
-	}
-
-	// Parse amount and deposit ID from data field
-	// Remove '0x' prefix if present
-	dataStr := event.Data
-	if len(dataStr) < 2 {
-		return fmt.Errorf("invalid data field: too short")
-	}
-
-	// Remove 0x prefix if present
-	if dataStr[:2] == "0x" {
-		dataStr = dataStr[2:]
-	}
-
-	// Data should contain at least 128 hex chars (64 for amount + 64 for deposit ID)
-	if len(dataStr) < 128 {
-		return fmt.Errorf("invalid data field: expected at least 128 hex chars, got %d", len(dataStr))
-	}
-
-	// First 32 bytes (64 hex chars): amount
-	amountHex := "0x" + dataStr[:64]
-	amount := amountHex
-
-	// Second 32 bytes (64 hex chars): deposit ID
-	depositIDHex := "0x" + dataStr[64:128]
-	depositID, success := new(big.Int).SetString(depositIDHex[2:], 16) // Remove 0x prefix
-	if !success {
-		return fmt.Errorf("failed to convert deposit ID hex to big.Int: %s", depositIDHex)
-	}
-
-	// Set decoded data
-	event.DecodedData = DistributionData{
-		Recipient: recipient,
-		Amount:    amount,
-		DepositID: depositID,
-	}
-
-	logger.Info("Decoded Distribution event: Recipient=%s, Amount=%s, DepositID=%s",
-		recipient.Hex(), amount, depositID.String())
-
-	return nil
+	c.JSON(http.StatusOK, gin.H{"status": "success", "processed": len(payload.Events)})
 }
 
 // processDistributionEvent processes the distribution event
 func (h *Handler) processDistributionEvent(ctx context.Context, event QuickNodeDistributionEvent) error {
-	// Extract data from the event
-	recipient := event.DecodedData.Recipient
-	depositID := event.DecodedData.DepositID
+	// Convert recipient string to address
+	recipient := common.HexToAddress(event.Parameters.Recipient)
+
+	// Convert ID string to big.Int
+	depositID, ok := new(big.Int).SetString(event.Parameters.ID, 10)
+	if !ok {
+		return fmt.Errorf("failed to parse deposit ID: %s", event.Parameters.ID)
+	}
+
 	txHash := event.TransactionHash
 
-	logger.Info("Processing distribution event: Recipient=%s, DepositID=%s, TxHash=%s",
-		recipient.Hex(), depositID.String(), txHash)
+	logger.Info("Processing distribution event: Recipient=%s, DepositID=%s, Amount=%s, TxHash=%s",
+		recipient.Hex(), depositID.String(), event.Parameters.Amount, txHash)
 
 	// Update transaction status in the database using the bridge service method
-	// The bridge service already has the appropriate database transaction handling
 	if err := h.BridgeService.UpdateTransactionStatus(ctx, depositID, "completed", txHash); err != nil {
 		return fmt.Errorf("failed to update transaction status: %v", err)
 	}
