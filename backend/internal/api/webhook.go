@@ -206,13 +206,21 @@ func (h *Handler) processDistributionEvent(ctx context.Context, event QuickNodeD
 	logger.Info("Processing distribution event: Recipient=%s, DepositID=%s, Amount=%s, TxHash=%s",
 		recipient.Hex(), depositID.String(), event.Parameters.Amount, txHash)
 
+	// Before updating, check if transaction already completed
+	tx, err := h.BridgeService.GetTransactionByDepositID(ctx, depositID)
+	if err == nil && tx != nil && tx.Status == "completed" && tx.MonadTxHash != "" {
+		logger.Info("Transaction already completed for deposit ID %s with hash %s (skipping update)",
+			depositID.String(), tx.MonadTxHash)
+		return nil
+	}
+
 	// Update transaction status in the database using the bridge service method
 	if err := h.BridgeService.UpdateTransactionStatus(ctx, depositID, "completed", txHash); err != nil {
 		return fmt.Errorf("failed to update transaction status: %v", err)
 	}
 
 	// Log successful update
-	logger.Info("Successfully updated transaction status for deposit ID %s to %s with txHash %s",
+	logger.Info("Successfully updated transaction status for deposit ID %s to %s with txHash %s via webhook",
 		depositID.String(), "completed", txHash)
 
 	return nil
