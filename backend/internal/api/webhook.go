@@ -60,6 +60,12 @@ func (h *Handler) HandleQuickNodeWebhook(c *gin.Context) {
 	webhookCtx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
+	// Check if we're using webhook as primary distribution tracking method
+	usingWebhookAsPrimary := h.BridgeService != nil && h.BridgeService.UseQuickNodeWebhook
+	if usingWebhookAsPrimary {
+		logger.Info("Webhook is configured as primary distribution event tracker (polling disabled)")
+	}
+
 	// Read full request body
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {

@@ -214,6 +214,32 @@ func (s *BridgeService) FindMonadDistributionByDepositID(ctx context.Context, de
 
 	logger.Info("Searching for Distribution events for deposit ID %s", depositID.String())
 
+	// Check if we should use QuickNode webhook instead of RPC polling for stage environment
+	if s.UseQuickNodeWebhook {
+		// When using QuickNode webhooks, we check the database directly instead of polling the blockchain
+		// The webhook handler will have already updated the transaction status
+		logger.Info("Using QuickNode webhook for distribution events (skipping blockchain polling)")
+
+		// Get transaction from database to check if it's been updated by webhook
+		tx, err := s.db.GetTransactionByDepositID(depositID)
+		if err != nil {
+			logger.Error("Failed to get transaction from database: %v", err)
+			return "", err
+		}
+
+		// If the transaction has a Monad transaction hash and status is completed, return it
+		if tx != nil && tx.Status == database.StatusCompleted && tx.MonadTxHash != "" {
+			logger.Info("Found completed transaction with Monad tx hash %s from webhook update", tx.MonadTxHash)
+			return tx.MonadTxHash, nil
+		}
+
+		// If not found or not completed, return empty string with nil error
+		// This lets the system continue with other processing without creating an error state
+		logger.Info("No completed distribution found for deposit ID %s in database (using webhook mode)", depositID.String())
+		return "", nil
+	}
+
+	// Traditional RPC polling implementation below
 	// Create a filter query for Distribution events with the specified deposit ID
 	distributionTopic := crypto.Keccak256Hash([]byte("Distribution(address,uint256,uint256)"))
 

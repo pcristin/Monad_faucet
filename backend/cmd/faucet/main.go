@@ -117,6 +117,10 @@ func main() {
 		db,
 	)
 
+	// Set QuickNode webhook flag from config
+	bridgeService.UseQuickNodeWebhook = cfg.UseQuickNodeWebhook
+	logger.Info("QuickNode webhook for distribution events: %v", cfg.UseQuickNodeWebhook)
+
 	// Add worker manager to bridge service
 	bridgeService.SetWorkerManager(workerManager)
 

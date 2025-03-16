@@ -18,21 +18,14 @@ func (s *BridgeService) QueueRefund(depositID *big.Int) {
 }
 
 // SetWorkerManager sets the worker manager for the bridge service
-func (s *BridgeService) SetWorkerManager(manager interface{}) {
-	if wm, ok := manager.(*workers.Manager); ok {
-		s.workerManager = wm
-		logger.Info("Worker manager set for bridge service")
-	} else {
-		logger.Error("Invalid worker manager type provided")
-	}
+func (s *BridgeService) SetWorkerManager(manager *workers.Manager) {
+	s.workerManager = manager
+	logger.Info("Worker manager set for bridge service")
 }
 
 // GetWorkerManager returns the worker manager
 func (s *BridgeService) GetWorkerManager() *workers.Manager {
-	if wm, ok := s.workerManager.(*workers.Manager); ok {
-		return wm
-	}
-	return nil
+	return s.workerManager
 }
 
 // SubmitDepositTask submits a deposit task to the worker pool

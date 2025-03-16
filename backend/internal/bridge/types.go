@@ -9,6 +9,8 @@ import (
 
 	"github.com/pcristin/monad-faucet/internal/blockchain"
 	"github.com/pcristin/monad-faucet/internal/database"
+	"github.com/pcristin/monad-faucet/internal/workers"
+	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
 // BridgeService handles the business logic for the bridge operations.
@@ -31,7 +33,8 @@ type BridgeService struct {
 	lockRefreshInterval time.Duration
 	lockRefreshers      map[string]context.CancelFunc
 	lockRefreshersMutex sync.Mutex
-	workerManager       interface{} // Will be set to *workers.Manager
+	workerManager       *workers.Manager
+	UseQuickNodeWebhook bool // Flag to use QuickNode webhook for distribution events instead of polling
 }
 
 // NewBridgeService creates a new instance of BridgeService.
@@ -59,4 +62,10 @@ func NewBridgeService(
 		lockRefreshInterval: 1 * time.Minute,
 		lockRefreshers:      make(map[string]context.CancelFunc),
 	}
+}
+
+// SetUseQuickNodeWebhook sets the UseQuickNodeWebhook flag
+func (s *BridgeService) SetUseQuickNodeWebhook(useWebhook bool) {
+	s.UseQuickNodeWebhook = useWebhook
+	logger.Info("QuickNode webhook for distribution events: %v", useWebhook)
 }

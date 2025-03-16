@@ -22,6 +22,7 @@ type Config struct {
 	AdminPasswords       []string         // Passwords for admin auth
 	LogLevel             string           // Logging level
 	WorkerPoolConfig     WorkerPoolConfig // Configuration for worker pools
+	UseQuickNodeWebhook  bool             // Flag to use QuickNode webhook for distribution events instead of polling
 }
 
 // WorkerPoolConfig holds configuration for all worker pools
@@ -113,6 +114,7 @@ func Load() (*Config, error) {
 			DistributionWorkers: distributionWorkers,
 			DBWorkers:           dbWorkers,
 		},
+		UseQuickNodeWebhook: getEnvAsBoolOrDefault("USE_QUICKNODE_WEBHOOK", false),
 	}
 
 	return cfg, nil
@@ -141,6 +143,29 @@ func getEnvAsIntOrDefault(key string, defaultValue int) int {
 		return defaultValue
 	}
 	return value
+}
+
+func getEnvAsBoolOrDefault(key string, defaultValue bool) bool {
+	strValue := os.Getenv(key)
+	if strValue == "" {
+		return defaultValue
+	}
+
+	// Convert to lowercase for more reliable parsing
+	strValue = strings.ToLower(strValue)
+
+	// Check for true values
+	if strValue == "true" || strValue == "1" || strValue == "yes" || strValue == "y" || strValue == "on" {
+		return true
+	}
+
+	// Check for false values
+	if strValue == "false" || strValue == "0" || strValue == "no" || strValue == "n" || strValue == "off" {
+		return false
+	}
+
+	// If not recognized, return default
+	return defaultValue
 }
 
 // Validate checks if all required configuration values are present
