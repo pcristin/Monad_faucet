@@ -57,7 +57,7 @@ func (h *AdminHandler) AdminUpdateRatio(c *gin.Context) {
 	db := h.Handler.GetBridgeService().GetDB()
 	if db != nil {
 		// Debug the database type
-		logger.Info("Database type in handler: %T", db)
+		logger.Debug("Database type in handler: %T", db)
 
 		// Use JSON format instead of key=value format to avoid SQL syntax issues
 		params := fmt.Sprintf(`{"new_ratio":"%s"}`, req.MonUsdRatio)
