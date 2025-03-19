@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"os"
 	"runtime"
 	"sync"
@@ -83,4 +84,73 @@ type TransactionResponse struct {
 	Message   string            `json:"message"`
 	Txs       map[string]string `json:"txs"`
 	DepositID string            `json:"deposit_id,omitempty"`
+}
+
+// AlchemyWebhookPayload represents the webhook payload from Alchemy
+type AlchemyWebhookPayload struct {
+	WebhookID      string       `json:"webhookId"`
+	ID             string       `json:"id"`
+	CreatedAt      string       `json:"createdAt"`
+	Type           string       `json:"type"`
+	Event          AlchemyEvent `json:"event"`
+	SequenceNumber string       `json:"sequenceNumber"`
+}
+
+// AlchemyEvent represents an event in the Alchemy webhook payload
+type AlchemyEvent struct {
+	Data    AlchemyData `json:"data"`
+	Network string      `json:"network"`
+}
+
+// AlchemyData contains the actual event data
+type AlchemyData struct {
+	Block AlchemyBlock `json:"block,omitempty"`
+}
+
+// AlchemyBlock contains block information
+type AlchemyBlock struct {
+	Hash      string       `json:"hash"`
+	Number    json.Number  `json:"number"`
+	Timestamp json.Number  `json:"timestamp"`
+	Logs      []AlchemyLog `json:"logs,omitempty"`
+}
+
+// AlchemyLog contains log information
+type AlchemyLog struct {
+	Data        string         `json:"data"`
+	Topics      []string       `json:"topics"`
+	Index       json.Number    `json:"index"`
+	Account     AlchemyAccount `json:"account"`
+	Transaction AlchemyTx      `json:"transaction,omitempty"`
+}
+
+// AlchemyAccount represents an account in the log
+type AlchemyAccount struct {
+	Address string `json:"address"`
+}
+
+// AlchemyTx contains transaction information
+type AlchemyTx struct {
+	Hash                 string          `json:"hash"`
+	Nonce                json.Number     `json:"nonce"`
+	Index                json.Number     `json:"index"`
+	From                 AlchemyAccount  `json:"from"`
+	To                   AlchemyAccount  `json:"to"`
+	Value                string          `json:"value"`
+	GasPrice             string          `json:"gasPrice"`
+	MaxFeePerGas         string          `json:"maxFeePerGas,omitempty"`
+	MaxPriorityFeePerGas string          `json:"maxPriorityFeePerGas,omitempty"`
+	Gas                  json.Number     `json:"gas"`
+	Status               json.Number     `json:"status"`
+	GasUsed              json.Number     `json:"gasUsed"`
+	CumulativeGasUsed    json.Number     `json:"cumulativeGasUsed"`
+	EffectiveGasPrice    string          `json:"effectiveGasPrice"`
+	CreatedContract      *AlchemyAccount `json:"createdContract"`
+}
+
+// EventParams represents the decoded parameters from the event
+type EventParams struct {
+	Amount    string `json:"amount"`
+	ID        string `json:"id"`
+	Recipient string `json:"recipient"`
 }

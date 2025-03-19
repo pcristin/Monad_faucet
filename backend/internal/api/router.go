@@ -26,7 +26,6 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 			v1.GET("/wallet/transactions", h.GetWalletTransactions)
 
 			// Add webhook endpoints
-			v1.POST("/webhook/quicknode", h.HandleQuickNodeWebhook)
 			v1.POST("/webhook/alchemy", h.HandleAlchemyWebhook)
 		}
 
