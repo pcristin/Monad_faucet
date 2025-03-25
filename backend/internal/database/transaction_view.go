@@ -577,7 +577,7 @@ func convertTransactionToView(tx *Transaction) *TransactionView {
 		Status:        tx.Status,
 		TxHash:        tx.TxHash,
 		MonadTxHash:   tx.MonadTxHash,
-		Metadata:      tx.Metadata,
+		Metadata:      tx.GetMetadata(),
 		CreatedAt:     tx.CreatedAt,
 		UpdatedAt:     tx.UpdatedAt,
 	}

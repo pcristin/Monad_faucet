@@ -38,9 +38,9 @@ type Transaction struct {
 	Currency      CurrencyType
 	MonAmount     *big.Int
 	Status        string
-	TxHash        string // Arbitrum transaction hash
-	MonadTxHash   string // Monad transaction hash
-	Metadata      string // User-provided metadata for this transaction
+	TxHash        string         // Arbitrum transaction hash
+	MonadTxHash   string         // Monad transaction hash
+	Metadata      sql.NullString // User-provided metadata for this transaction
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
@@ -271,9 +271,9 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 
 	// Handle NULL metadata values
 	if metadataStr.Valid {
-		tx.Metadata = metadataStr.String
+		tx.Metadata = metadataStr
 	} else {
-		tx.Metadata = ""
+		tx.Metadata = sql.NullString{}
 	}
 
 	logger.Debug("Found transaction for deposit ID %s: status=%s, monadTxHash=%s, monAmount=%s",
@@ -438,9 +438,9 @@ func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) 
 
 		// Handle NULL metadata values
 		if metadataStr.Valid {
-			tx.Metadata = metadataStr.String
+			tx.Metadata = metadataStr
 		} else {
-			tx.Metadata = ""
+			tx.Metadata = sql.NullString{}
 		}
 
 		transactions = append(transactions, &tx)
@@ -518,9 +518,9 @@ func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 
 		// Handle NULL metadata values
 		if metadataStr.Valid {
-			tx.Metadata = metadataStr.String
+			tx.Metadata = metadataStr
 		} else {
-			tx.Metadata = ""
+			tx.Metadata = sql.NullString{}
 		}
 
 		transactions = append(transactions, &tx)
@@ -740,9 +740,9 @@ func (db *DB) GetTransactionByMonadTxHash(monadTxHash string) (*Transaction, err
 
 	// Handle NULL metadata values
 	if metadataStr.Valid {
-		transaction.Metadata = metadataStr.String
+		transaction.Metadata = metadataStr
 	} else {
-		transaction.Metadata = ""
+		transaction.Metadata = sql.NullString{}
 	}
 
 	return &transaction, nil
@@ -975,9 +975,9 @@ func (db *DB) GetTransactionsByStatus(status string, limit, offset int) ([]*Tran
 
 		// Handle NULL metadata values
 		if metadataStr.Valid {
-			tx.Metadata = metadataStr.String
+			tx.Metadata = metadataStr
 		} else {
-			tx.Metadata = ""
+			tx.Metadata = sql.NullString{}
 		}
 
 		transactions = append(transactions, &tx)
@@ -988,4 +988,12 @@ func (db *DB) GetTransactionsByStatus(status string, limit, offset int) ([]*Tran
 	}
 
 	return transactions, nil
+}
+
+// GetMetadata retrieves the metadata as a string, returning empty string if NULL
+func (t *Transaction) GetMetadata() string {
+	if t.Metadata.Valid {
+		return t.Metadata.String
+	}
+	return ""
 }

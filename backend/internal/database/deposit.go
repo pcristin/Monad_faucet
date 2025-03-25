@@ -20,7 +20,7 @@ type Deposit struct {
 	TxHash        string // Arbitrum transaction hash
 	BlockNumber   uint64
 	Status        string
-	Metadata      string // User-provided metadata for this deposit
+	Metadata      sql.NullString // User-provided metadata for this deposit
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
@@ -424,4 +424,12 @@ func (db *DB) GetDepositsByStatus(status string, limit, offset int) ([]*Deposit,
 	}
 
 	return deposits, nil
+}
+
+// GetMetadata retrieves the metadata as a string, returning empty string if NULL
+func (d *Deposit) GetMetadata() string {
+	if d.Metadata.Valid {
+		return d.Metadata.String
+	}
+	return ""
 }

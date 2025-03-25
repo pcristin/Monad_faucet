@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"database/sql"
 	"math/big"
 	"strings"
 	"sync"
@@ -226,7 +227,7 @@ func (pools *BridgeWorkerPools) processDepositJob(ctx context.Context, job *Depo
 		TxHash:        job.Event.TxHash,
 		BlockNumber:   job.Event.BlockNumber,
 		Status:        database.StatusPending,
-		Metadata:      job.Event.Metadata,
+		Metadata:      sql.NullString{String: job.Event.Metadata, Valid: job.Event.Metadata != ""},
 	}
 
 	// 3. Submit database job to create the deposit

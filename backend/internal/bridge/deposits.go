@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"math/big"
 	"strings"
@@ -196,7 +197,7 @@ func (s *BridgeService) ensureTransactionRecord(event blockchain.DepositEvent, m
 		MonAmount:     monAmount,
 		Status:        database.StatusPending,
 		TxHash:        event.TxHash,
-		Metadata:      event.Metadata,
+		Metadata:      sql.NullString{String: event.Metadata, Valid: event.Metadata != ""},
 	}
 
 	// Try multiple times to create the transaction
