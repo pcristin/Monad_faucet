@@ -22,6 +22,7 @@ type MigrationRecord struct {
 	Status        string
 	TxHash        sql.NullString
 	MonadTxHash   sql.NullString
+	Metadata      sql.NullString
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
@@ -74,7 +75,7 @@ func (db *DB) SchemaMigration() error {
 	logger.Info("Querying transaction_history table...")
 	rows, err := db.Query(`
 		SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, 
-		       tx_hash, monad_tx_hash, created_at, updated_at 
+		       tx_hash, monad_tx_hash, metadata, created_at, updated_at 
 		FROM transaction_history
 	`)
 	if err != nil {
@@ -90,7 +91,7 @@ func (db *DB) SchemaMigration() error {
 
 		if err := rows.Scan(
 			&record.ID, &record.DepositID, &record.WalletAddress, &record.Amount, &record.Currency, &record.MonAmount,
-			&record.Status, &record.TxHash, &record.MonadTxHash, &record.CreatedAt, &record.UpdatedAt,
+			&record.Status, &record.TxHash, &record.MonadTxHash, &record.Metadata, &record.CreatedAt, &record.UpdatedAt,
 		); err != nil {
 			return fmt.Errorf("failed to scan transaction_history row: %w", err)
 		}
@@ -175,6 +176,14 @@ func (db *DB) migrateRecord(record MigrationRecord) error {
 		depositStatus = processedStatus
 	}
 
+	// Get metadata if available
+	var metadata string
+	if record.Metadata.Valid {
+		metadata = record.Metadata.String
+	} else {
+		metadata = ""
+	}
+
 	// Insert into deposits with retry
 	const maxRetries = 3
 	var retryDelay = 50 * time.Millisecond
@@ -188,11 +197,11 @@ func (db *DB) migrateRecord(record MigrationRecord) error {
 
 		// Insert into deposits
 		depositInsert := `
-			INSERT INTO deposits (deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			INSERT INTO deposits (deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (deposit_id) DO NOTHING
 		`
-		_, err = tx.Exec(depositInsert, record.DepositID, record.WalletAddress, record.Amount, record.Currency, arbiTxHash, 0, depositStatus, record.CreatedAt, record.UpdatedAt)
+		_, err = tx.Exec(depositInsert, record.DepositID, record.WalletAddress, record.Amount, record.Currency, arbiTxHash, 0, depositStatus, metadata, record.CreatedAt, record.UpdatedAt)
 		if err == nil {
 			break // Success, exit retry loop
 		}

@@ -22,6 +22,7 @@ type TransactionView struct {
 	Status        string
 	TxHash        string // Arbitrum transaction hash
 	MonadTxHash   string // Monad transaction hash
+	Metadata      string // User-provided metadata for this transaction
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
@@ -35,62 +36,111 @@ func (db *DB) GetTransactionViewByDepositID(depositID *big.Int) (*TransactionVie
 	depositIDStr := depositID.String()
 	logger.Debug("Getting transaction view for deposit ID %s", depositIDStr)
 
-	// First get the deposit
-	deposit, err := db.GetDepositByID(depositID)
+	var (
+		tx                          TransactionView
+		walletAddressStr, amountStr string
+		monAmountStr                sql.NullString
+		currencyInt                 int
+		monadTxHashStr              sql.NullString
+		metadataStr                 sql.NullString // Handle NULL metadata
+	)
+
+	// First check deposits table
+	err := db.QueryRow(`
+		SELECT d.id, d.deposit_id, d.wallet_address, d.amount, d.currency, COALESCE(dist.mon_amount, '0'), 
+		       d.status, d.tx_hash, COALESCE(dist.monad_tx_hash, ''), d.metadata, d.created_at, d.updated_at
+		FROM deposits d
+		LEFT JOIN distributions dist ON d.deposit_id = dist.deposit_id
+		WHERE d.deposit_id = $1
+	`, depositIDStr).Scan(
+		&tx.ID,
+		&depositIDStr,
+		&walletAddressStr,
+		&amountStr,
+		&currencyInt,
+		&monAmountStr,
+		&tx.Status,
+		&tx.TxHash,
+		&monadTxHashStr,
+		&metadataStr,
+		&tx.CreatedAt,
+		&tx.UpdatedAt,
+	)
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to get deposit: %w", err)
-	}
-	if deposit == nil {
-		// Try to fall back to the legacy table
-		tx, legacyErr := db.GetTransactionByDepositID(depositID)
-		if legacyErr != nil {
-			return nil, fmt.Errorf("deposit not found for ID: %s", depositIDStr)
+		if err == sql.ErrNoRows {
+			// Try to get from transaction_history as a fallback (for backward compatibility)
+			err = db.QueryRow(`
+				SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, metadata, created_at, updated_at
+				FROM transaction_history 
+				WHERE deposit_id = $1
+			`, depositIDStr).Scan(
+				&tx.ID,
+				&depositIDStr,
+				&walletAddressStr,
+				&amountStr,
+				&currencyInt,
+				&monAmountStr,
+				&tx.Status,
+				&tx.TxHash,
+				&tx.MonadTxHash,
+				&metadataStr,
+				&tx.CreatedAt,
+				&tx.UpdatedAt,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to query transaction by deposit ID: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to query transaction by deposit ID: %w", err)
 		}
-		return convertTransactionToView(tx), nil
 	}
 
-	// Then get the distribution
-	distribution, err := db.GetDistributionByDepositID(depositID)
-	if err != nil {
-		logger.Warn("Error getting distribution for deposit ID %s: %v", depositIDStr, err)
+	// Convert strings to appropriate types
+	var ok bool
+	tx.DepositID, ok = new(big.Int).SetString(depositIDStr, 10)
+	if !ok {
+		return nil, fmt.Errorf("failed to parse deposit ID: %s", depositIDStr)
 	}
 
-	// Create a TransactionView by combining deposit and distribution data
-	view := &TransactionView{
-		ID:            deposit.ID,
-		DepositID:     deposit.DepositID,
-		WalletAddress: deposit.WalletAddress,
-		Amount:        deposit.Amount,
-		Currency:      deposit.Currency,
-		Status:        deposit.Status,
-		TxHash:        deposit.TxHash,
-		CreatedAt:     deposit.CreatedAt,
-		UpdatedAt:     deposit.UpdatedAt,
+	tx.WalletAddress = common.HexToAddress(walletAddressStr)
+
+	tx.Amount, ok = new(big.Int).SetString(amountStr, 10)
+	if !ok {
+		logger.Warn("Failed to parse amount: %s for deposit ID %s, defaulting to 0",
+			amountStr, depositIDStr)
+		tx.Amount = big.NewInt(0)
 	}
 
-	// Add distribution data if available
-	if distribution != nil {
-		view.MonAmount = distribution.MonAmount
-		view.MonadTxHash = distribution.MonadTxHash
+	tx.Currency = CurrencyType(currencyInt)
 
-		// Use the later update time between deposit and distribution
-		if distribution.UpdatedAt.After(view.UpdatedAt) {
-			view.UpdatedAt = distribution.UpdatedAt
-		}
-
-		// If the deposit is marked as processed, but the distribution is completed, use completed status
-		if view.Status == StatusProcessed && distribution.Status == DistStatusCompleted {
-			view.Status = StatusCompleted
+	// Handle NULL mon_amount values using sql.NullString
+	if monAmountStr.Valid {
+		tx.MonAmount, ok = new(big.Int).SetString(monAmountStr.String, 10)
+		if !ok && monAmountStr.String != "" {
+			// Only log a warning if we have an actual string that fails to parse
+			logger.Warn("Failed to parse MON amount: %s for deposit ID %s, defaulting to 0",
+				monAmountStr.String, depositIDStr)
+			tx.MonAmount = big.NewInt(0)
 		}
 	} else {
-		// No distribution record, initialize with zero
-		view.MonAmount = big.NewInt(0)
+		logger.Debug("MON amount is NULL for deposit ID %s, defaulting to 0", depositIDStr)
+		tx.MonAmount = big.NewInt(0)
 	}
 
-	logger.Debug("Found transaction view for deposit ID %s: status=%s, monadTxHash=%s, monAmount=%s",
-		depositIDStr, view.Status, view.MonadTxHash, view.MonAmount.String())
+	// Set the Monad transaction hash from the distribution if available
+	if monadTxHashStr.Valid && monadTxHashStr.String != "" {
+		tx.MonadTxHash = monadTxHashStr.String
+	}
 
-	return view, nil
+	// Set metadata if available
+	if metadataStr.Valid {
+		tx.Metadata = metadataStr.String
+	} else {
+		tx.Metadata = ""
+	}
+
+	return &tx, nil
 }
 
 // GetTransactionViewByMonadTxHash retrieves transaction data by Monad transaction hash
@@ -527,6 +577,7 @@ func convertTransactionToView(tx *Transaction) *TransactionView {
 		Status:        tx.Status,
 		TxHash:        tx.TxHash,
 		MonadTxHash:   tx.MonadTxHash,
+		Metadata:      tx.GetMetadata(),
 		CreatedAt:     tx.CreatedAt,
 		UpdatedAt:     tx.UpdatedAt,
 	}

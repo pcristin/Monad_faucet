@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"math/big"
 	"strings"
@@ -185,8 +186,8 @@ func (s *BridgeService) ensureTransactionRecord(event blockchain.DepositEvent, m
 	}
 
 	// Create a new transaction record
-	logger.Info("Creating new transaction record for deposit ID %s from wallet %s, amount %s",
-		event.DepositId.String(), event.Depositor.Hex(), event.Amount.String())
+	logger.Info("Creating new transaction record for deposit ID %s from wallet %s, amount %s, metadata: '%s'",
+		event.DepositId.String(), event.Depositor.Hex(), event.Amount.String(), event.Metadata)
 
 	txRecord := &database.Transaction{
 		DepositID:     event.DepositId,
@@ -196,6 +197,7 @@ func (s *BridgeService) ensureTransactionRecord(event blockchain.DepositEvent, m
 		MonAmount:     monAmount,
 		Status:        database.StatusPending,
 		TxHash:        event.TxHash,
+		Metadata:      sql.NullString{String: event.Metadata, Valid: event.Metadata != ""},
 	}
 
 	// Try multiple times to create the transaction

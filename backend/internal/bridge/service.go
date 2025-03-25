@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"math/big"
 
@@ -105,11 +106,12 @@ func (s *BridgeService) recordDepositImmediately(event blockchain.DepositEvent) 
 		TxHash:        event.TxHash,
 		BlockNumber:   event.BlockNumber,
 		Status:        database.StatusPending,
+		Metadata:      sql.NullString{String: event.Metadata, Valid: event.Metadata != ""},
 	}
 
 	// Write to database
-	logger.Info("Immediately recording deposit ID %s from wallet %s, amount %s, tx %s",
-		event.DepositId.String(), event.Depositor.Hex(), event.Amount.String(), event.TxHash)
+	logger.Info("Immediately recording deposit ID %s from wallet %s, amount %s, tx %s, metadata: '%s'",
+		event.DepositId.String(), event.Depositor.Hex(), event.Amount.String(), event.TxHash, event.Metadata)
 
 	if err := s.db.CreateDeposit(deposit); err != nil {
 		return fmt.Errorf("failed to create immediate deposit record: %w", err)
@@ -123,6 +125,7 @@ func (s *BridgeService) recordDepositImmediately(event blockchain.DepositEvent) 
 		Currency:      database.CurrencyType(event.Currency),
 		Status:        database.StatusPending,
 		TxHash:        event.TxHash,
+		Metadata:      sql.NullString{String: event.Metadata, Valid: event.Metadata != ""},
 	}
 
 	if err := s.db.CreateTransaction(txRecord); err != nil {

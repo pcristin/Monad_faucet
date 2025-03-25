@@ -21,6 +21,7 @@ type DepositEvent struct {
 	Currency    CurrencyType
 	BlockNumber uint64
 	TxHash      string // Transaction hash of the deposit
+	Metadata    string // User-provided metadata string for this deposit
 }
 
 func (e DepositEvent) String() string {
@@ -34,11 +35,12 @@ func (e DepositEvent) String() string {
 	divisor := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil))
 	amount.Quo(amount, divisor)
 
-	return fmt.Sprintf("Deposit: %s %.6f %s (ID: %s)",
+	return fmt.Sprintf("Deposit: %s %.6f %s (ID: %s, Metadata: %s)",
 		e.Depositor.Hex(),
 		amount,
 		CurrencyTypeToString(e.Currency),
-		e.DepositId.String())
+		e.DepositId.String(),
+		e.Metadata)
 }
 
 type EventListener struct {
@@ -176,6 +178,7 @@ type rawDepositEvent struct {
 	DepositId   *big.Int
 	Currency    uint8
 	BlockNumber uint64
+	Metadata    string // User-provided metadata string
 }
 
 func (l *EventListener) parseDepositEvent(vLog types.Log) (DepositEvent, error) {
@@ -197,6 +200,7 @@ func (l *EventListener) parseDepositEvent(vLog types.Log) (DepositEvent, error) 
 		Currency:    CurrencyType(raw.Currency),
 		BlockNumber: raw.BlockNumber,
 		TxHash:      vLog.TxHash.Hex(), // Set transaction hash from the log
+		Metadata:    raw.Metadata,      // Include the metadata in the parsed event
 	}, nil
 }
 
