@@ -40,6 +40,7 @@ type Transaction struct {
 	Status        string
 	TxHash        string // Arbitrum transaction hash
 	MonadTxHash   string // Monad transaction hash
+	Metadata      string // User-provided metadata for this transaction
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
@@ -49,8 +50,8 @@ func (db *DB) CreateTransaction(tx *Transaction) error {
 	// Use RETURNING clause to get the inserted ID (PostgreSQL compatible)
 	err := db.QueryRow(
 		`INSERT INTO transaction_history 
-		(deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash) 
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		(deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, metadata) 
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id`,
 		tx.DepositID.String(),
 		tx.WalletAddress.Hex(),
@@ -60,6 +61,7 @@ func (db *DB) CreateTransaction(tx *Transaction) error {
 		tx.Status,
 		tx.TxHash,
 		tx.MonadTxHash,
+		tx.Metadata,
 	).Scan(&tx.ID)
 
 	if err != nil {
@@ -121,8 +123,8 @@ func (db *DB) UpdateTransactionStatus(depositID *big.Int, status, txHash string)
 
 				_, insertErr := db.Exec(
 					`INSERT INTO transaction_history 
-					(deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash) 
-					VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+					(deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, metadata) 
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 					depositIDStr,
 					"0x0000000000000000000000000000000000000000", // Placeholder, will be updated later
 					"0",          // Placeholder
@@ -131,6 +133,7 @@ func (db *DB) UpdateTransactionStatus(depositID *big.Int, status, txHash string)
 					status,
 					"", // Will be filled later
 					txHash,
+					"", // Empty metadata since we don't have it
 				)
 				if insertErr != nil {
 					fmt.Printf("Error creating placeholder transaction record: %v\n", insertErr)
@@ -204,10 +207,11 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 		walletAddressStr, amountStr string
 		monAmountStr                sql.NullString
 		currencyInt                 int
+		metadataStr                 sql.NullString // Handle NULL metadata
 	)
 
 	err := db.QueryRow(
-		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, metadata, created_at, updated_at 
 		FROM transaction_history 
 		WHERE deposit_id = $1`,
 		depositIDStr,
@@ -221,6 +225,7 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 		&tx.Status,
 		&tx.TxHash,
 		&tx.MonadTxHash,
+		&metadataStr,
 		&tx.CreatedAt,
 		&tx.UpdatedAt,
 	)
@@ -253,18 +258,22 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 
 	// Handle NULL mon_amount values using sql.NullString
 	if monAmountStr.Valid {
-		// Only try to parse if we have a valid string
 		tx.MonAmount, ok = new(big.Int).SetString(monAmountStr.String, 10)
-		if !ok && monAmountStr.String != "" {
-			// Only log a warning if we have an actual string that fails to parse
+		if !ok {
 			logger.Warn("Failed to parse MON amount: %s for deposit ID %s, defaulting to 0",
 				monAmountStr.String, depositIDStr)
 			tx.MonAmount = big.NewInt(0)
 		}
 	} else {
-		// Use debug level for normal NULL values
-		logger.Debug("MON amount is NULL for deposit ID %s, defaulting to 0", depositIDStr)
 		tx.MonAmount = big.NewInt(0)
+		logger.Debug("Transaction for deposit ID %s has NULL mon_amount, setting to 0", depositIDStr)
+	}
+
+	// Handle NULL metadata values
+	if metadataStr.Valid {
+		tx.Metadata = metadataStr.String
+	} else {
+		tx.Metadata = ""
 	}
 
 	logger.Debug("Found transaction for deposit ID %s: status=%s, monadTxHash=%s, monAmount=%s",
@@ -364,9 +373,9 @@ func (db *DB) GetTransactionByArbitrumTxHash(txHash string) (*Transaction, error
 // GetTransactionsByWallet retrieves all transactions for a wallet
 func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) ([]*Transaction, error) {
 	rows, err := db.Query(
-		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, metadata, created_at, updated_at 
 		FROM transaction_history 
-		WHERE wallet_address = $1 
+		WHERE wallet_address = $1
 		ORDER BY created_at DESC 
 		LIMIT $2 OFFSET $3`,
 		wallet.Hex(),
@@ -384,6 +393,7 @@ func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) 
 			tx                                        Transaction
 			depositIDStr, walletAddressStr, amountStr string
 			monAmountStr                              sql.NullString
+			metadataStr                               sql.NullString // Handle NULL metadata
 			currencyInt                               int
 		)
 
@@ -397,6 +407,7 @@ func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) 
 			&tx.Status,
 			&tx.TxHash,
 			&tx.MonadTxHash,
+			&metadataStr,
 			&tx.CreatedAt,
 			&tx.UpdatedAt,
 		)
@@ -414,8 +425,7 @@ func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) 
 		if monAmountStr.Valid {
 			var ok bool
 			tx.MonAmount, ok = new(big.Int).SetString(monAmountStr.String, 10)
-			if !ok && monAmountStr.String != "" {
-				// Only log a warning if we have an actual string that fails to parse
+			if !ok {
 				logger.Warn("Failed to parse MON amount: %s for wallet %s, defaulting to 0",
 					monAmountStr.String, wallet.Hex())
 				tx.MonAmount = big.NewInt(0)
@@ -424,6 +434,13 @@ func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) 
 			tx.MonAmount = big.NewInt(0)
 			logger.Debug("Transaction ID %d for wallet %s has NULL mon_amount, setting to 0",
 				tx.ID, wallet.Hex())
+		}
+
+		// Handle NULL metadata values
+		if metadataStr.Valid {
+			tx.Metadata = metadataStr.String
+		} else {
+			tx.Metadata = ""
 		}
 
 		transactions = append(transactions, &tx)
@@ -439,7 +456,7 @@ func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) 
 // GetRecentTransactions retrieves recent transactions
 func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 	rows, err := db.Query(
-		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, metadata, created_at, updated_at 
 		FROM transaction_history 
 		ORDER BY created_at DESC 
 		LIMIT $1 OFFSET $2`,
@@ -457,6 +474,7 @@ func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 			tx                                        Transaction
 			depositIDStr, walletAddressStr, amountStr string
 			monAmountStr                              sql.NullString
+			metadataStr                               sql.NullString // Handle NULL metadata
 			currencyInt                               int
 		)
 
@@ -470,6 +488,7 @@ func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 			&tx.Status,
 			&tx.TxHash,
 			&tx.MonadTxHash,
+			&metadataStr,
 			&tx.CreatedAt,
 			&tx.UpdatedAt,
 		)
@@ -495,6 +514,13 @@ func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 		} else {
 			tx.MonAmount = big.NewInt(0)
 			logger.Debug("Transaction ID %d has NULL mon_amount, setting to 0", tx.ID)
+		}
+
+		// Handle NULL metadata values
+		if metadataStr.Valid {
+			tx.Metadata = metadataStr.String
+		} else {
+			tx.Metadata = ""
 		}
 
 		transactions = append(transactions, &tx)
@@ -649,9 +675,10 @@ func (db *DB) GetTransactionByMonadTxHash(monadTxHash string) (*Transaction, err
 	var depositIDStr, walletAddressStr, amountStr string
 	var currencyInt int
 	var monAmountStr sql.NullString // Change to sql.NullString to handle NULL values
+	var metadataStr sql.NullString  // Handle NULL metadata
 
 	row := db.QueryRow(
-		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, metadata, created_at, updated_at
 		FROM transaction_history 
 		WHERE monad_tx_hash = $1 
 		LIMIT 1`,
@@ -668,6 +695,7 @@ func (db *DB) GetTransactionByMonadTxHash(monadTxHash string) (*Transaction, err
 		&transaction.Status,
 		&transaction.TxHash,
 		&transaction.MonadTxHash,
+		&metadataStr,
 		&transaction.CreatedAt,
 		&transaction.UpdatedAt,
 	)
@@ -702,18 +730,19 @@ func (db *DB) GetTransactionByMonadTxHash(monadTxHash string) (*Transaction, err
 	// Parse MON amount - handle NULL values
 	if monAmountStr.Valid {
 		monAmount, success := new(big.Int).SetString(monAmountStr.String, 10)
-		if !success && monAmountStr.String != "" {
-			// Only log a warning if we have an actual string that fails to parse
-			logger.Warn("Failed to parse MON amount: %s for Monad tx hash %s, defaulting to 0",
-				monAmountStr.String, monadTxHash)
-			transaction.MonAmount = big.NewInt(0)
-		} else {
-			transaction.MonAmount = monAmount
+		if !success {
+			return nil, fmt.Errorf("failed to parse mon_amount: %s", monAmountStr.String)
 		}
+		transaction.MonAmount = monAmount
 	} else {
-		// For NULL mon_amount, set to zero
 		transaction.MonAmount = big.NewInt(0)
-		logger.Debug("Transaction ID %d has NULL mon_amount, setting to 0", transaction.ID)
+	}
+
+	// Handle NULL metadata values
+	if metadataStr.Valid {
+		transaction.Metadata = metadataStr.String
+	} else {
+		transaction.Metadata = ""
 	}
 
 	return &transaction, nil
@@ -864,7 +893,7 @@ func (db *DB) GetLockedDeposits() ([]*big.Int, error) {
 // offset: number of transactions to skip (use for pagination)
 func (db *DB) GetTransactionsByStatus(status string, limit, offset int) ([]*Transaction, error) {
 	query := `
-		SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at
+		SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, metadata, created_at, updated_at
 		FROM transaction_history
 		WHERE status = $1
 		ORDER BY created_at DESC
@@ -893,6 +922,7 @@ func (db *DB) GetTransactionsByStatus(status string, limit, offset int) ([]*Tran
 		var tx Transaction
 		var depositIDStr, amountStr, walletAddrStr string
 		var monAmountStr sql.NullString // Use sql.NullString to handle NULL values
+		var metadataStr sql.NullString  // Handle NULL metadata
 
 		err := rows.Scan(
 			&tx.ID,
@@ -904,6 +934,7 @@ func (db *DB) GetTransactionsByStatus(status string, limit, offset int) ([]*Tran
 			&tx.Status,
 			&tx.TxHash,
 			&tx.MonadTxHash,
+			&metadataStr,
 			&tx.CreatedAt,
 			&tx.UpdatedAt,
 		)
@@ -941,6 +972,13 @@ func (db *DB) GetTransactionsByStatus(status string, limit, offset int) ([]*Tran
 
 		// Convert wallet address string to common.Address
 		tx.WalletAddress = common.HexToAddress(walletAddrStr)
+
+		// Handle NULL metadata values
+		if metadataStr.Valid {
+			tx.Metadata = metadataStr.String
+		} else {
+			tx.Metadata = ""
+		}
 
 		transactions = append(transactions, &tx)
 	}

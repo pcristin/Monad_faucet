@@ -20,6 +20,7 @@ type Deposit struct {
 	TxHash        string // Arbitrum transaction hash
 	BlockNumber   uint64
 	Status        string
+	Metadata      string // User-provided metadata for this deposit
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
@@ -29,8 +30,8 @@ func (db *DB) CreateDeposit(deposit *Deposit) error {
 	// Use RETURNING clause to get the inserted ID (PostgreSQL compatible)
 	err := db.QueryRow(
 		`INSERT INTO deposits 
-		(deposit_id, wallet_address, amount, currency, tx_hash, block_number, status) 
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		(deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata) 
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id`,
 		deposit.DepositID.String(),
 		deposit.WalletAddress.Hex(),
@@ -39,6 +40,7 @@ func (db *DB) CreateDeposit(deposit *Deposit) error {
 		deposit.TxHash,
 		deposit.BlockNumber,
 		deposit.Status,
+		deposit.Metadata,
 	).Scan(&deposit.ID)
 
 	if err != nil {
@@ -94,8 +96,8 @@ func (db *DB) UpdateDepositStatus(depositID *big.Int, status string) error {
 
 		// Create the deposit record with data from the transaction
 		_, err = tx.Exec(
-			`INSERT INTO deposits (deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, created_at, updated_at) 
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			`INSERT INTO deposits (deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata, created_at, updated_at) 
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 			depositIDStr,
 			txData.WalletAddress.Hex(),
 			txData.Amount.String(),
@@ -103,6 +105,7 @@ func (db *DB) UpdateDepositStatus(depositID *big.Int, status string) error {
 			txData.TxHash,
 			0, // We don't know the block number here
 			status,
+			"", // No metadata available from transaction record
 			time.Now(),
 			time.Now(),
 		)
@@ -164,7 +167,7 @@ func (db *DB) GetDepositByID(depositID *big.Int) (*Deposit, error) {
 	)
 
 	err := db.QueryRow(
-		`SELECT id, deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata, created_at, updated_at 
 		FROM deposits 
 		WHERE deposit_id = $1`,
 		depositID.String(),
@@ -177,6 +180,7 @@ func (db *DB) GetDepositByID(depositID *big.Int) (*Deposit, error) {
 		&deposit.TxHash,
 		&deposit.BlockNumber,
 		&deposit.Status,
+		&deposit.Metadata,
 		&deposit.CreatedAt,
 		&deposit.UpdatedAt,
 	)
@@ -208,7 +212,7 @@ func (db *DB) GetDepositByTxHash(txHash string) (*Deposit, error) {
 	)
 
 	err := db.QueryRow(
-		`SELECT id, deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata, created_at, updated_at 
 		FROM deposits 
 		WHERE tx_hash = $1`,
 		txHash,
@@ -221,6 +225,7 @@ func (db *DB) GetDepositByTxHash(txHash string) (*Deposit, error) {
 		&deposit.TxHash,
 		&deposit.BlockNumber,
 		&deposit.Status,
+		&deposit.Metadata,
 		&deposit.CreatedAt,
 		&deposit.UpdatedAt,
 	)
@@ -246,7 +251,7 @@ func (db *DB) GetDepositByTxHash(txHash string) (*Deposit, error) {
 // GetDepositsByWallet retrieves all deposits for a specific wallet
 func (db *DB) GetDepositsByWallet(wallet common.Address, limit, offset int) ([]*Deposit, error) {
 	rows, err := db.Query(
-		`SELECT id, deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata, created_at, updated_at 
 		FROM deposits 
 		WHERE wallet_address = $1
 		ORDER BY created_at DESC
@@ -277,6 +282,7 @@ func (db *DB) GetDepositsByWallet(wallet common.Address, limit, offset int) ([]*
 			&deposit.TxHash,
 			&deposit.BlockNumber,
 			&deposit.Status,
+			&deposit.Metadata,
 			&deposit.CreatedAt,
 			&deposit.UpdatedAt,
 		)
@@ -305,7 +311,7 @@ func (db *DB) GetDepositsByWallet(wallet common.Address, limit, offset int) ([]*
 // GetRecentDeposits retrieves the most recent deposits
 func (db *DB) GetRecentDeposits(limit, offset int) ([]*Deposit, error) {
 	rows, err := db.Query(
-		`SELECT id, deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata, created_at, updated_at 
 		FROM deposits 
 		ORDER BY created_at DESC
 		LIMIT $1 OFFSET $2`,
@@ -334,6 +340,7 @@ func (db *DB) GetRecentDeposits(limit, offset int) ([]*Deposit, error) {
 			&deposit.TxHash,
 			&deposit.BlockNumber,
 			&deposit.Status,
+			&deposit.Metadata,
 			&deposit.CreatedAt,
 			&deposit.UpdatedAt,
 		)
@@ -362,7 +369,7 @@ func (db *DB) GetRecentDeposits(limit, offset int) ([]*Deposit, error) {
 // GetDepositsByStatus retrieves deposits by their status
 func (db *DB) GetDepositsByStatus(status string, limit, offset int) ([]*Deposit, error) {
 	rows, err := db.Query(
-		`SELECT id, deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata, created_at, updated_at 
 		FROM deposits 
 		WHERE status = $1
 		ORDER BY created_at DESC
@@ -393,6 +400,7 @@ func (db *DB) GetDepositsByStatus(status string, limit, offset int) ([]*Deposit,
 			&deposit.TxHash,
 			&deposit.BlockNumber,
 			&deposit.Status,
+			&deposit.Metadata,
 			&deposit.CreatedAt,
 			&deposit.UpdatedAt,
 		)

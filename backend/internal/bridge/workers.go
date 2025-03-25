@@ -226,6 +226,7 @@ func (pools *BridgeWorkerPools) processDepositJob(ctx context.Context, job *Depo
 		TxHash:        job.Event.TxHash,
 		BlockNumber:   job.Event.BlockNumber,
 		Status:        database.StatusPending,
+		Metadata:      job.Event.Metadata,
 	}
 
 	// 3. Submit database job to create the deposit
