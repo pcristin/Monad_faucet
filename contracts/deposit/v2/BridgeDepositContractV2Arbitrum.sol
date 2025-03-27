@@ -23,13 +23,13 @@ contract MonadFaucetDepositContract is Ownable, Pausable, ReentrancyGuard {
     uint256 public depositCount;
 
     // Minimum deposit amounts for each currency.
-    uint256 public minEthDeposit = 0.0000004 ether;
-    uint256 public minUsdtDeposit = 0.001 * 10**6; // For USDT with 6 decimals.
-    uint256 public minUsdcDeposit = 0.001 * 10**6; // For USDC with 6 decimals.
+    uint256 public minEthDeposit = 0.0004 ether;
+    uint256 public minUsdtDeposit = 0.25 * 10**6; // For USDT with 6 decimals.
+    uint256 public minUsdcDeposit = 0.25 * 10**6; // For USDC with 6 decimals.
 
     // Hardcoded ERC20 token interfaces for USDT and USDC on Arbitrum.
-    IERC20 public usdt = IERC20(0xd15010c4a92b8C0Ba3CCdfEa71cAbaB61fd7fADB);
-    IERC20 public usdc = IERC20(0x4C4f6Ac0F2d17E1092b2f738b47202D35F5c7a88);
+    IERC20 public usdt = IERC20(0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9);
+    IERC20 public usdc = IERC20(0xaf88d065e77c8cC2239327C5EDb3A432268e5831);
 
     // Events for logging deposits and refunds.
     event DepositEvent(
