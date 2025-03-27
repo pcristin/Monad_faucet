@@ -159,8 +159,8 @@ func NewBridgeWorkerPools(service *BridgeService) *BridgeWorkerPools {
 		service:            service,
 		processingDeposits: make(map[string]bool),
 		distributionBatch:  make([]*DistributionJob, 0, 100),
-		mergeDelay:         60 * time.Second, // 2 minutes
-		maxDeposits:        100,
+		mergeDelay:         25 * time.Second, // Short delay to encourage batching
+		maxDeposits:        100,              // Small batch size for more frequent processing
 	}
 }
 
@@ -396,13 +396,18 @@ func (pools *BridgeWorkerPools) addToDistributionBatch(job *DistributionJob) {
 	// Add job to the batch
 	pools.distributionBatch = append(pools.distributionBatch, job)
 
+	logger.Info("Added distribution job for deposit ID %s to batch (current batch size: %d/%d)",
+		job.DepositID.String(), len(pools.distributionBatch), pools.maxDeposits)
+
 	// If this is the first job in the batch, start the batch timer
 	if len(pools.distributionBatch) == 1 {
+		logger.Info("Starting batch timer with %d second delay", int(pools.mergeDelay.Seconds()))
 		pools.startBatchTimer()
 	}
 
 	// Check if batch is full
 	if len(pools.distributionBatch) >= pools.maxDeposits {
+		logger.Info("Batch is full (%d distributions), submitting now", len(pools.distributionBatch))
 		pools.submitBatch()
 	}
 }
@@ -427,9 +432,11 @@ func (pools *BridgeWorkerPools) processBatchOnTimeout() {
 
 	// Only process if there are jobs in the batch
 	if len(pools.distributionBatch) > 0 {
-		logger.Info("Processing distribution batch of %d deposits due to timeout (merge delay reached)",
-			len(pools.distributionBatch))
+		logger.Info("Processing distribution batch of %d deposits due to timeout (merge delay of %d seconds reached)",
+			len(pools.distributionBatch), int(pools.mergeDelay.Seconds()))
 		pools.submitBatch()
+	} else {
+		logger.Info("Batch timer fired but no distributions to process")
 	}
 }
 
@@ -449,7 +456,11 @@ func (pools *BridgeWorkerPools) submitBatch() {
 	pools.distributionBatch = make([]*DistributionJob, 0, pools.maxDeposits)
 
 	// Submit batch job
-	logger.Info("Submitting batch of %d distributions for processing", len(batchCopy))
+	logger.Info("Submitting batch of %d distributions for processing (batch ID: %s)",
+		len(batchCopy),
+		// Use current timestamp to create a unique batch ID
+		fmt.Sprintf("batch-%d", time.Now().Unix()))
+
 	pools.DistributionPool.Submit(&BatchDistributionJob{
 		Distributions: batchCopy,
 	})
@@ -462,25 +473,43 @@ func (pools *BridgeWorkerPools) processBatchDistributionJob(ctx context.Context,
 		return
 	}
 
-	logger.Info("Processing batch of %d distributions", len(batch.Distributions))
+	batchID := fmt.Sprintf("batch-%d", time.Now().Unix())
+	logger.Info("[Batch %s] Processing batch of %d distributions", batchID, len(batch.Distributions))
+
+	// Log all deposit IDs in this batch
+	var depositIDs []string
+	for _, dist := range batch.Distributions {
+		depositIDs = append(depositIDs, dist.DepositID.String())
+	}
+	logger.Info("[Batch %s] Contains deposit IDs: %s", batchID, strings.Join(depositIDs, ", "))
 
 	// Attempt to process as a batch first
 	success, failedJobs := pools.processBatchMint(ctx, batch.Distributions)
 
 	// If batch processing was completely successful, we're done
 	if success && len(failedJobs) == 0 {
-		logger.Info("Successfully processed all %d distributions in batch", len(batch.Distributions))
+		logger.Info("[Batch %s] Successfully processed all %d distributions in batch", batchID, len(batch.Distributions))
 		return
 	}
 
 	// If batch processing failed completely or partially, fall back to individual processing
 	if len(failedJobs) > 0 {
-		logger.Warn("Batch processing partially failed, falling back to individual processing for %d failed jobs", len(failedJobs))
+		logger.Warn("[Batch %s] Batch processing partially failed, falling back to individual processing for %d failed jobs",
+			batchID, len(failedJobs))
+
+		// Log the failed deposit IDs
+		var failedIDs []string
+		for _, job := range failedJobs {
+			failedIDs = append(failedIDs, job.DepositID.String())
+		}
+		logger.Warn("[Batch %s] Failed deposit IDs: %s", batchID, strings.Join(failedIDs, ", "))
+
 		for _, job := range failedJobs {
 			pools.processDistributionJob(ctx, job)
 		}
 	} else {
-		logger.Warn("Batch processing completely failed, falling back to individual processing for all %d jobs", len(batch.Distributions))
+		logger.Warn("[Batch %s] Batch processing completely failed, falling back to individual processing for all %d jobs",
+			batchID, len(batch.Distributions))
 		for _, job := range batch.Distributions {
 			pools.processDistributionJob(ctx, job)
 		}
@@ -598,18 +627,25 @@ func (s *BridgeService) mintTokensBatch(ctx context.Context, recipients []common
 
 	// If there's only one valid recipient, use the regular mintTokens function
 	validCount := 0
-	lastValidIndex := -1
+	// lastValidIndex no longer used since we're forcing batch processing
+	// lastValidIndex := -1
 
-	for i, amount := range amounts {
+	for _, amount := range amounts {
 		if amount.Cmp(big.NewInt(0)) > 0 {
 			validCount++
-			lastValidIndex = i
+			// lastValidIndex = i
 		}
 	}
 
-	if validCount == 1 {
-		return s.mintTokens(ctx, recipients[lastValidIndex], amounts[lastValidIndex], depositIds[lastValidIndex])
+	if validCount == 0 {
+		return "", fmt.Errorf("no valid transfers in batch")
 	}
+
+	// Skip the single token optimization to force batch processing even for single items
+	// This allows us to test the batch functionality
+	// if validCount == 1 {
+	//    return s.mintTokens(ctx, recipients[lastValidIndex], amounts[lastValidIndex], depositIds[lastValidIndex])
+	// }
 
 	// Create the transfer data array to match the contract's expected format
 	// The contract expects an array of TransferData structures
@@ -635,6 +671,15 @@ func (s *BridgeService) mintTokensBatch(ctx context.Context, recipients []common
 	}
 
 	logger.Info("Creating batch mint transaction for %d recipients", len(transfers))
+
+	// Log each transfer for debugging
+	for i, transfer := range transfers {
+		logger.Info("Batch transfer #%d: %s MON to %s (deposit ID: %s)",
+			i+1,
+			formatMonAmount(transfer.Amount),
+			transfer.Recipient.Hex(),
+			transfer.Id.String())
+	}
 
 	// Get transaction options
 	opts, err := s.monadDistributor.GetTransactOpts(ctx)
