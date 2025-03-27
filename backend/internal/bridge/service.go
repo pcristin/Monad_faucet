@@ -106,7 +106,7 @@ func (s *BridgeService) recordDepositImmediately(event blockchain.DepositEvent) 
 		TxHash:        event.TxHash,
 		BlockNumber:   event.BlockNumber,
 		Status:        database.StatusPending,
-		Metadata:      sql.NullString{String: event.Metadata, Valid: event.Metadata != ""},
+		Metadata:      string(event.Metadata),
 	}
 
 	// Write to database
