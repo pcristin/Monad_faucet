@@ -105,7 +105,7 @@ func (db *DB) UpdateDepositStatus(depositID *big.Int, status string) error {
 			txData.TxHash,
 			0, // We don't know the block number here
 			status,
-			"", // No metadata available from transaction record
+			txData.Metadata, // No metadata available from transaction record
 			time.Now(),
 			time.Now(),
 		)
