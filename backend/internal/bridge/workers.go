@@ -159,8 +159,8 @@ func NewBridgeWorkerPools(service *BridgeService) *BridgeWorkerPools {
 		service:            service,
 		processingDeposits: make(map[string]bool),
 		distributionBatch:  make([]*DistributionJob, 0, 100),
-		mergeDelay:         25 * time.Second, // Short delay to encourage batching
-		maxDeposits:        100,              // Small batch size for more frequent processing
+		mergeDelay:         20 * time.Second, // Very short delay to encourage faster batching
+		maxDeposits:        100,              // Small batch size to encourage more frequent batches
 	}
 }
 
@@ -393,21 +393,26 @@ func (pools *BridgeWorkerPools) addToDistributionBatch(job *DistributionJob) {
 	pools.batchMutex.Lock()
 	defer pools.batchMutex.Unlock()
 
+	depositIDStr := job.DepositID.String()
+	logger.Info("BATCH-TRACKING: Adding deposit ID %s to distribution batch", depositIDStr)
+
 	// Add job to the batch
 	pools.distributionBatch = append(pools.distributionBatch, job)
 
-	logger.Info("Added distribution job for deposit ID %s to batch (current batch size: %d/%d)",
-		job.DepositID.String(), len(pools.distributionBatch), pools.maxDeposits)
+	logger.Info("BATCH-TRACKING: Added distribution job for deposit ID %s to batch (current batch size: %d/%d)",
+		depositIDStr, len(pools.distributionBatch), pools.maxDeposits)
 
 	// If this is the first job in the batch, start the batch timer
 	if len(pools.distributionBatch) == 1 {
-		logger.Info("Starting batch timer with %d second delay", int(pools.mergeDelay.Seconds()))
+		logger.Info("BATCH-TRACKING: Starting batch timer with %d second delay for deposit ID %s",
+			int(pools.mergeDelay.Seconds()), depositIDStr)
 		pools.startBatchTimer()
 	}
 
 	// Check if batch is full
 	if len(pools.distributionBatch) >= pools.maxDeposits {
-		logger.Info("Batch is full (%d distributions), submitting now", len(pools.distributionBatch))
+		logger.Info("BATCH-TRACKING: Batch is full (%d/%d distributions), submitting now",
+			len(pools.distributionBatch), pools.maxDeposits)
 		pools.submitBatch()
 	}
 }
@@ -432,11 +437,11 @@ func (pools *BridgeWorkerPools) processBatchOnTimeout() {
 
 	// Only process if there are jobs in the batch
 	if len(pools.distributionBatch) > 0 {
-		logger.Info("Processing distribution batch of %d deposits due to timeout (merge delay of %d seconds reached)",
+		logger.Info("BATCH-TRACKING: Processing distribution batch of %d deposits due to timeout (merge delay of %d seconds reached)",
 			len(pools.distributionBatch), int(pools.mergeDelay.Seconds()))
 		pools.submitBatch()
 	} else {
-		logger.Info("Batch timer fired but no distributions to process")
+		logger.Info("BATCH-TRACKING: Batch timer fired but no distributions to process")
 	}
 }
 
@@ -452,14 +457,22 @@ func (pools *BridgeWorkerPools) submitBatch() {
 	batchCopy := make([]*DistributionJob, len(pools.distributionBatch))
 	copy(batchCopy, pools.distributionBatch)
 
+	batchCount := len(batchCopy)
+	batchId := fmt.Sprintf("batch-%d", time.Now().Unix())
+
+	// Get deposit IDs for logging
+	var depositIDs []string
+	for _, job := range batchCopy {
+		depositIDs = append(depositIDs, job.DepositID.String())
+	}
+	depositIDsStr := strings.Join(depositIDs, ", ")
+
 	// Clear the batch
 	pools.distributionBatch = make([]*DistributionJob, 0, pools.maxDeposits)
 
 	// Submit batch job
-	logger.Info("Submitting batch of %d distributions for processing (batch ID: %s)",
-		len(batchCopy),
-		// Use current timestamp to create a unique batch ID
-		fmt.Sprintf("batch-%d", time.Now().Unix()))
+	logger.Info("BATCH-TRACKING: Submitting batch %s with %d distributions: [%s]",
+		batchId, batchCount, depositIDsStr)
 
 	pools.DistributionPool.Submit(&BatchDistributionJob{
 		Distributions: batchCopy,
