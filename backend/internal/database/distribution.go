@@ -31,6 +31,17 @@ type Distribution struct {
 
 // CreateDistribution creates a new distribution record in the database
 func (db *DB) CreateDistribution(dist *Distribution) error {
+	// First, explicitly check for nil MonAmount (critical check)
+	if dist.MonAmount == nil {
+		return fmt.Errorf("mon_amount cannot be nil, required for distribution creation")
+	}
+
+	// Make sure we have a valid MonAmount string to avoid SQL NULL issues
+	monAmountStr := dist.MonAmount.String()
+	if monAmountStr == "" || monAmountStr == "0" {
+		return fmt.Errorf("invalid mon_amount value: %s", monAmountStr)
+	}
+
 	// Use Postgres ON CONFLICT to handle duplicate deposit IDs
 	// This is essentially an UPSERT operation that will do an INSERT if the record doesn't exist,
 	// or an UPDATE if it does exist
@@ -56,7 +67,7 @@ func (db *DB) CreateDistribution(dist *Distribution) error {
 		RETURNING id`,
 		dist.DepositID.String(),
 		dist.WalletAddress.Hex(),
-		dist.MonAmount.String(),
+		monAmountStr, // Use the validated string directly
 		dist.Status,
 		dist.MonadTxHash,
 	).Scan(&dist.ID)

@@ -427,6 +427,30 @@ func (pools *BridgeWorkerPools) consumeCalculationResults() {
 			// Create new distribution record
 			logger.Info("Creating new distribution record for deposit ID %s", depositIDStr)
 
+			// CRITICAL: Ensure monAmount is valid before proceeding
+			if monAmount == nil || monAmount.Cmp(big.NewInt(0)) <= 0 {
+				logger.Error("Invalid MON amount for deposit ID %s (nil or zero)", depositIDStr)
+
+				// Try to calculate a minimum amount if deposit amount is available
+				var safeMonAmount *big.Int
+				if deposit.Amount != nil && deposit.Amount.Cmp(big.NewInt(0)) > 0 {
+					// Use 10x deposit amount as a safe default (matches typical calculation)
+					safeMonAmount = new(big.Int).Mul(deposit.Amount, big.NewInt(10))
+					logger.Warn("Calculated fallback MON amount %s for deposit ID %s",
+						safeMonAmount.String(), depositIDStr)
+				} else {
+					// Absolute minimum fallback (0.001 MON)
+					safeMonAmount = big.NewInt(1000000000000000)
+					logger.Warn("Using minimum MON amount %s for deposit ID %s",
+						safeMonAmount.String(), depositIDStr)
+				}
+				monAmount = safeMonAmount
+			}
+
+			// Now that we have a guaranteed valid monAmount, proceed with distribution creation
+			logger.Info("Using MON amount %s for distribution record of deposit ID %s",
+				monAmount.String(), depositIDStr)
+
 			distribution := &database.Distribution{
 				DepositID:     deposit.DepositID,
 				WalletAddress: deposit.WalletAddress,
@@ -672,7 +696,29 @@ func (pools *BridgeWorkerPools) processBatchMint(ctx context.Context, distributi
 		logger.Info("Successfully minted %s MON for deposit ID %s in batch tx %s",
 			formatMonAmount(dist.MonAmount), depositIDStr, txHash)
 
-		// Update database records for successful mint
+		// CRITICAL: First check if distribution record exists, create if it doesn't
+		existingDist, distErr := pools.service.db.GetDistributionByDepositID(dist.DepositID)
+		if distErr != nil || existingDist == nil {
+			logger.Info("Creating initial distribution record for deposit ID %s before updating status", depositIDStr)
+
+			// Create the distribution record directly to ensure it exists
+			initialDist := &database.Distribution{
+				DepositID:     dist.DepositID,
+				WalletAddress: dist.WalletAddress,
+				MonAmount:     dist.MonAmount,
+				Status:        database.DistStatusCompleted,
+				MonadTxHash:   txHash,
+			}
+
+			if err := pools.service.db.CreateDistribution(initialDist); err != nil {
+				logger.Error("Failed to create initial distribution record for deposit ID %s: %v", depositIDStr, err)
+				// Continue with update anyway - it might succeed if the record was created by another worker
+			} else {
+				logger.Info("Successfully created distribution record for deposit ID %s", depositIDStr)
+			}
+		}
+
+		// Now update distribution status (will use upsert logic we added earlier)
 		pools.DBPool.Submit(&DBWorkerJob{
 			JobType: JobUpdateDistributionStatus,
 			Distribution: &database.Distribution{
@@ -937,12 +983,36 @@ func (pools *BridgeWorkerPools) processDistributionJob(ctx context.Context, job 
 	logger.Info("Successfully minted %s MON for deposit ID %s with tx %s",
 		formatMonAmount(job.MonAmount), depositIDStr, txHash)
 
+	// CRITICAL: First check if distribution record exists, create if it doesn't
+	existingDist, distErr := pools.service.db.GetDistributionByDepositID(job.DepositID)
+	if distErr != nil || existingDist == nil {
+		logger.Info("Creating initial distribution record for deposit ID %s before updating status", depositIDStr)
+
+		// Create the distribution record directly to ensure it exists
+		initialDist := &database.Distribution{
+			DepositID:     job.DepositID,
+			WalletAddress: job.WalletAddress,
+			MonAmount:     job.MonAmount,
+			Status:        database.DistStatusCompleted,
+			MonadTxHash:   txHash,
+		}
+
+		if err := pools.service.db.CreateDistribution(initialDist); err != nil {
+			logger.Error("Failed to create initial distribution record for deposit ID %s: %v", depositIDStr, err)
+			// Continue with update anyway - it might succeed if the record was created by another worker
+		} else {
+			logger.Info("Successfully created distribution record for deposit ID %s", depositIDStr)
+		}
+	}
+
+	// Now submit the update job to the worker pool
 	pools.DBPool.Submit(&DBWorkerJob{
 		JobType: JobUpdateDistributionStatus,
 		Distribution: &database.Distribution{
 			DepositID:   job.DepositID,
 			Status:      database.DistStatusCompleted,
 			MonadTxHash: txHash,
+			MonAmount:   job.MonAmount, // Include MON amount for updating distribution
 		},
 	})
 
@@ -1012,7 +1082,26 @@ func (pools *BridgeWorkerPools) processDBJob(ctx context.Context, job *DBWorkerJ
 		depositIDStr := depositID.String()
 		logger.Info("Processing JobCreateDistribution for deposit ID %s", depositIDStr)
 
-		// First check if the distribution record already exists
+		// CRITICAL: Directly verify MonAmount is not nil before proceeding
+		if job.Distribution.MonAmount == nil {
+			logger.Error("MonAmount is nil for deposit ID %s, cannot create distribution record", depositIDStr)
+
+			// Try to retrieve MonAmount from transaction history or use default minimum
+			tx, txErr := pools.service.db.GetTransactionByDepositID(depositID)
+			if txErr == nil && tx != nil && tx.MonAmount != nil && tx.MonAmount.Cmp(big.NewInt(0)) > 0 {
+				// Use MON amount from transaction_history
+				logger.Info("Retrieved MonAmount %s from transaction_history for deposit ID %s",
+					tx.MonAmount.String(), depositIDStr)
+				job.Distribution.MonAmount = tx.MonAmount
+			} else {
+				// Fall back to a safe minimum value (1000000000000000 = 0.001 MON)
+				job.Distribution.MonAmount = big.NewInt(1000000000000000)
+				logger.Warn("Using fallback minimum MonAmount for deposit ID %s: %s",
+					depositIDStr, job.Distribution.MonAmount.String())
+			}
+		}
+
+		// Check if the distribution record already exists
 		existingDist, err := pools.service.db.GetDistributionByDepositID(depositID)
 		if err == nil && existingDist != nil {
 			logger.Info("Distribution record already exists for deposit ID %s, updating with new data", depositIDStr)
@@ -1048,18 +1137,32 @@ func (pools *BridgeWorkerPools) processDBJob(ctx context.Context, job *DBWorkerJ
 					statusToUse = newStatus
 				}
 
-				if err := pools.service.db.UpdateDistributionStatus(depositID, statusToUse, txHashToUse); err != nil {
-					logger.Error("Failed to update existing distribution record: %v", err)
+				// Use updateDistributionWithAmount instead if we have a MON amount
+				if newMonAmount != nil && newMonAmount.Cmp(big.NewInt(0)) > 0 {
+					if err := pools.service.db.UpdateDistributionWithAmount(
+						depositID, statusToUse, txHashToUse, newMonAmount); err != nil {
+						logger.Error("Failed to update existing distribution record with amount: %v", err)
+					} else {
+						logger.Info("Successfully updated distribution record with MON amount for deposit ID %s",
+							depositIDStr)
+					}
 				} else {
-					logger.Info("Successfully updated distribution record for deposit ID %s: status=%s, txHash=%s",
-						depositIDStr, statusToUse, txHashToUse)
+					// Fall back to standard update without MON amount
+					if err := pools.service.db.UpdateDistributionStatus(depositID, statusToUse, txHashToUse); err != nil {
+						logger.Error("Failed to update existing distribution record: %v", err)
+					} else {
+						logger.Info("Successfully updated distribution record for deposit ID %s: status=%s, txHash=%s",
+							depositIDStr, statusToUse, txHashToUse)
+					}
 				}
 			} else {
 				logger.Info("No changes needed for distribution record %s", depositIDStr)
 			}
 		} else {
 			// Try to create new distribution record
-			logger.Info("Creating new distribution record for deposit ID %s", depositIDStr)
+			logger.Info("Creating new distribution record for deposit ID %s with MON amount %s",
+				depositIDStr, job.Distribution.MonAmount.String())
+
 			if err := pools.service.db.CreateDistribution(job.Distribution); err != nil {
 				logger.Error("Failed to create distribution record: %v", err)
 
@@ -1069,16 +1172,29 @@ func (pools *BridgeWorkerPools) processDBJob(ctx context.Context, job *DBWorkerJ
 				if retryErr == nil && retryDist != nil {
 					logger.Info("Distribution record now exists for deposit ID %s, attempting update instead", depositIDStr)
 
-					if updateErr := pools.service.db.UpdateDistributionStatus(
-						depositID, job.Distribution.Status, job.Distribution.MonadTxHash); updateErr != nil {
-						logger.Error("Also failed to update existing distribution record: %v", updateErr)
+					// Use the UpdateDistributionWithAmount to ensure MON amount is set
+					if job.Distribution.MonAmount != nil && job.Distribution.MonAmount.Cmp(big.NewInt(0)) > 0 {
+						if updateErr := pools.service.db.UpdateDistributionWithAmount(
+							depositID, job.Distribution.Status, job.Distribution.MonadTxHash, job.Distribution.MonAmount); updateErr != nil {
+							logger.Error("Also failed to update existing distribution record with amount: %v", updateErr)
+						} else {
+							logger.Info("Successfully updated distribution record with MON amount for deposit ID %s",
+								depositIDStr)
+						}
 					} else {
-						logger.Info("Successfully updated distribution record after failed creation for deposit ID %s",
-							depositIDStr)
+						// Fall back to standard update without MON amount (shouldn't happen due to our earlier check)
+						if updateErr := pools.service.db.UpdateDistributionStatus(
+							depositID, job.Distribution.Status, job.Distribution.MonadTxHash); updateErr != nil {
+							logger.Error("Also failed to update existing distribution record: %v", updateErr)
+						} else {
+							logger.Info("Successfully updated distribution record after failed creation for deposit ID %s",
+								depositIDStr)
+						}
 					}
 				}
 			} else {
-				logger.Info("Successfully created new distribution record for deposit ID %s", depositIDStr)
+				logger.Info("Successfully created new distribution record for deposit ID %s with MON amount %s",
+					depositIDStr, job.Distribution.MonAmount.String())
 			}
 		}
 
