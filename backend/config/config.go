@@ -138,7 +138,7 @@ func Load() (*Config, error) {
 	}
 
 	// Default to quicknode for backward compatibility
-	webhookProvider := getEnvOrDefault("WEBHOOK_PROVIDER", "quicknode")
+	webhookProvider := getEnvOrDefault("WEBHOOK_PROVIDER", "alchemy")
 
 	// Validate webhook provider
 	if webhookProvider != "quicknode" && webhookProvider != "alchemy" {
