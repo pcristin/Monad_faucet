@@ -566,6 +566,7 @@ func (pools *BridgeWorkerPools) processBatchMint(ctx context.Context, distributi
 					DepositID:   dist.DepositID,
 					Status:      database.DistStatusCompleted,
 					MonadTxHash: txHash,
+					MonAmount:   dist.MonAmount, // Include MON amount for updating distribution
 				},
 			})
 
@@ -613,6 +614,7 @@ func (pools *BridgeWorkerPools) processBatchMint(ctx context.Context, distributi
 				DepositID:   dist.DepositID,
 				Status:      database.DistStatusCompleted,
 				MonadTxHash: txHash,
+				MonAmount:   dist.MonAmount, // Include MON amount for updating distribution
 			},
 		})
 
@@ -941,14 +943,104 @@ func (pools *BridgeWorkerPools) processDBJob(ctx context.Context, job *DBWorkerJ
 		}
 
 	case JobCreateDistribution:
-		logger.Debug("Processing JobCreateDistribution for deposit ID %s", job.Distribution.DepositID.String())
-		if err := pools.service.db.CreateDistribution(job.Distribution); err != nil {
-			logger.Error("Failed to create distribution record: %v", err)
+		depositID := job.Distribution.DepositID
+		depositIDStr := depositID.String()
+		logger.Info("Processing JobCreateDistribution for deposit ID %s", depositIDStr)
+
+		// First check if the distribution record already exists
+		existingDist, err := pools.service.db.GetDistributionByDepositID(depositID)
+		if err == nil && existingDist != nil {
+			logger.Info("Distribution record already exists for deposit ID %s, updating with new data", depositIDStr)
+
+			// Prepare the update data
+			updateNeeded := false
+			newStatus := job.Distribution.Status
+			newMonAmount := job.Distribution.MonAmount
+			newTxHash := job.Distribution.MonadTxHash
+
+			// Only update fields that have values and differ from existing record
+			if newStatus != "" && newStatus != existingDist.Status {
+				updateNeeded = true
+			}
+			if newMonAmount != nil && (existingDist.MonAmount == nil || newMonAmount.Cmp(existingDist.MonAmount) != 0) {
+				updateNeeded = true
+			}
+			if newTxHash != "" && newTxHash != existingDist.MonadTxHash {
+				updateNeeded = true
+			}
+
+			// Update if needed
+			if updateNeeded {
+				// If we have a tx hash, use it, otherwise keep existing
+				txHashToUse := existingDist.MonadTxHash
+				if newTxHash != "" {
+					txHashToUse = newTxHash
+				}
+
+				// If we have a status, use it, otherwise keep existing
+				statusToUse := existingDist.Status
+				if newStatus != "" {
+					statusToUse = newStatus
+				}
+
+				if err := pools.service.db.UpdateDistributionStatus(depositID, statusToUse, txHashToUse); err != nil {
+					logger.Error("Failed to update existing distribution record: %v", err)
+				} else {
+					logger.Info("Successfully updated distribution record for deposit ID %s: status=%s, txHash=%s",
+						depositIDStr, statusToUse, txHashToUse)
+				}
+			} else {
+				logger.Info("No changes needed for distribution record %s", depositIDStr)
+			}
+		} else {
+			// Try to create new distribution record
+			logger.Info("Creating new distribution record for deposit ID %s", depositIDStr)
+			if err := pools.service.db.CreateDistribution(job.Distribution); err != nil {
+				logger.Error("Failed to create distribution record: %v", err)
+
+				// If creation failed, try getting distribution again and update if it exists
+				// (it might have been created by another worker in the meantime)
+				retryDist, retryErr := pools.service.db.GetDistributionByDepositID(depositID)
+				if retryErr == nil && retryDist != nil {
+					logger.Info("Distribution record now exists for deposit ID %s, attempting update instead", depositIDStr)
+
+					if updateErr := pools.service.db.UpdateDistributionStatus(
+						depositID, job.Distribution.Status, job.Distribution.MonadTxHash); updateErr != nil {
+						logger.Error("Also failed to update existing distribution record: %v", updateErr)
+					} else {
+						logger.Info("Successfully updated distribution record after failed creation for deposit ID %s",
+							depositIDStr)
+					}
+				}
+			} else {
+				logger.Info("Successfully created new distribution record for deposit ID %s", depositIDStr)
+			}
 		}
 
 	case JobUpdateDistributionStatus:
-		if err := pools.service.db.UpdateDistributionStatus(job.Distribution.DepositID, job.Distribution.Status, job.Distribution.MonadTxHash); err != nil {
-			logger.Error("Failed to update distribution status: %v", err)
+		if job.Distribution.MonAmount != nil && job.Distribution.MonAmount.Cmp(big.NewInt(0)) > 0 {
+			// Use the new method to update status, hash and amount in one operation
+			if err := pools.service.db.UpdateDistributionWithAmount(
+				job.Distribution.DepositID,
+				job.Distribution.Status,
+				job.Distribution.MonadTxHash,
+				job.Distribution.MonAmount); err != nil {
+				logger.Error("Failed to update distribution with amount: %v", err)
+			} else {
+				logger.Info("Updated distribution for ID %s with status %s, txHash %s, and MON amount %s",
+					job.Distribution.DepositID.String(),
+					job.Distribution.Status,
+					job.Distribution.MonadTxHash,
+					formatMonAmount(job.Distribution.MonAmount))
+			}
+		} else {
+			// Fall back to the standard update method if we don't have a MON amount
+			if err := pools.service.db.UpdateDistributionStatus(
+				job.Distribution.DepositID,
+				job.Distribution.Status,
+				job.Distribution.MonadTxHash); err != nil {
+				logger.Error("Failed to update distribution status: %v", err)
+			}
 		}
 
 	case "update_transaction_history":

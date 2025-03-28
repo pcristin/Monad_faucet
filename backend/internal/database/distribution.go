@@ -309,3 +309,24 @@ func (db *DB) GetDistributionsByStatus(status string, limit, offset int) ([]*Dis
 
 	return distributions, nil
 }
+
+// UpdateDistributionWithAmount updates the status, tx hash and MON amount of a distribution
+func (db *DB) UpdateDistributionWithAmount(depositID *big.Int, status, txHash string, monAmount *big.Int) error {
+	if monAmount == nil {
+		return fmt.Errorf("mon amount is nil")
+	}
+
+	_, err := db.Exec(
+		`UPDATE distributions 
+		SET status = $1, monad_tx_hash = $2, mon_amount = $3, updated_at = CURRENT_TIMESTAMP 
+		WHERE deposit_id = $4`,
+		status,
+		txHash,
+		monAmount.String(),
+		depositID.String(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update distribution with amount: %w", err)
+	}
+	return nil
+}
