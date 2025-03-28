@@ -243,52 +243,68 @@ func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *
 					monAmount = new(big.Int).Mul(deposit.Amount, big.NewInt(10))
 				}
 
-				// Create or update distribution record BEFORE updating transaction
-				existingDist, _ := s.db.GetDistributionByDepositID(depositID)
-				if existingDist != nil {
-					// Update existing distribution
-					logger.Info("Updating existing distribution record for deposit ID %s with txHash %s",
-						depositID.String(), txHash)
+				// Check if we should use worker pools for distribution record
+				if s.workerPools != nil {
+					logger.Info("Using worker pools for distribution record management")
 
-					if err := s.db.UpdateDistributionStatus(depositID, database.DistStatusCompleted, txHash); err != nil {
-						logger.Error("Failed to update distribution status: %v", err)
-					} else {
-						// Get updated distribution to ensure we have the latest MON amount
-						updatedDist, _ := s.db.GetDistributionByDepositID(depositID)
-						if updatedDist != nil && updatedDist.MonAmount != nil {
-							monAmount = updatedDist.MonAmount
-							logger.Info("Using MON amount %s from updated distribution record", monAmount.String())
-						}
-					}
+					// Submit distribution creation/update to worker pool
+					s.workerPools.DBPool.Submit(&DBWorkerJob{
+						JobType: JobCreateDistribution,
+						Distribution: &database.Distribution{
+							DepositID:     depositID,
+							WalletAddress: deposit.WalletAddress,
+							MonAmount:     monAmount,
+							Status:        database.DistStatusCompleted,
+							MonadTxHash:   txHash,
+						},
+					})
 				} else {
-					// Create new distribution record
-					logger.Info("Creating new distribution record for deposit ID %s with txHash %s and amount %s",
-						depositID.String(), txHash, monAmount.String())
+					// Direct database operations if worker pools not available
+					existingDist, _ := s.db.GetDistributionByDepositID(depositID)
+					if existingDist != nil {
+						// Update existing distribution
+						logger.Info("Updating existing distribution record for deposit ID %s with txHash %s",
+							depositID.String(), txHash)
 
-					dist := &database.Distribution{
-						DepositID:     depositID,
-						WalletAddress: deposit.WalletAddress,
-						MonAmount:     monAmount,
-						Status:        database.DistStatusCompleted,
-						MonadTxHash:   txHash,
-					}
+						if err := s.db.UpdateDistributionStatus(depositID, database.DistStatusCompleted, txHash); err != nil {
+							logger.Error("Failed to update distribution status: %v", err)
+						} else {
+							// Get updated distribution to ensure we have the latest MON amount
+							updatedDist, _ := s.db.GetDistributionByDepositID(depositID)
+							if updatedDist != nil && updatedDist.MonAmount != nil {
+								monAmount = updatedDist.MonAmount
+								logger.Info("Using MON amount %s from updated distribution record", monAmount.String())
+							}
+						}
+					} else {
+						// Create new distribution record
+						logger.Info("Creating new distribution record for deposit ID %s with txHash %s and amount %s",
+							depositID.String(), txHash, monAmount.String())
 
-					if err := s.db.CreateDistribution(dist); err != nil {
-						logger.Error("Failed to create distribution record: %v", err)
+						dist := &database.Distribution{
+							DepositID:     depositID,
+							WalletAddress: deposit.WalletAddress,
+							MonAmount:     monAmount,
+							Status:        database.DistStatusCompleted,
+							MonadTxHash:   txHash,
+						}
+
+						if err := s.db.CreateDistribution(dist); err != nil {
+							logger.Error("Failed to create distribution record: %v", err)
+						}
 					}
 				}
 			}
 		}
 	}
 
-	// Now, update the transaction with the MON amount we just set in the distribution
-	// Explicitly pass the MON amount to ensure it gets set
+	// Now, update the transaction with the MON amount
 	var err error
 	if monAmount != nil && monAmount.Cmp(big.NewInt(0)) > 0 {
 		logger.Info("Updating transaction with explicit MON amount: %s for ID %s",
 			monAmount.String(), depositID.String())
 
-		// Custom update that directly sets the MON amount without trying to look it up
+		// Custom update that directly sets the MON amount
 		err = s.db.UpdateTransactionWithMonAmount(depositID, status, txHash, monAmount)
 	} else {
 		// Fall back to standard update if we couldn't get the MON amount
@@ -309,15 +325,24 @@ func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *
 		depositStatus = status // Use the same status
 	}
 
-	logger.Info("Also updating deposit status for ID %s to %s (after transaction status update)",
-		depositID.String(), depositStatus)
-
-	if err := s.db.UpdateDepositStatus(depositID, depositStatus); err != nil {
-		logger.Error("Failed to update deposit status after updating transaction: %v", err)
-		// Don't return error here - we still successfully updated the transaction
-		// Just log the error and continue
+	// Submit deposit status update to worker pool if available
+	if s.workerPools != nil {
+		s.workerPools.DBPool.Submit(&DBWorkerJob{
+			JobType: JobUpdateDepositStatus,
+			Deposit: &database.Deposit{
+				DepositID: depositID,
+				Status:    depositStatus,
+			},
+		})
+		logger.Info("Queued deposit status update to worker pool for ID %s", depositID.String())
 	} else {
-		logger.Info("Successfully updated both transaction and deposit status for ID %s", depositID.String())
+		// Direct update if worker pools not available
+		if err := s.db.UpdateDepositStatus(depositID, depositStatus); err != nil {
+			logger.Error("Failed to update deposit status after updating transaction: %v", err)
+			// Don't return error here - we still successfully updated the transaction
+		} else {
+			logger.Info("Successfully updated deposit status for ID %s", depositID.String())
+		}
 	}
 
 	return nil
