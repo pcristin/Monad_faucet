@@ -151,11 +151,11 @@ type BridgeWorkerPools struct {
 // NewBridgeWorkerPools creates a new set of worker pools
 func NewBridgeWorkerPools(service *BridgeService) *BridgeWorkerPools {
 	return &BridgeWorkerPools{
-		DepositPool:        NewWorkerPool("deposit", 1, 100),
-		CalculationPool:    NewWorkerPool("calculation", 1, 100),
-		DistributionPool:   NewWorkerPool("distribution", 1, 100),
-		DBPool:             NewWorkerPool("database", 1, 100),
-		calculationChannel: make(chan CalculatedDeposit, 100),
+		DepositPool:        NewWorkerPool("deposit", 4, 1000),
+		CalculationPool:    NewWorkerPool("calculation", 4, 1000),
+		DistributionPool:   NewWorkerPool("distribution", 4, 1000),
+		DBPool:             NewWorkerPool("database", 4, 1000),
+		calculationChannel: make(chan CalculatedDeposit, 1000),
 		service:            service,
 		processingDeposits: make(map[string]bool),
 		distributionBatch:  make([]*DistributionJob, 0, 100),
@@ -623,6 +623,22 @@ func (pools *BridgeWorkerPools) processBatchMint(ctx context.Context, distributi
 				Status:    database.StatusProcessed,
 			},
 		})
+
+		// Create a custom DB job to update transaction_history table
+		// This ensures all tables are updated consistently through the worker pool
+		txHistoryJob := &DBWorkerJob{
+			JobType: "update_transaction_history",
+			Distribution: &database.Distribution{
+				DepositID:   dist.DepositID,
+				Status:      database.DistStatusCompleted,
+				MonadTxHash: txHash,
+				MonAmount:   dist.MonAmount, // Include the MON amount for the transaction history
+			},
+		}
+
+		pools.DBPool.Submit(txHistoryJob)
+		logger.Info("Queued transaction history update for deposit ID %s with tx hash %s and MON amount %s",
+			depositIDStr, txHash, formatMonAmount(dist.MonAmount))
 	}
 
 	return true, nil // All processed successfully in batch
@@ -918,6 +934,23 @@ func (pools *BridgeWorkerPools) processDBJob(ctx context.Context, job *DBWorkerJ
 	case JobUpdateDistributionStatus:
 		if err := pools.service.db.UpdateDistributionStatus(job.Distribution.DepositID, job.Distribution.Status, job.Distribution.MonadTxHash); err != nil {
 			logger.Error("Failed to update distribution status: %v", err)
+		}
+
+	case "update_transaction_history":
+		// Update the transaction_history table with the Monad tx hash and MON amount
+		depositID := job.Distribution.DepositID
+		depositIDStr := depositID.String()
+		txHash := job.Distribution.MonadTxHash
+
+		logger.Info("Processing update_transaction_history for deposit ID %s with tx hash %s",
+			depositIDStr, txHash)
+
+		// Use UpdateTransactionStatus which will find the MON amount in the distributions table
+		if err := pools.service.UpdateTransactionStatus(ctx, depositID, database.StatusCompleted, txHash); err != nil {
+			logger.Error("Failed to update transaction history for deposit ID %s: %v", depositIDStr, err)
+		} else {
+			logger.Info("Successfully updated transaction history for deposit ID %s with tx hash %s",
+				depositIDStr, txHash)
 		}
 
 	default:

@@ -50,8 +50,8 @@ func NewBridgeService(
 	return &BridgeService{
 		arbDepositor:        arbDepositor,
 		monadDistributor:    monadDistributor,
-		depositChan:         make(chan blockchain.DepositEvent, 100),
-		refundChan:          make(chan *big.Int, 100),
+		depositChan:         make(chan blockchain.DepositEvent, 1000),
+		refundChan:          make(chan *big.Int, 1000),
 		wg:                  sync.WaitGroup{},
 		ctx:                 ctx,
 		cancel:              cancel,

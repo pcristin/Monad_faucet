@@ -37,16 +37,16 @@ type WorkerPoolConfig struct {
 // Default values for worker pools
 const (
 	// High parallelism for deposit tasks
-	DefaultDepositWorkers = 1
+	DefaultDepositWorkers = 2
 
 	// Moderate parallelism for calculation tasks
-	DefaultCalculationWorkers = 1
+	DefaultCalculationWorkers = 2
 
 	// High parallelism for distribution tasks (token minting)
-	DefaultDistributionWorkers = 1
+	DefaultDistributionWorkers = 2
 
 	// Moderate parallelism for database operations
-	DefaultDBWorkers = 1
+	DefaultDBWorkers = 2
 
 	// Queue size large enough to handle bursts
 	DefaultQueueSize = 100
