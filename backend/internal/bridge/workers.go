@@ -159,7 +159,7 @@ func NewBridgeWorkerPools(service *BridgeService) *BridgeWorkerPools {
 		service:            service,
 		processingDeposits: make(map[string]bool),
 		distributionBatch:  make([]*DistributionJob, 0, 100),
-		mergeDelay:         20 * time.Second, // Very short delay to encourage faster batching
+		mergeDelay:         10 * time.Second, // Very short delay to encourage faster batching
 		maxDeposits:        100,              // Small batch size to encourage more frequent batches
 	}
 }
