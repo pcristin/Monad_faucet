@@ -650,32 +650,37 @@ func (s *BridgeService) mintTokensBatch(ctx context.Context, recipients []common
 		return "", fmt.Errorf("no valid transfers in batch")
 	}
 
-	// Create an array of arrays for the contract call, matching the Python implementation structure
-	// The format is: [[recipient1, amount1, id1], [recipient2, amount2, id2], ...]
-	transfersArray := make([][]interface{}, 0, validCount)
+	// Create a typed array of TransferData structs for the contract call
+	// The struct must match the contract's TransferData struct: {recipient, amount, id}
+	type TransferData struct {
+		Recipient common.Address
+		Amount    *big.Int
+		Id        *big.Int
+	}
+
+	transfers := make([]TransferData, 0, validCount)
 
 	// Add only valid transfers (with non-zero amounts)
 	for i, amount := range amounts {
 		if amount.Cmp(big.NewInt(0)) > 0 {
-			// Each transfer is an array of [address, amount, id]
-			transferData := []interface{}{
-				recipients[i], // address
-				amounts[i],    // amount
-				depositIds[i], // id
+			transfer := TransferData{
+				Recipient: recipients[i],
+				Amount:    amounts[i],
+				Id:        depositIds[i],
 			}
-			transfersArray = append(transfersArray, transferData)
+			transfers = append(transfers, transfer)
 		}
 	}
 
-	logger.Info("Creating batch mint transaction for %d recipients", len(transfersArray))
+	logger.Info("Creating batch mint transaction for %d recipients", len(transfers))
 
 	// Log each transfer for debugging
-	for i, transfer := range transfersArray {
+	for i, transfer := range transfers {
 		logger.Info("Batch transfer #%d: %s MON to %s (deposit ID: %s)",
 			i+1,
-			formatMonAmount(transfer[1].(*big.Int)),
-			transfer[0].(common.Address).Hex(),
-			transfer[2].(*big.Int).String())
+			formatMonAmount(transfer.Amount),
+			transfer.Recipient.Hex(),
+			transfer.Id.String())
 	}
 
 	// Get transaction options
@@ -685,8 +690,8 @@ func (s *BridgeService) mintTokensBatch(ctx context.Context, recipients []common
 	}
 
 	// Execute the batch distribution transaction
-	// Send the array of arrays to the contract
-	tx, err := s.monadDistributor.TransactWithGasBuffer(opts, "distributeFunds", transfersArray)
+	// The contract function expects an array of TransferData structs
+	tx, err := s.monadDistributor.TransactWithGasBuffer(opts, "distributeFunds", transfers)
 	if err != nil {
 		logger.Error("Failed to distribute funds in batch: %v", err)
 		return "", fmt.Errorf("failed to distribute funds in batch: %v", err)
@@ -707,7 +712,7 @@ func (s *BridgeService) mintTokensBatch(ctx context.Context, recipients []common
 		return txHash, fmt.Errorf("transaction failed on-chain")
 	}
 
-	logger.Info("Batch mint transaction confirmed with %d distributions", len(transfersArray))
+	logger.Info("Batch mint transaction confirmed with %d distributions", len(transfers))
 	return txHash, nil
 }
 
