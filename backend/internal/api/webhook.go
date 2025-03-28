@@ -168,9 +168,73 @@ func (h *Handler) processAlchemyGraphQLLog(ctx context.Context, log AlchemyLog) 
 		logger.Info("Updating transaction status for deposit ID %s to completed with txHash %s via Alchemy webhook",
 			depositID.String(), txHash)
 
-		// Update transaction status
+		// 1. First, update transaction history
 		if err := h.BridgeService.UpdateTransactionStatus(ctx, depositID, "completed", txHash); err != nil {
+			logger.Error("Failed to update transaction status: %v", err)
 			return fmt.Errorf("failed to update transaction status: %v", err)
+		}
+
+		// 2. Get the deposit record to retrieve wallet address and amount
+		deposit, err := h.BridgeService.GetDB().GetDepositByID(depositID)
+		if err != nil {
+			logger.Error("Failed to get deposit for ID %s: %v", depositID.String(), err)
+			return fmt.Errorf("failed to get deposit: %v", err)
+		}
+
+		if deposit == nil {
+			logger.Error("Deposit not found for ID %s", depositID.String())
+			return fmt.Errorf("deposit not found")
+		}
+
+		// 3. Get MON amount from transaction history
+		tx, err := h.BridgeService.GetDB().GetTransactionByDepositID(depositID)
+		if err != nil || tx == nil {
+			logger.Error("Failed to get transaction for deposit ID %s: %v", depositID.String(), err)
+			return fmt.Errorf("transaction not found: %v", err)
+		}
+
+		monAmount := tx.MonAmount
+		if monAmount == nil || monAmount.Cmp(big.NewInt(0)) <= 0 {
+			logger.Warn("Transaction has no MON amount, using a default calculation")
+			// Use the same calculation from calculateMonAmount if needed
+			// This is a fallback, but webhook shouldn't need this logic normally
+			monAmount = new(big.Int).Mul(deposit.Amount, big.NewInt(10))
+		}
+
+		// 4. Check if distribution record exists
+		existingDist, _ := h.BridgeService.GetDB().GetDistributionByDepositID(depositID)
+		if existingDist != nil {
+			// Update existing distribution record
+			logger.Info("Updating existing distribution record for deposit ID %s with txHash %s",
+				depositID.String(), txHash)
+
+			if err := h.BridgeService.GetDB().UpdateDistributionStatus(depositID, database.DistStatusCompleted, txHash); err != nil {
+				logger.Error("Failed to update distribution status: %v", err)
+				// Continue anyway since transaction_history was updated
+			}
+		} else {
+			// Create new distribution record
+			logger.Info("Creating new distribution record for deposit ID %s with txHash %s",
+				depositID.String(), txHash)
+
+			dist := &database.Distribution{
+				DepositID:     depositID,
+				WalletAddress: deposit.WalletAddress,
+				MonAmount:     monAmount,
+				Status:        database.DistStatusCompleted,
+				MonadTxHash:   txHash,
+			}
+
+			if err := h.BridgeService.GetDB().CreateDistribution(dist); err != nil {
+				logger.Error("Failed to create distribution record: %v", err)
+				// Continue anyway since transaction_history was updated
+			}
+		}
+
+		// 5. Mark deposit as processed
+		if err := h.BridgeService.GetDB().UpdateDepositStatus(depositID, database.StatusProcessed); err != nil {
+			logger.Error("Failed to update deposit status: %v", err)
+			// Continue anyway since transaction_history and distribution were updated
 		}
 
 		logger.Info("Successfully updated transaction status for deposit ID %s to completed with txHash %s via Alchemy webhook",

@@ -27,11 +27,20 @@ type Deposit struct {
 
 // CreateDeposit creates a new deposit record in the database
 func (db *DB) CreateDeposit(deposit *Deposit) error {
-	// Use RETURNING clause to get the inserted ID (PostgreSQL compatible)
+	// Use Postgres ON CONFLICT to handle duplicate deposit IDs
+	// This is essentially an UPSERT operation that will do an INSERT if the record doesn't exist,
+	// or an UPDATE if it does exist (which will update only the fields we want to update)
 	err := db.QueryRow(
 		`INSERT INTO deposits 
-		(deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata) 
+		(deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (deposit_id) DO UPDATE SET
+		-- Only update fields that may need to be refreshed
+		status = CASE
+			WHEN deposits.status = 'failed' OR deposits.status = 'pending' THEN $7
+			ELSE deposits.status
+		END,
+		updated_at = CURRENT_TIMESTAMP
 		RETURNING id`,
 		deposit.DepositID.String(),
 		deposit.WalletAddress.Hex(),
@@ -46,6 +55,9 @@ func (db *DB) CreateDeposit(deposit *Deposit) error {
 	if err != nil {
 		return fmt.Errorf("failed to create deposit: %w", err)
 	}
+
+	logger.Info("Successfully created or updated deposit record for ID %s with status %s",
+		deposit.DepositID.String(), deposit.Status)
 
 	return nil
 }
