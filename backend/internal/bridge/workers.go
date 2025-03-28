@@ -653,9 +653,9 @@ func (s *BridgeService) mintTokensBatch(ctx context.Context, recipients []common
 	// Create a typed array of TransferData structs for the contract call
 	// The struct must match the contract's TransferData struct: {recipient, amount, id}
 	type TransferData struct {
-		Recipient common.Address
-		Amount    *big.Int
-		Id        *big.Int
+		Recipient common.Address `abi:"recipient"`
+		Amount    *big.Int       `abi:"amount"`
+		Id        *big.Int       `abi:"id"`
 	}
 
 	transfers := make([]TransferData, 0, validCount)
