@@ -362,29 +362,94 @@ func (pools *BridgeWorkerPools) consumeCalculationResults() {
 		deposit := calcResult.Deposit
 		monAmount := calcResult.MonAmount
 
-		// Create distribution record
-		distribution := &database.Distribution{
-			DepositID:     deposit.DepositID,
-			WalletAddress: deposit.WalletAddress,
-			MonAmount:     monAmount,
-			Status:        database.DistStatusPending,
+		depositIDStr := deposit.DepositID.String()
+		logger.Info("Processing calculation result for deposit ID %s with MON amount %s",
+			depositIDStr, formatMonAmount(monAmount))
+
+		// First check if deposit exists and is valid
+		existingDeposit, err := pools.service.db.GetDepositByID(deposit.DepositID)
+		if err != nil || existingDeposit == nil {
+			logger.Error("Failed to verify deposit %s exists: %v", depositIDStr, err)
+			logger.Info("Attempting to recreate deposit record for ID %s", depositIDStr)
+
+			// Try to create/update the deposit record directly
+			if err := pools.service.db.CreateDeposit(deposit); err != nil {
+				logger.Error("Failed to create/update deposit record directly: %v", err)
+				// Even if this fails, we'll still continue with distribution creation
+			} else {
+				logger.Info("Successfully created/updated deposit record for ID %s", depositIDStr)
+			}
 		}
 
-		// Submit to database pool to create distribution record
-		pools.DBPool.Submit(&DBWorkerJob{
-			JobType:      JobCreateDistribution,
-			Distribution: distribution,
-		})
+		// Check if distribution already exists to avoid duplicate creation
+		existingDist, err := pools.service.db.GetDistributionByDepositID(deposit.DepositID)
+		if err == nil && existingDist != nil {
+			logger.Info("Distribution record already exists for deposit ID %s, updating if needed", depositIDStr)
 
-		// Create distribution job
-		distJob := &DistributionJob{
-			DepositID:     deposit.DepositID,
-			WalletAddress: deposit.WalletAddress,
-			MonAmount:     monAmount,
+			// Update distribution with latest data if needed
+			if existingDist.Status != database.DistStatusCompleted ||
+				existingDist.MonadTxHash == "" ||
+				(existingDist.MonAmount == nil && monAmount != nil) {
+
+				// Use the better MON amount between existing and new
+				distMonAmount := monAmount
+				if existingDist.MonAmount != nil && existingDist.MonAmount.Cmp(big.NewInt(0)) > 0 {
+					distMonAmount = existingDist.MonAmount
+				}
+
+				distribution := &database.Distribution{
+					DepositID:     deposit.DepositID,
+					WalletAddress: deposit.WalletAddress,
+					MonAmount:     distMonAmount,
+					Status:        existingDist.Status,
+					MonadTxHash:   existingDist.MonadTxHash,
+				}
+
+				// Submit to database pool to update distribution record
+				pools.DBPool.Submit(&DBWorkerJob{
+					JobType:      JobUpdateDistributionStatus,
+					Distribution: distribution,
+				})
+
+				// Create distribution job only if it's not completed yet
+				if existingDist.Status != database.DistStatusCompleted {
+					distJob := &DistributionJob{
+						DepositID:     deposit.DepositID,
+						WalletAddress: deposit.WalletAddress,
+						MonAmount:     distMonAmount,
+					}
+
+					// Add to batch or process individually
+					pools.addToDistributionBatch(distJob)
+				}
+			}
+		} else {
+			// Create new distribution record
+			logger.Info("Creating new distribution record for deposit ID %s", depositIDStr)
+
+			distribution := &database.Distribution{
+				DepositID:     deposit.DepositID,
+				WalletAddress: deposit.WalletAddress,
+				MonAmount:     monAmount,
+				Status:        database.DistStatusPending,
+			}
+
+			// Submit to database pool to create distribution record
+			pools.DBPool.Submit(&DBWorkerJob{
+				JobType:      JobCreateDistribution,
+				Distribution: distribution,
+			})
+
+			// Create distribution job
+			distJob := &DistributionJob{
+				DepositID:     deposit.DepositID,
+				WalletAddress: deposit.WalletAddress,
+				MonAmount:     monAmount,
+			}
+
+			// Add to batch or process individually
+			pools.addToDistributionBatch(distJob)
 		}
-
-		// Add to batch or process individually
-		pools.addToDistributionBatch(distJob)
 	}
 }
 

@@ -31,11 +31,28 @@ type Distribution struct {
 
 // CreateDistribution creates a new distribution record in the database
 func (db *DB) CreateDistribution(dist *Distribution) error {
-	// Use RETURNING clause to get the inserted ID (PostgreSQL compatible)
+	// Use Postgres ON CONFLICT to handle duplicate deposit IDs
+	// This is essentially an UPSERT operation that will do an INSERT if the record doesn't exist,
+	// or an UPDATE if it does exist
 	err := db.QueryRow(
 		`INSERT INTO distributions 
 		(deposit_id, wallet_address, mon_amount, status, monad_tx_hash) 
 		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (deposit_id) DO UPDATE SET
+		mon_amount = CASE 
+			WHEN $3 IS NOT NULL AND distributions.mon_amount IS NULL THEN $3
+			ELSE distributions.mon_amount
+		END,
+		status = CASE
+			WHEN $4 = 'completed' THEN $4 
+			WHEN distributions.status = 'pending' AND $4 = 'failed' THEN $4
+			ELSE distributions.status
+		END,
+		monad_tx_hash = CASE
+			WHEN $5 <> '' AND (distributions.monad_tx_hash IS NULL OR distributions.monad_tx_hash = '') THEN $5
+			ELSE distributions.monad_tx_hash
+		END,
+		updated_at = CURRENT_TIMESTAMP
 		RETURNING id`,
 		dist.DepositID.String(),
 		dist.WalletAddress.Hex(),
@@ -47,7 +64,7 @@ func (db *DB) CreateDistribution(dist *Distribution) error {
 	if err != nil {
 		return fmt.Errorf("failed to create distribution: %w", err)
 	}
-	logger.Debug("Created distribution record for deposit ID %s", dist.DepositID.String())
+	logger.Info("Successfully created or updated distribution record for deposit ID %s", dist.DepositID.String())
 	return nil
 }
 
