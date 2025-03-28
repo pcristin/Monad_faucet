@@ -927,6 +927,7 @@ func (pools *BridgeWorkerPools) processDBJob(ctx context.Context, job *DBWorkerJ
 		}
 
 	case JobCreateDistribution:
+		logger.Debug("Processing JobCreateDistribution for deposit ID %s", job.Distribution.DepositID.String())
 		if err := pools.service.db.CreateDistribution(job.Distribution); err != nil {
 			logger.Error("Failed to create distribution record: %v", err)
 		}

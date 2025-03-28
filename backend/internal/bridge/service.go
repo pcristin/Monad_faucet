@@ -244,5 +244,57 @@ func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *
 		logger.Info("Successfully updated both transaction and deposit status for ID %s", depositID.String())
 	}
 
+	// If transaction is completed, also ensure a distribution record exists
+	if status == database.StatusCompleted && txHash != "" {
+		// Get the deposit to get wallet address
+		deposit, err := s.db.GetDepositByID(depositID)
+		if err != nil || deposit == nil {
+			logger.Error("Failed to get deposit for ID %s: %v", depositID.String(), err)
+			// Continue anyway since we've updated transaction and deposit
+		} else {
+			// Get transaction to get MON amount
+			tx, err := s.db.GetTransactionByDepositID(depositID)
+			if err != nil || tx == nil {
+				logger.Error("Failed to get transaction for deposit ID %s: %v", depositID.String(), err)
+				// Continue anyway
+			} else {
+				monAmount := tx.MonAmount
+				if monAmount == nil || monAmount.Cmp(big.NewInt(0)) <= 0 {
+					logger.Warn("Transaction has no MON amount, using a default calculation for ID %s", depositID.String())
+					// Use a default calculation similar to what's done in calculateMonAmount
+					monAmount = new(big.Int).Mul(deposit.Amount, big.NewInt(10))
+				}
+
+				// Check if distribution already exists
+				existingDist, _ := s.db.GetDistributionByDepositID(depositID)
+				if existingDist != nil {
+					// Update existing distribution
+					logger.Info("Updating existing distribution record for deposit ID %s with txHash %s",
+						depositID.String(), txHash)
+
+					if err := s.db.UpdateDistributionStatus(depositID, database.DistStatusCompleted, txHash); err != nil {
+						logger.Error("Failed to update distribution status: %v", err)
+					}
+				} else {
+					// Create new distribution record
+					logger.Info("Creating new distribution record for deposit ID %s with txHash %s and amount %s",
+						depositID.String(), txHash, monAmount.String())
+
+					dist := &database.Distribution{
+						DepositID:     depositID,
+						WalletAddress: deposit.WalletAddress,
+						MonAmount:     monAmount,
+						Status:        database.DistStatusCompleted,
+						MonadTxHash:   txHash,
+					}
+
+					if err := s.db.CreateDistribution(dist); err != nil {
+						logger.Error("Failed to create distribution record: %v", err)
+					}
+				}
+			}
+		}
+	}
+
 	return nil
 }

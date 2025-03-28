@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
 // Distribution status constants
@@ -46,7 +47,7 @@ func (db *DB) CreateDistribution(dist *Distribution) error {
 	if err != nil {
 		return fmt.Errorf("failed to create distribution: %w", err)
 	}
-
+	logger.Debug("Created distribution record for deposit ID %s", dist.DepositID.String())
 	return nil
 }
 
