@@ -997,3 +997,60 @@ func (t *Transaction) GetMetadata() string {
 	}
 	return ""
 }
+
+// UpdateTransactionWithMonAmount updates the status, Monad tx hash and MON amount of a transaction directly
+func (db *DB) UpdateTransactionWithMonAmount(depositID *big.Int, status, txHash string, monAmount *big.Int) error {
+	if depositID == nil {
+		return fmt.Errorf("invalid deposit ID: nil")
+	}
+
+	if monAmount == nil {
+		return fmt.Errorf("invalid MON amount: nil")
+	}
+
+	depositIDStr := depositID.String()
+	monAmountStr := monAmount.String()
+
+	// Add explicit logging for debugging
+	logger.Info("Directly updating transaction with MON amount for deposit ID %s: status=%s, txHash=%s, monAmount=%s",
+		depositIDStr, status, txHash, monAmountStr)
+
+	// Implement retry logic (3 attempts)
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		var result sql.Result
+
+		// Always update with the explicit MON amount
+		result, err = db.Exec(
+			`UPDATE transaction_history 
+			SET status = $1, monad_tx_hash = $2, mon_amount = $3, updated_at = CURRENT_TIMESTAMP 
+			WHERE deposit_id = $4`,
+			status,
+			txHash,
+			monAmountStr,
+			depositIDStr,
+		)
+
+		if err != nil {
+			fmt.Printf("Error updating transaction with MON amount (attempt %d/3): %v\n", attempt, err)
+			time.Sleep(time.Duration(attempt*100) * time.Millisecond)
+			continue
+		}
+
+		// Check if any rows were affected
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			fmt.Printf("Error getting rows affected: %v\n", err)
+		} else if rowsAffected == 0 {
+			fmt.Printf("No rows affected when updating transaction for deposit ID %s\n", depositIDStr)
+		} else {
+			fmt.Printf("Successfully updated transaction for deposit ID %s with MON amount %s (rows: %d)\n",
+				depositIDStr, monAmountStr, rowsAffected)
+			return nil
+		}
+
+		time.Sleep(time.Duration(attempt*100) * time.Millisecond)
+	}
+
+	return fmt.Errorf("failed to update transaction with MON amount after multiple attempts: %w", err)
+}
