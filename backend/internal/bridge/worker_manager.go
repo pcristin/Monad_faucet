@@ -30,6 +30,12 @@ func (s *BridgeService) SetWorkerManager(manager *workers.Manager) {
 	logger.Info("Worker manager set for bridge service")
 }
 
+// SetWorkerPools sets the bridge worker pools
+func (s *BridgeService) SetWorkerPools(pools *BridgeWorkerPools) {
+	s.workerPools = pools
+	logger.Info("Worker pools set for batch processing")
+}
+
 // GetWorkerManager returns the worker manager
 func (s *BridgeService) GetWorkerManager() *workers.Manager {
 	return s.workerManager
@@ -158,7 +164,27 @@ func (s *BridgeService) HandleDistributionTask(task *workers.DistributionTask) e
 		return fmt.Errorf("invalid amount: %s", task.Amounts[0])
 	}
 
-	// Use the existing mintTokens method to perform the distribution
+	// IMPORTANT CHANGE: Instead of directly calling mintTokens, create a distribution job
+	// and submit it to the worker pool for batch processing
+	if s.workerPools != nil {
+		logger.Info("Submitting distribution for deposit ID %s to batch processing system", depositID.String())
+
+		// Create a distribution job
+		distJob := &DistributionJob{
+			DepositID:     depositID,
+			WalletAddress: recipient,
+			MonAmount:     amount,
+		}
+
+		// Add the job to the distribution batch (this will be processed as part of a batch)
+		s.workerPools.addToDistributionBatch(distJob)
+
+		logger.Info("Distribution for deposit ID %s successfully added to batch processing", depositID.String())
+		return nil
+	}
+
+	// Fallback to direct processing if worker pools not available
+	logger.Warn("Worker pools not available, falling back to direct processing for deposit ID %s", depositID.String())
 	start := time.Now()
 	txHash, err := s.mintTokens(context.Background(), recipient, amount, depositID)
 	if err != nil {
