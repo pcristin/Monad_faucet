@@ -49,7 +49,7 @@ const (
 	DefaultDBWorkers = 2
 
 	// Queue size large enough to handle bursts
-	DefaultQueueSize = 100
+	DefaultQueueSize = 1000
 )
 
 // Load reads configuration from environment variables
