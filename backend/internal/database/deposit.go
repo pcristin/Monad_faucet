@@ -20,7 +20,7 @@ type Deposit struct {
 	TxHash        string // Arbitrum transaction hash
 	BlockNumber   uint64
 	Status        string
-	Metadata      sql.NullString // User-provided metadata for this deposit
+	Metadata      string // User-provided metadata for this deposit
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
@@ -105,7 +105,7 @@ func (db *DB) UpdateDepositStatus(depositID *big.Int, status string) error {
 			txData.TxHash,
 			0, // We don't know the block number here
 			status,
-			"", // No metadata available from transaction record
+			txData.Metadata, // No metadata available from transaction record
 			time.Now(),
 			time.Now(),
 		)
@@ -426,10 +426,10 @@ func (db *DB) GetDepositsByStatus(status string, limit, offset int) ([]*Deposit,
 	return deposits, nil
 }
 
-// GetMetadata retrieves the metadata as a string, returning empty string if NULL
-func (d *Deposit) GetMetadata() string {
-	if d.Metadata.Valid {
-		return d.Metadata.String
-	}
-	return ""
-}
+// // GetMetadata retrieves the metadata as a string, returning empty string if NULL
+// func (d *Deposit) GetMetadata() string {
+// 	if d.Metadata.Valid {
+// 		return d.Metadata.String
+// 	}
+// 	return ""
+// }

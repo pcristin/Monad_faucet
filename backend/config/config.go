@@ -34,6 +34,24 @@ type WorkerPoolConfig struct {
 	DBWorkers           int // Number of database workers
 }
 
+// Default values for worker pools
+const (
+	// High parallelism for deposit tasks
+	DefaultDepositWorkers = 2
+
+	// Moderate parallelism for calculation tasks
+	DefaultCalculationWorkers = 2
+
+	// High parallelism for distribution tasks (token minting)
+	DefaultDistributionWorkers = 2
+
+	// Moderate parallelism for database operations
+	DefaultDBWorkers = 2
+
+	// Queue size large enough to handle bursts
+	DefaultQueueSize = 1000
+)
+
 // Load reads configuration from environment variables
 func Load() (*Config, error) {
 	if err := godotenv.Load(); err != nil {
@@ -59,11 +77,25 @@ func Load() (*Config, error) {
 			user, password, host, port, dbname, sslmode)
 	}
 
-	// Get worker pool configuration
-	depositWorkers := getEnvAsIntOrDefault("DEPOSIT_WORKERS", 5)
-	calculationWorkers := getEnvAsIntOrDefault("CALCULATION_WORKERS", 3)
-	distributionWorkers := getEnvAsIntOrDefault("DISTRIBUTION_WORKERS", 5)
-	dbWorkers := getEnvAsIntOrDefault("DB_WORKERS", 2)
+	// Parse worker pool configuration with higher defaults
+	depositWorkers := getEnvAsIntOrDefault("DEPOSIT_WORKERS", DefaultDepositWorkers)
+	calculationWorkers := getEnvAsIntOrDefault("CALCULATION_WORKERS", DefaultCalculationWorkers)
+	distributionWorkers := getEnvAsIntOrDefault("DISTRIBUTION_WORKERS", DefaultDistributionWorkers)
+	dbWorkers := getEnvAsIntOrDefault("DB_WORKERS", DefaultDBWorkers)
+
+	// Ensure minimum values
+	if depositWorkers < 1 {
+		depositWorkers = DefaultDepositWorkers
+	}
+	if calculationWorkers < 1 {
+		calculationWorkers = DefaultCalculationWorkers
+	}
+	if distributionWorkers < 1 {
+		distributionWorkers = DefaultDistributionWorkers
+	}
+	if dbWorkers < 1 {
+		dbWorkers = DefaultDBWorkers
+	}
 
 	// Get server address with port
 	port := getEnvOrDefault("PORT", "8080")

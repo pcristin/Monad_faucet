@@ -34,8 +34,9 @@ type BridgeService struct {
 	lockRefreshers      map[string]context.CancelFunc
 	lockRefreshersMutex sync.Mutex
 	workerManager       *workers.Manager
-	UseWebhook          bool   // Flag to use webhooks for distribution events instead of polling
-	WebhookProvider     string // The webhook provider (quicknode or alchemy)
+	workerPools         *BridgeWorkerPools // Reference to worker pools for batch processing
+	UseWebhook          bool               // Flag to use webhooks for distribution events instead of polling
+	WebhookProvider     string             // The webhook provider (quicknode or alchemy)
 }
 
 // NewBridgeService creates a new instance of BridgeService.
@@ -49,8 +50,8 @@ func NewBridgeService(
 	return &BridgeService{
 		arbDepositor:        arbDepositor,
 		monadDistributor:    monadDistributor,
-		depositChan:         make(chan blockchain.DepositEvent, 100),
-		refundChan:          make(chan *big.Int, 100),
+		depositChan:         make(chan blockchain.DepositEvent, 1000),
+		refundChan:          make(chan *big.Int, 1000),
 		wg:                  sync.WaitGroup{},
 		ctx:                 ctx,
 		cancel:              cancel,

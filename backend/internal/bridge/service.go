@@ -17,6 +17,14 @@ import (
 func (s *BridgeService) Start() error {
 	logger.Info("Starting bridge service...")
 
+	// Initialize and start worker pools for batch processing
+	if s.workerPools == nil {
+		logger.Info("Initializing bridge worker pools for batch processing")
+		s.workerPools = NewBridgeWorkerPools(s)
+		s.workerPools.Start()
+		logger.Info("Bridge worker pools initialized and started")
+	}
+
 	// Start the worker manager if it exists
 	if wm := s.GetWorkerManager(); wm != nil {
 		wm.StartAll()
@@ -44,6 +52,12 @@ func (s *BridgeService) Start() error {
 func (s *BridgeService) Stop() error {
 	logger.Info("Stopping bridge service...")
 	s.cancel()
+
+	// Stop worker pools
+	if s.workerPools != nil {
+		logger.Info("Stopping bridge worker pools")
+		s.workerPools.Stop()
+	}
 
 	// Stop the worker manager if it exists
 	if wm := s.GetWorkerManager(); wm != nil {
@@ -106,7 +120,7 @@ func (s *BridgeService) recordDepositImmediately(event blockchain.DepositEvent) 
 		TxHash:        event.TxHash,
 		BlockNumber:   event.BlockNumber,
 		Status:        database.StatusPending,
-		Metadata:      sql.NullString{String: event.Metadata, Valid: event.Metadata != ""},
+		Metadata:      string(event.Metadata),
 	}
 
 	// Write to database

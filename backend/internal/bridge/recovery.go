@@ -82,8 +82,8 @@ func (s *BridgeService) RecoverStuckTransactions(ctx context.Context) error {
 			}
 			continue
 		}
-		if time.Since(tx.CreatedAt) > 30*time.Minute {
-			logger.Warn("Tx for deposit ID %s pending >30 minutes; marking as failed", tx.DepositID.String())
+		if time.Since(tx.CreatedAt) > 60*time.Minute {
+			logger.Warn("Tx for deposit ID %s pending >60 minutes; marking as failed", tx.DepositID.String())
 			if updateErr := s.UpdateTransactionStatus(ctx, tx.DepositID, database.StatusFailed, ""); updateErr != nil {
 				logger.Error("Failed to mark tx as failed: %v", updateErr)
 			}

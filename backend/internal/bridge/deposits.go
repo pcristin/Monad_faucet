@@ -10,6 +10,7 @@ import (
 
 	"github.com/pcristin/monad-faucet/internal/blockchain"
 	"github.com/pcristin/monad-faucet/internal/database"
+	"github.com/pcristin/monad-faucet/internal/workers"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
@@ -81,19 +82,41 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 		formatBigIntAsFloat(event.Amount, blockchain.GetCurrencyDecimals(event.Currency)),
 		blockchain.CurrencyTypeToString(event.Currency))
 
-	// Ensure transaction record exists
-	logger.Debug("Ensuring transaction record exists for deposit ID %s", event.DepositId.String())
-	_, err = s.ensureTransactionRecord(event, monAmount)
-	if err != nil {
-		logger.Error("Failed to ensure transaction record: %v", err)
-		return err
+	// Create a database task to ensure transaction record exists
+	dbTask := workers.NewDatabaseTask("create_deposit", map[string]interface{}{
+		"deposit": map[string]interface{}{
+			"deposit_id":     event.DepositId.String(),
+			"wallet_address": event.Depositor.Hex(),
+			"amount":         event.Amount.String(),
+			"currency":       int(event.Currency),
+			"tx_hash":        event.TxHash,
+			"block_number":   event.BlockNumber,
+			"status":         database.StatusPending,
+			"metadata":       event.Metadata,
+		},
+	})
+
+	if !s.SubmitDatabaseTask(dbTask) {
+		// Fall back to direct DB operation if worker pool submission fails
+		logger.Warn("Failed to submit database task, falling back to direct DB operation")
+		_, err = s.ensureTransactionRecord(event, monAmount)
+		if err != nil {
+			logger.Error("Failed to ensure transaction record: %v", err)
+			return err
+		}
 	}
 
 	logger.Info("Validating deposit ID %s", event.DepositId.String())
 	if err := s.validateDepositWithAmount(state, event, monAmount); err != nil {
 		logger.Error("Deposit validation failed for ID %s: %v", event.DepositId.String(), err)
-		logger.Info("Updating transaction status to failed for deposit ID %s", event.DepositId.String())
-		_ = s.UpdateTransactionStatus(context.Background(), event.DepositId, database.StatusFailed, "")
+
+		// Update status via worker pool
+		updateStatusTask := workers.NewDatabaseTask("update_deposit_status", map[string]interface{}{
+			"deposit_id": event.DepositId.String(),
+			"status":     database.StatusFailed,
+		})
+		s.SubmitDatabaseTask(updateStatusTask)
+
 		logger.Info("Queueing refund for deposit ID %s", event.DepositId.String())
 		s.QueueRefund(event.DepositId)
 		return fmt.Errorf("invalid deposit: %w", err)
@@ -102,8 +125,14 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 	logger.Info("Waiting for confirmations for deposit ID %s, block %d", event.DepositId.String(), event.BlockNumber)
 	if err := s.waitForConfirmations(context.Background(), event.BlockNumber, 10); err != nil {
 		logger.Error("Failed to wait for confirmations for deposit ID %s: %v", event.DepositId.String(), err)
-		logger.Info("Updating transaction status to failed for deposit ID %s", event.DepositId.String())
-		_ = s.UpdateTransactionStatus(context.Background(), event.DepositId, database.StatusFailed, "")
+
+		// Update status via worker pool
+		updateStatusTask := workers.NewDatabaseTask("update_deposit_status", map[string]interface{}{
+			"deposit_id": event.DepositId.String(),
+			"status":     database.StatusFailed,
+		})
+		s.SubmitDatabaseTask(updateStatusTask)
+
 		logger.Info("Queueing refund for deposit ID %s", event.DepositId.String())
 		s.QueueRefund(event.DepositId)
 		return fmt.Errorf("failed to wait for confirmations: %w", err)
@@ -118,54 +147,73 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 		return nil
 	}
 
-	logger.Info("Initiating token minting for deposit ID %s", event.DepositId.String())
-	txHash, err := s.mintTokens(context.Background(), event.Depositor, monAmount, event.DepositId)
-	if err != nil {
-		if strings.Contains(err.Error(), "already completed") ||
-			strings.Contains(err.Error(), "already in progress") ||
-			strings.Contains(err.Error(), "duplicate mint attempt") {
-			logger.Warn("Skipping refund for duplicate mint attempt: %v", err)
-			if txHash != "" {
-				logger.Info("Found completed tx %s, updating status for deposit ID %s", txHash, event.DepositId.String())
-				_ = s.UpdateTransactionStatus(context.Background(), event.DepositId, database.StatusCompleted, txHash)
+	// Create a distribution task for parallel processing
+	distributionTask := workers.NewDistributionTask(
+		event.DepositId.String(),
+		event.DepositId.String(), // Generate a unique distribution ID
+		[]string{event.Depositor.Hex()},
+		[]string{monAmount.String()},
+	)
+
+	// Submit the distribution task to the worker pool
+	if !s.SubmitDistributionTask(distributionTask) {
+		// Check if we can use worker pools directly for batching
+		if s.workerPools != nil {
+			logger.Info("Using worker pools batching for deposit ID %s", event.DepositId.String())
+
+			// Create a distribution job
+			distJob := &DistributionJob{
+				DepositID:     event.DepositId,
+				WalletAddress: event.Depositor,
+				MonAmount:     monAmount,
 			}
-			return fmt.Errorf("duplicate mint attempt: %w", err)
-		}
-		logger.Error("Mint tokens failed for deposit ID %s: %v", event.DepositId.String(), err)
-		logger.Info("Updating transaction status to failed for deposit ID %s", event.DepositId.String())
-		_ = s.UpdateTransactionStatus(context.Background(), event.DepositId, database.StatusFailed, "")
-		logger.Info("Queueing refund for deposit ID %s", event.DepositId.String())
-		s.QueueRefund(event.DepositId)
-		return fmt.Errorf("failed to mint tokens: %w", err)
-	}
 
-	logger.Info("Successfully minted %s MON for wallet %s. Updating transaction status to completed with tx %s",
-		formatMonAmount(monAmount), event.Depositor.Hex(), txHash)
-
-	// Update transaction status and verify the update
-	if err := s.UpdateTransactionStatus(context.Background(), event.DepositId, database.StatusCompleted, txHash); err != nil {
-		logger.Error("Failed to update transaction status: %v", err)
-	} else {
-		// Verify the update was successful
-		updatedTx, verifyErr := s.db.GetTransactionByDepositID(event.DepositId)
-		if verifyErr != nil {
-			logger.Error("Failed to verify transaction update: %v", verifyErr)
-		} else if updatedTx == nil {
-			logger.Error("Transaction not found after update")
-		} else if updatedTx.Status != database.StatusCompleted {
-			logger.Error("Transaction status not updated correctly: expected %s, got %s",
-				database.StatusCompleted, updatedTx.Status)
-		} else if updatedTx.MonadTxHash != txHash {
-			logger.Error("Transaction hash not updated correctly: expected %s, got %s",
-				txHash, updatedTx.MonadTxHash)
+			// Add the job to the batch processing system
+			s.workerPools.addToDistributionBatch(distJob)
+			logger.Info("Added deposit ID %s to batch processing via worker pools", event.DepositId.String())
 		} else {
-			logger.Info("Transaction successfully updated and verified: status=%s, txHash=%s",
-				updatedTx.Status, updatedTx.MonadTxHash)
+			// Last resort: Fall back to direct minting if worker pools are not available
+			logger.Warn("Failed to submit distribution task and worker pools not available, falling back to direct minting")
+
+			logger.Info("Initiating token minting for deposit ID %s", event.DepositId.String())
+			txHash, err := s.mintTokens(context.Background(), event.Depositor, monAmount, event.DepositId)
+			if err != nil {
+				if strings.Contains(err.Error(), "already completed") ||
+					strings.Contains(err.Error(), "already in progress") ||
+					strings.Contains(err.Error(), "duplicate mint attempt") {
+					logger.Warn("Skipping refund for duplicate mint attempt: %v", err)
+					if txHash != "" {
+						logger.Info("Found completed tx %s, updating status for deposit ID %s", txHash, event.DepositId.String())
+						_ = s.UpdateTransactionStatus(context.Background(), event.DepositId, database.StatusCompleted, txHash)
+					}
+					return fmt.Errorf("duplicate mint attempt: %w", err)
+				}
+				logger.Error("Mint tokens failed for deposit ID %s: %v", event.DepositId.String(), err)
+				logger.Info("Updating transaction status to failed for deposit ID %s", event.DepositId.String())
+				_ = s.UpdateTransactionStatus(context.Background(), event.DepositId, database.StatusFailed, "")
+				logger.Info("Queueing refund for deposit ID %s", event.DepositId.String())
+				s.QueueRefund(event.DepositId)
+				return fmt.Errorf("failed to mint tokens: %w", err)
+			}
+
+			logger.Info("Successfully minted %s MON for wallet %s. Updating transaction status to completed with tx %s",
+				formatMonAmount(monAmount), event.Depositor.Hex(), txHash)
+
+			// Update transaction status directly
+			if err := s.UpdateTransactionStatus(context.Background(), event.DepositId, database.StatusCompleted, txHash); err != nil {
+				logger.Error("Failed to update transaction status: %v", err)
+			}
+
+			// Create distribution record directly
+			err = s.createDistributionRecord(event.DepositId, event.Depositor, monAmount, database.DistStatusCompleted, txHash)
+			if err != nil {
+				logger.Error("Failed to create distribution record: %v", err)
+			}
 		}
+	} else {
+		logger.Info("Distribution task successfully submitted to worker pool for deposit ID %s", event.DepositId.String())
 	}
 
-	// Update transaction cache
-	s.updateTxCache(event.DepositId, database.StatusCompleted, txHash)
 	logger.Info("Processing completed for deposit ID %s in %v", event.DepositId.String(), time.Since(startTime))
 	return nil
 }

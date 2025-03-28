@@ -120,7 +120,22 @@ func (p *WorkerPool) startWorker(id int) {
 			logger.Debug("Worker %d in pool %s processing task %s of type %s",
 				id, p.name, task.ID(), task.Type())
 
-			if err := task.Process(); err != nil {
+			// Check if the task has a custom processor
+			baseTask, hasCustomProcessor := task.(interface {
+				HasCustomProcessor() bool
+				RunCustomProcessor(interface{}) error
+			})
+
+			var err error
+			if hasCustomProcessor && baseTask.HasCustomProcessor() {
+				// Use the custom processor
+				err = baseTask.RunCustomProcessor(task)
+			} else {
+				// Use the default Process method
+				err = task.Process()
+			}
+
+			if err != nil {
 				logger.Error("Worker %d in pool %s failed to process task %s: %v",
 					id, p.name, task.ID(), err)
 			} else {

@@ -2,11 +2,13 @@ package bridge
 
 import (
 	"context"
-	"database/sql"
+	"fmt"
 	"math/big"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
 	"github.com/pcristin/monad-faucet/internal/database"
@@ -107,6 +109,11 @@ type DistributionJob struct {
 	MonAmount     *big.Int
 }
 
+// BatchDistributionJob represents a job for batch distribution processing
+type BatchDistributionJob struct {
+	Distributions []*DistributionJob
+}
+
 // DBWorkerJob represents a job for database operations
 type DBWorkerJob struct {
 	JobType      string
@@ -132,18 +139,28 @@ type BridgeWorkerPools struct {
 	service            *BridgeService
 	mu                 sync.Mutex
 	processingDeposits map[string]bool
+
+	// Batch processing fields
+	distributionBatch []*DistributionJob
+	batchMutex        sync.Mutex
+	batchTimer        *time.Timer
+	mergeDelay        time.Duration
+	maxDeposits       int
 }
 
 // NewBridgeWorkerPools creates a new set of worker pools
 func NewBridgeWorkerPools(service *BridgeService) *BridgeWorkerPools {
 	return &BridgeWorkerPools{
-		DepositPool:        NewWorkerPool("deposit", 5, 100),
-		CalculationPool:    NewWorkerPool("calculation", 3, 50),
-		DistributionPool:   NewWorkerPool("distribution", 5, 100),
-		DBPool:             NewWorkerPool("database", 2, 200),
-		calculationChannel: make(chan CalculatedDeposit, 50),
+		DepositPool:        NewWorkerPool("deposit", 2, 1000),
+		CalculationPool:    NewWorkerPool("calculation", 2, 1000),
+		DistributionPool:   NewWorkerPool("distribution", 2, 1000),
+		DBPool:             NewWorkerPool("database", 2, 1000),
+		calculationChannel: make(chan CalculatedDeposit, 1000),
 		service:            service,
 		processingDeposits: make(map[string]bool),
+		distributionBatch:  make([]*DistributionJob, 0, 100),
+		mergeDelay:         30 * time.Second, // Very short delay to encourage faster batching
+		maxDeposits:        100,              // Small batch size to encourage more frequent batches
 	}
 }
 
@@ -161,7 +178,12 @@ func (pools *BridgeWorkerPools) Start() {
 
 	// Start distribution workers
 	pools.DistributionPool.Start(func(ctx context.Context, job interface{}) {
-		pools.processDistributionJob(ctx, job.(*DistributionJob))
+		switch j := job.(type) {
+		case *DistributionJob:
+			pools.processDistributionJob(ctx, j)
+		case *BatchDistributionJob:
+			pools.processBatchDistributionJob(ctx, j)
+		}
 	})
 
 	// Start database workers
@@ -180,6 +202,13 @@ func (pools *BridgeWorkerPools) Stop() {
 	pools.DistributionPool.Stop()
 	pools.DBPool.Stop()
 	close(pools.calculationChannel)
+
+	// Stop batch timer if active
+	pools.batchMutex.Lock()
+	if pools.batchTimer != nil {
+		pools.batchTimer.Stop()
+	}
+	pools.batchMutex.Unlock()
 }
 
 // SubmitDepositEvent submits a deposit event for processing
@@ -227,7 +256,7 @@ func (pools *BridgeWorkerPools) processDepositJob(ctx context.Context, job *Depo
 		TxHash:        job.Event.TxHash,
 		BlockNumber:   job.Event.BlockNumber,
 		Status:        database.StatusPending,
-		Metadata:      sql.NullString{String: job.Event.Metadata, Valid: job.Event.Metadata != ""},
+		Metadata:      job.Event.Metadata,
 	}
 
 	// 3. Submit database job to create the deposit
@@ -347,13 +376,360 @@ func (pools *BridgeWorkerPools) consumeCalculationResults() {
 			Distribution: distribution,
 		})
 
-		// Submit to distribution pool for processing
-		pools.DistributionPool.Submit(&DistributionJob{
+		// Create distribution job
+		distJob := &DistributionJob{
 			DepositID:     deposit.DepositID,
 			WalletAddress: deposit.WalletAddress,
 			MonAmount:     monAmount,
-		})
+		}
+
+		// Add to batch or process individually
+		pools.addToDistributionBatch(distJob)
 	}
+}
+
+// addToDistributionBatch adds a distribution job to the current batch
+func (pools *BridgeWorkerPools) addToDistributionBatch(job *DistributionJob) {
+	pools.batchMutex.Lock()
+	defer pools.batchMutex.Unlock()
+
+	depositIDStr := job.DepositID.String()
+	logger.Info("BATCH-TRACKING: Adding deposit ID %s to distribution batch", depositIDStr)
+
+	// Add job to the batch
+	pools.distributionBatch = append(pools.distributionBatch, job)
+
+	logger.Info("BATCH-TRACKING: Added distribution job for deposit ID %s to batch (current batch size: %d/%d)",
+		depositIDStr, len(pools.distributionBatch), pools.maxDeposits)
+
+	// If this is the first job in the batch, start the batch timer
+	if len(pools.distributionBatch) == 1 {
+		logger.Info("BATCH-TRACKING: Starting batch timer with %d second delay for deposit ID %s",
+			int(pools.mergeDelay.Seconds()), depositIDStr)
+		pools.startBatchTimer()
+	}
+
+	// Check if batch is full
+	if len(pools.distributionBatch) >= pools.maxDeposits {
+		logger.Info("BATCH-TRACKING: Batch is full (%d/%d distributions), submitting now",
+			len(pools.distributionBatch), pools.maxDeposits)
+		pools.submitBatch()
+	}
+}
+
+// startBatchTimer starts a timer to process the batch after mergeDelay
+func (pools *BridgeWorkerPools) startBatchTimer() {
+	// Stop existing timer if any
+	if pools.batchTimer != nil {
+		pools.batchTimer.Stop()
+	}
+
+	// Start new timer
+	pools.batchTimer = time.AfterFunc(pools.mergeDelay, func() {
+		pools.processBatchOnTimeout()
+	})
+}
+
+// processBatchOnTimeout processes the current batch due to timeout
+func (pools *BridgeWorkerPools) processBatchOnTimeout() {
+	pools.batchMutex.Lock()
+	defer pools.batchMutex.Unlock()
+
+	// Only process if there are jobs in the batch
+	if len(pools.distributionBatch) > 0 {
+		logger.Info("BATCH-TRACKING: Processing distribution batch of %d deposits due to timeout (merge delay of %d seconds reached)",
+			len(pools.distributionBatch), int(pools.mergeDelay.Seconds()))
+		pools.submitBatch()
+	} else {
+		logger.Info("BATCH-TRACKING: Batch timer fired but no distributions to process")
+	}
+}
+
+// submitBatch submits the current batch for processing
+func (pools *BridgeWorkerPools) submitBatch() {
+	// Stop timer
+	if pools.batchTimer != nil {
+		pools.batchTimer.Stop()
+		pools.batchTimer = nil
+	}
+
+	// Create a copy of the current batch
+	batchCopy := make([]*DistributionJob, len(pools.distributionBatch))
+	copy(batchCopy, pools.distributionBatch)
+
+	batchCount := len(batchCopy)
+	batchId := fmt.Sprintf("batch-%d", time.Now().Unix())
+
+	// Get deposit IDs for logging
+	var depositIDs []string
+	for _, job := range batchCopy {
+		depositIDs = append(depositIDs, job.DepositID.String())
+	}
+	depositIDsStr := strings.Join(depositIDs, ", ")
+
+	// Clear the batch
+	pools.distributionBatch = make([]*DistributionJob, 0, pools.maxDeposits)
+
+	// Submit batch job
+	logger.Info("BATCH-TRACKING: Submitting batch %s with %d distributions: [%s]",
+		batchId, batchCount, depositIDsStr)
+
+	pools.DistributionPool.Submit(&BatchDistributionJob{
+		Distributions: batchCopy,
+	})
+}
+
+// processBatchDistributionJob handles a batch of distributions
+func (pools *BridgeWorkerPools) processBatchDistributionJob(ctx context.Context, batch *BatchDistributionJob) {
+	if len(batch.Distributions) == 0 {
+		logger.Warn("Received empty distribution batch")
+		return
+	}
+
+	batchID := fmt.Sprintf("batch-%d", time.Now().Unix())
+	logger.Info("[Batch %s] Processing batch of %d distributions", batchID, len(batch.Distributions))
+
+	// Log all deposit IDs in this batch
+	var depositIDs []string
+	for _, dist := range batch.Distributions {
+		depositIDs = append(depositIDs, dist.DepositID.String())
+	}
+	logger.Info("[Batch %s] Contains deposit IDs: %s", batchID, strings.Join(depositIDs, ", "))
+
+	// Attempt to process as a batch first
+	success, failedJobs := pools.processBatchMint(ctx, batch.Distributions)
+
+	// If batch processing was completely successful, we're done
+	if success && len(failedJobs) == 0 {
+		logger.Info("[Batch %s] Successfully processed all %d distributions in batch", batchID, len(batch.Distributions))
+		return
+	}
+
+	// If batch processing failed completely or partially, fall back to individual processing
+	if len(failedJobs) > 0 {
+		logger.Warn("[Batch %s] Batch processing partially failed, falling back to individual processing for %d failed jobs",
+			batchID, len(failedJobs))
+
+		// Log the failed deposit IDs
+		var failedIDs []string
+		for _, job := range failedJobs {
+			failedIDs = append(failedIDs, job.DepositID.String())
+		}
+		logger.Warn("[Batch %s] Failed deposit IDs: %s", batchID, strings.Join(failedIDs, ", "))
+
+		for _, job := range failedJobs {
+			pools.processDistributionJob(ctx, job)
+		}
+	} else {
+		logger.Warn("[Batch %s] Batch processing completely failed, falling back to individual processing for all %d jobs",
+			batchID, len(batch.Distributions))
+		for _, job := range batch.Distributions {
+			pools.processDistributionJob(ctx, job)
+		}
+	}
+}
+
+// processBatchMint attempts to process multiple distributions in a single transaction
+// Returns true if the batch was attempted (even if some distributions failed)
+// Also returns any failed distribution jobs that should be retried individually
+func (pools *BridgeWorkerPools) processBatchMint(ctx context.Context, distributions []*DistributionJob) (bool, []*DistributionJob) {
+	if len(distributions) == 0 {
+		return false, nil
+	}
+
+	// Prepare arrays for batch mint call
+	addresses := make([]common.Address, len(distributions))
+	amounts := make([]*big.Int, len(distributions))
+	depositIDs := make([]*big.Int, len(distributions))
+
+	for i, dist := range distributions {
+		addresses[i] = dist.WalletAddress
+		amounts[i] = dist.MonAmount
+		depositIDs[i] = dist.DepositID
+	}
+
+	// Log the batch mint attempt
+	logger.Info("Attempting batch mint of %d distributions", len(distributions))
+
+	// Check if any distributions are already completed
+	for i, dist := range distributions {
+		// Check blockchain for existing transaction
+		txHash, err := pools.service.checkMonadBlockchainForTransaction(ctx, dist.DepositID)
+		if err == nil && txHash != "" {
+			logger.Info("Distribution for deposit ID %s already exists on blockchain with tx %s",
+				dist.DepositID.String(), txHash)
+
+			// Update database records
+			pools.DBPool.Submit(&DBWorkerJob{
+				JobType: JobUpdateDistributionStatus,
+				Distribution: &database.Distribution{
+					DepositID:   dist.DepositID,
+					Status:      database.DistStatusCompleted,
+					MonadTxHash: txHash,
+				},
+			})
+
+			pools.DBPool.Submit(&DBWorkerJob{
+				JobType: JobUpdateDepositStatus,
+				Deposit: &database.Deposit{
+					DepositID: dist.DepositID,
+					Status:    database.StatusProcessed,
+				},
+			})
+
+			// Remove this distribution from the batch
+			// We do this by setting the address to zero address and amount to zero
+			// The distributor contract should skip these
+			addresses[i] = common.Address{}
+			amounts[i] = big.NewInt(0)
+		}
+	}
+
+	// Attempt to do a batch mint for all distributions at once using individual mintTokens
+	// This is a fallback approach since we don't have batchMintTokens implemented yet
+	txHash, err := pools.service.mintTokensBatch(ctx, addresses, amounts, depositIDs)
+
+	if err != nil {
+		logger.Error("Batch mint transaction failed: %v", err)
+		return false, nil // Complete failure, retry all individually
+	}
+
+	// Process successful batch mint
+	for i, dist := range distributions {
+		// Skip distributions with zero amount (already processed)
+		if amounts[i].Cmp(big.NewInt(0)) <= 0 {
+			continue
+		}
+
+		// This distribution succeeded in the batch
+		depositIDStr := dist.DepositID.String()
+		logger.Info("Successfully minted %s MON for deposit ID %s in batch tx %s",
+			formatMonAmount(dist.MonAmount), depositIDStr, txHash)
+
+		// Update database records for successful mint
+		pools.DBPool.Submit(&DBWorkerJob{
+			JobType: JobUpdateDistributionStatus,
+			Distribution: &database.Distribution{
+				DepositID:   dist.DepositID,
+				Status:      database.DistStatusCompleted,
+				MonadTxHash: txHash,
+			},
+		})
+
+		pools.DBPool.Submit(&DBWorkerJob{
+			JobType: JobUpdateDepositStatus,
+			Deposit: &database.Deposit{
+				DepositID: dist.DepositID,
+				Status:    database.StatusProcessed,
+			},
+		})
+
+		// Create a custom DB job to update transaction_history table
+		// This ensures all tables are updated consistently through the worker pool
+		txHistoryJob := &DBWorkerJob{
+			JobType: "update_transaction_history",
+			Distribution: &database.Distribution{
+				DepositID:   dist.DepositID,
+				Status:      database.DistStatusCompleted,
+				MonadTxHash: txHash,
+				MonAmount:   dist.MonAmount, // Include the MON amount for the transaction history
+			},
+		}
+
+		pools.DBPool.Submit(txHistoryJob)
+		logger.Info("Queued transaction history update for deposit ID %s with tx hash %s and MON amount %s",
+			depositIDStr, txHash, formatMonAmount(dist.MonAmount))
+	}
+
+	return true, nil // All processed successfully in batch
+}
+
+// mintTokensBatch mints MON tokens for multiple recipients in a single transaction.
+func (s *BridgeService) mintTokensBatch(ctx context.Context, recipients []common.Address, amounts []*big.Int, depositIds []*big.Int) (string, error) {
+	if len(recipients) != len(amounts) || len(recipients) != len(depositIds) {
+		return "", fmt.Errorf("recipients, amounts, and depositIds must have the same length")
+	}
+
+	if len(recipients) == 0 {
+		return "", fmt.Errorf("empty batch")
+	}
+
+	// Count valid transfers
+	validCount := 0
+	for _, amount := range amounts {
+		if amount.Cmp(big.NewInt(0)) > 0 {
+			validCount++
+		}
+	}
+
+	if validCount == 0 {
+		return "", fmt.Errorf("no valid transfers in batch")
+	}
+
+	// Create a typed array of TransferData structs for the contract call
+	// The struct must match the contract's TransferData struct: {recipient, amount, id}
+	type TransferData struct {
+		Recipient common.Address `abi:"recipient"`
+		Amount    *big.Int       `abi:"amount"`
+		Id        *big.Int       `abi:"id"`
+	}
+
+	transfers := make([]TransferData, 0, validCount)
+
+	// Add only valid transfers (with non-zero amounts)
+	for i, amount := range amounts {
+		if amount.Cmp(big.NewInt(0)) > 0 {
+			transfer := TransferData{
+				Recipient: recipients[i],
+				Amount:    amounts[i],
+				Id:        depositIds[i],
+			}
+			transfers = append(transfers, transfer)
+		}
+	}
+
+	logger.Info("Creating batch mint transaction for %d recipients", len(transfers))
+
+	// Log each transfer for debugging
+	for i, transfer := range transfers {
+		logger.Info("Batch transfer #%d: %s MON to %s (deposit ID: %s)",
+			i+1,
+			formatMonAmount(transfer.Amount),
+			transfer.Recipient.Hex(),
+			transfer.Id.String())
+	}
+
+	// Get transaction options
+	opts, err := s.monadDistributor.GetTransactOpts(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get transaction options: %v", err)
+	}
+
+	// Execute the batch distribution transaction
+	// The contract function expects an array of TransferData structs
+	tx, err := s.monadDistributor.TransactWithGasBuffer(opts, "distributeFunds", transfers)
+	if err != nil {
+		logger.Error("Failed to distribute funds in batch: %v", err)
+		return "", fmt.Errorf("failed to distribute funds in batch: %v", err)
+	}
+
+	txHash := tx.Hash().Hex()
+	logger.Info("Batch mint transaction submitted: %s", txHash)
+
+	// Wait for transaction to be mined
+	receipt, err := bind.WaitMined(ctx, s.monadDistributor.Client, tx)
+	if err != nil {
+		logger.Error("Failed to wait for batch mint transaction: %v", err)
+		return txHash, fmt.Errorf("failed to wait for transaction confirmation: %v", err)
+	}
+
+	if receipt.Status == 0 {
+		logger.Error("Batch mint transaction failed on-chain")
+		return txHash, fmt.Errorf("transaction failed on-chain")
+	}
+
+	logger.Info("Batch mint transaction confirmed with %d distributions", len(transfers))
+	return txHash, nil
 }
 
 // processDistributionJob processes a distribution job
@@ -558,6 +934,23 @@ func (pools *BridgeWorkerPools) processDBJob(ctx context.Context, job *DBWorkerJ
 	case JobUpdateDistributionStatus:
 		if err := pools.service.db.UpdateDistributionStatus(job.Distribution.DepositID, job.Distribution.Status, job.Distribution.MonadTxHash); err != nil {
 			logger.Error("Failed to update distribution status: %v", err)
+		}
+
+	case "update_transaction_history":
+		// Update the transaction_history table with the Monad tx hash and MON amount
+		depositID := job.Distribution.DepositID
+		depositIDStr := depositID.String()
+		txHash := job.Distribution.MonadTxHash
+
+		logger.Info("Processing update_transaction_history for deposit ID %s with tx hash %s",
+			depositIDStr, txHash)
+
+		// Use UpdateTransactionStatus which will find the MON amount in the distributions table
+		if err := pools.service.UpdateTransactionStatus(ctx, depositID, database.StatusCompleted, txHash); err != nil {
+			logger.Error("Failed to update transaction history for deposit ID %s: %v", depositIDStr, err)
+		} else {
+			logger.Info("Successfully updated transaction history for deposit ID %s with tx hash %s",
+				depositIDStr, txHash)
 		}
 
 	default:
