@@ -222,21 +222,33 @@ func (pools *BridgeWorkerPools) Stop() {
 	pools.batchMutex.Unlock()
 }
 
-// SubmitDepositEvent submits a deposit event for processing
+// SubmitDepositEvent adds a deposit event to the deposit worker pool
 func (pools *BridgeWorkerPools) SubmitDepositEvent(event blockchain.DepositEvent) {
-	// Check if deposit is already being processed
-	depositIDStr := event.DepositId.String()
+	depositId := event.DepositId.String()
+	startTime := time.Now()
 
+	// Prevent duplicate processing
 	pools.mu.Lock()
-	if pools.processingDeposits[depositIDStr] {
+	if pools.processingDeposits[depositId] {
+		logger.Info("Skipping duplicate deposit ID %s", depositId)
 		pools.mu.Unlock()
-		logger.Warn("Skipping duplicate processing for deposit ID %s", depositIDStr)
 		return
 	}
-	pools.processingDeposits[depositIDStr] = true
+	pools.processingDeposits[depositId] = true
 	pools.mu.Unlock()
 
-	pools.DepositPool.Submit(&DepositJob{Event: event})
+	logger.Info("PIPELINE-FLOW: Received deposit event ID %s in submission pipeline", depositId)
+
+	// Create deposit job and submit to pool
+	depositJob := &DepositJob{
+		Event: event,
+	}
+
+	// Submit the job to the deposit worker pool
+	submitStart := time.Now()
+	pools.DepositPool.Submit(depositJob)
+	logger.Info("TIMING: SubmitDepositEvent to DepositPool for ID %s took %v (total handling: %v)",
+		depositId, time.Since(submitStart), time.Since(startTime))
 }
 
 // finishProcessingDeposit marks a deposit as done processing
@@ -254,6 +266,9 @@ func (pools *BridgeWorkerPools) processDepositJob(ctx context.Context, job *Depo
 		logger.Info("TIMING: processDepositJob for ID %s took %v", job.Event.DepositId.String(), time.Since(startTime))
 	}()
 
+	depositId := job.Event.DepositId.String()
+	logger.Info("PIPELINE-FLOW: Processing deposit job for ID %s", depositId)
+
 	defer pools.finishProcessingDeposit(job.Event.DepositId)
 
 	// 1. Check if this deposit has already been processed
@@ -266,77 +281,71 @@ func (pools *BridgeWorkerPools) processDepositJob(ctx context.Context, job *Depo
 		return
 	}
 
-	// 2. Create a new deposit record
-	newDeposit := &database.Deposit{
-		DepositID:     job.Event.DepositId,
-		WalletAddress: job.Event.Depositor,
-		Amount:        job.Event.Amount,
-		Currency:      database.CurrencyType(job.Event.Currency),
-		TxHash:        job.Event.TxHash,
-		BlockNumber:   job.Event.BlockNumber,
-		Status:        database.StatusPending,
-		Metadata:      job.Event.Metadata,
+	// 2. Create deposit record if it doesn't exist yet
+	if err != nil || deposit == nil {
+		logger.Info("Creating new deposit record for deposit ID %s", depositId)
+
+		// Extract metadata from the event if available
+		metadata := job.Event.Metadata
+		if metadata == "" {
+			metadata = "No metadata provided"
+		}
+
+		// Create new deposit
+		depositCreateStart := time.Now()
+		deposit = &database.Deposit{
+			DepositID:     job.Event.DepositId,
+			WalletAddress: job.Event.Depositor,
+			Amount:        job.Event.Amount,
+			Currency:      database.CurrencyType(job.Event.Currency),
+			BlockNumber:   job.Event.BlockNumber,
+			Status:        database.StatusPending,
+			TxHash:        job.Event.TxHash,
+			Metadata:      metadata,
+		}
+
+		// Submit to database pool
+		pools.DBPool.Submit(&DBWorkerJob{
+			JobType: JobCreateDeposit,
+			Deposit: deposit,
+		})
+		logger.Info("TIMING: Creating deposit record and submitting to DB pool for ID %s took %v",
+			depositId, time.Since(depositCreateStart))
+	} else if deposit.Status == database.StatusFailed {
+		logger.Warn("Failed deposit being reprocessed: %s", depositId)
+		// Update status to retry
+		updateStart := time.Now()
+		pools.DBPool.Submit(&DBWorkerJob{
+			JobType: JobUpdateDepositStatus,
+			Deposit: &database.Deposit{
+				DepositID: job.Event.DepositId,
+				Status:    database.StatusPending,
+			},
+		})
+		logger.Info("TIMING: Updating previously failed deposit for ID %s took %v",
+			depositId, time.Since(updateStart))
 	}
 
-	// 3. Submit database job to create the deposit
-	pools.DBPool.Submit(&DBWorkerJob{
-		JobType: JobCreateDeposit,
-		Deposit: newDeposit,
-	})
-
-	// 4. Get the current contract state
+	// 3. Get the current contract state for validation
+	stateStart := time.Now()
 	state, err := pools.service.GetState(ctx)
 	if err != nil {
-		logger.Error("Failed to get bridge state: %v", err)
-		pools.DBPool.Submit(&DBWorkerJob{
-			JobType: JobUpdateDepositStatus,
-			Deposit: &database.Deposit{
-				DepositID: job.Event.DepositId,
-				Status:    database.StatusFailed,
-			},
-		})
+		logger.Error("Failed to get contract state: %v", err)
 		return
 	}
+	logger.Info("TIMING: GetState for ID %s took %v", depositId, time.Since(stateStart))
 
-	if state.IsPaused {
-		logger.Warn("Bridge is currently paused, deposit %s will not be processed", job.Event.DepositId.String())
-		pools.DBPool.Submit(&DBWorkerJob{
-			JobType: JobUpdateDepositStatus,
-			Deposit: &database.Deposit{
-				DepositID: job.Event.DepositId,
-				Status:    database.StatusFailed,
-			},
-		})
-		return
-	}
-
-	// 5. Wait for confirmations and mark as processed if successful
-	if err := pools.service.waitForConfirmations(ctx, job.Event.BlockNumber, 10); err != nil {
-		logger.Error("Failed to wait for confirmations: %v", err)
-		pools.DBPool.Submit(&DBWorkerJob{
-			JobType: JobUpdateDepositStatus,
-			Deposit: &database.Deposit{
-				DepositID: job.Event.DepositId,
-				Status:    database.StatusFailed,
-			},
-		})
-		return
-	} else {
-		pools.DBPool.Submit(&DBWorkerJob{
-			JobType: JobUpdateDepositStatus,
-			Deposit: &database.Deposit{
-				DepositID: job.Event.DepositId,
-				Status:    database.StatusProcessed,
-			},
-		})
-	}
-
-	// 6. Submit to calculation pool
+	// 4. Submit calculation job
+	calcStart := time.Now()
 	pools.CalculationPool.Submit(&CalculationJob{
-		Deposit:     newDeposit,
+		Deposit:     deposit,
 		State:       state,
 		DepositChan: pools.calculationChannel,
 	})
+	logger.Info("PIPELINE-FLOW: Deposit ID %s submitted to calculation pool at %v",
+		depositId, time.Now().Format(time.RFC3339))
+	logger.Info("TIMING: Submitting to CalculationPool for ID %s took %v",
+		depositId, time.Since(calcStart))
 }
 
 // processCalculationJob calculates MON amount for a deposit
@@ -391,6 +400,7 @@ func (pools *BridgeWorkerPools) processCalculationJob(ctx context.Context, job *
 func (pools *BridgeWorkerPools) consumeCalculationResults() {
 	batchCount := 0
 	batchStartTime := time.Now()
+	lastConsumeTime := time.Time{}
 
 	for calcResult := range pools.calculationChannel {
 		processStart := time.Now()
@@ -400,6 +410,23 @@ func (pools *BridgeWorkerPools) consumeCalculationResults() {
 		monAmount := calcResult.MonAmount
 
 		depositIDStr := deposit.DepositID.String()
+
+		// Log the timing and inflow rate to the batch system
+		if !lastConsumeTime.IsZero() {
+			timeSinceLast := time.Since(lastConsumeTime)
+			logger.Info("PIPELINE-FLOW: Calculation result for ID %s received after %v from previous result",
+				depositIDStr, timeSinceLast)
+
+			if timeSinceLast > 5*time.Second {
+				logger.Warn("PIPELINE-FLOW: Long gap of %v between calculation results! Previous: %s, Current: %s",
+					timeSinceLast, lastConsumeTime.Format(time.RFC3339), time.Now().Format(time.RFC3339))
+			}
+		} else {
+			logger.Info("PIPELINE-FLOW: First calculation result received at %v",
+				time.Now().Format(time.RFC3339))
+		}
+		lastConsumeTime = time.Now()
+
 		logger.Info("Processing calculation result for deposit ID %s with MON amount %s",
 			depositIDStr, formatMonAmount(monAmount))
 
@@ -529,6 +556,8 @@ func (pools *BridgeWorkerPools) consumeCalculationResults() {
 		}
 
 		logger.Info("TIMING: Total consumeCalculationResults processing for ID %s took %v", depositIDStr, time.Since(processStart))
+		logger.Info("PIPELINE-FLOW: Calculation result for ID %s added to batch at %v",
+			depositIDStr, time.Now().Format(time.RFC3339))
 
 		// Log throughput stats every 5 transactions or 10 seconds
 		if batchCount%5 == 0 || time.Since(batchStartTime) > 10*time.Second {

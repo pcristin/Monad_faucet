@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -139,13 +140,94 @@ func (l *EventListener) ListenToDeposits(ctx context.Context) (<-chan DepositEve
 	events := make(chan DepositEvent)
 	errors := make(chan error)
 
+	// Initialize event tracking variables
+	var (
+		eventCount     int64
+		firstEventTime time.Time
+		lastEventTime  time.Time
+		trackingMutex  sync.Mutex
+	)
+
+	// Start a goroutine to log stats periodically
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				trackingMutex.Lock()
+				if eventCount > 0 && !firstEventTime.IsZero() {
+					elapsed := time.Since(firstEventTime)
+					rate := float64(eventCount) / elapsed.Seconds()
+					logger.Info("DEPOSIT-INFLOW: Total deposits received: %d over %v (%.2f/sec overall)",
+						eventCount, elapsed, rate)
+
+					if !lastEventTime.IsZero() {
+						timeSinceLast := time.Since(lastEventTime)
+						logger.Info("DEPOSIT-INFLOW: Time since last deposit: %v", timeSinceLast)
+					}
+				}
+				trackingMutex.Unlock()
+			}
+		}
+	}()
+
+	// Create a wrapper for the events channel to track metrics
+	trackedEvents := make(chan DepositEvent)
+	go func() {
+		defer close(trackedEvents)
+
+		for evt := range events {
+			trackingMutex.Lock()
+			now := time.Now()
+
+			eventCount++
+			if firstEventTime.IsZero() {
+				firstEventTime = now
+				logger.Info("DEPOSIT-INFLOW: First deposit event received at %v", now.Format(time.RFC3339))
+			}
+
+			if !lastEventTime.IsZero() {
+				timeSinceLast := now.Sub(lastEventTime)
+				logger.Info("DEPOSIT-INFLOW: Deposit %d received after %v since previous (ID: %s)",
+					eventCount, timeSinceLast, evt.DepositId.String())
+
+				// Log warning for significant delays
+				if timeSinceLast > 5*time.Second {
+					logger.Warn("DEPOSIT-INFLOW: Long gap of %v between deposits %d and %d",
+						timeSinceLast, eventCount-1, eventCount)
+				}
+			} else {
+				logger.Info("DEPOSIT-INFLOW: Deposit %d received (first deposit, ID: %s)",
+					eventCount, evt.DepositId.String())
+			}
+
+			lastEventTime = now
+
+			// Calculate and log current rate
+			if eventCount > 1 {
+				elapsed := lastEventTime.Sub(firstEventTime)
+				rate := float64(eventCount) / elapsed.Seconds()
+				logger.Info("DEPOSIT-INFLOW: Current rate: %.2f deposits/sec (%d in %v)",
+					rate, eventCount, elapsed.Round(time.Millisecond))
+			}
+
+			trackingMutex.Unlock()
+
+			trackedEvents <- evt
+		}
+	}()
+
 	if l.isAlchemy {
 		go l.listenWithAlchemyOptimization(ctx, events, errors)
 	} else {
 		go l.listenWithStandardMethod(ctx, events, errors)
 	}
 
-	return events, errors
+	return trackedEvents, errors
 }
 
 func (l *EventListener) listenWithAlchemyOptimization(ctx context.Context, events chan<- DepositEvent, errors chan<- error) {
@@ -158,6 +240,7 @@ func (l *EventListener) listenWithAlchemyOptimization(ctx context.Context, event
 	pingInterval := 30 * time.Second
 
 	var subscriptionID string
+	lastProcessedBlock := uint64(0)
 
 	for {
 		select {
@@ -289,7 +372,8 @@ func (l *EventListener) listenWithAlchemyOptimization(ctx context.Context, event
 
 						// Only process transactions to our contract address
 						if common.HexToAddress(tx.To) == l.address {
-							logger.Info("Received transaction to our contract: %s", tx.Hash)
+							logger.Info("DEPOSIT-SOURCE: Received transaction to contract: %s", tx.Hash)
+							startProcessingTime := time.Now()
 
 							// Get the full transaction to decode data
 							actualTx, isPending, err := l.client.TransactionByHash(ctx, common.HexToHash(tx.Hash))
@@ -311,6 +395,20 @@ func (l *EventListener) listenWithAlchemyOptimization(ctx context.Context, event
 							}
 							blockNum := blockNumInt.Uint64()
 
+							// Log block progression
+							if lastProcessedBlock > 0 {
+								blockDiff := blockNum - lastProcessedBlock
+								if blockDiff > 1 {
+									logger.Info("DEPOSIT-SOURCE: Processing block %d (skipped %d blocks since last event)",
+										blockNum, blockDiff-1)
+								} else {
+									logger.Info("DEPOSIT-SOURCE: Processing consecutive block %d", blockNum)
+								}
+							} else {
+								logger.Info("DEPOSIT-SOURCE: Processing first block %d", blockNum)
+							}
+							lastProcessedBlock = blockNum
+
 							// Parse the transaction input data to get the deposit event data
 							depositEvent, err := l.parseTransactionInput(ctx, actualTx, blockNum)
 							if err != nil {
@@ -321,8 +419,19 @@ func (l *EventListener) listenWithAlchemyOptimization(ctx context.Context, event
 							// Add the transaction hash to the deposit event
 							depositEvent.TxHash = tx.Hash
 
+							processingTime := time.Since(startProcessingTime)
+							logger.Info("DEPOSIT-SOURCE: Processed deposit event ID %s in %v",
+								depositEvent.DepositId.String(), processingTime)
+
 							// Send the deposit event to the events channel
+							sendStart := time.Now()
 							events <- depositEvent
+							sendTime := time.Since(sendStart)
+
+							if sendTime > 100*time.Millisecond {
+								logger.Warn("DEPOSIT-SOURCE: Slow channel send for ID %s took %v",
+									depositEvent.DepositId.String(), sendTime)
+							}
 						}
 					}
 				case <-time.After(30 * time.Second):
@@ -401,6 +510,7 @@ func (l *EventListener) listenWithStandardMethod(ctx context.Context, events cha
 	maxReconnectDelay := 60 * time.Second
 	baseReconnectDelay := 5 * time.Second
 	pingInterval := 30 * time.Second
+	lastProcessedBlock := uint64(0)
 
 	for {
 		select {
@@ -477,18 +587,48 @@ func (l *EventListener) listenWithStandardMethod(ctx context.Context, events cha
 						goto RECONNECT
 					}
 				case vLog := <-logs:
-					logger.Info("Received blockchain log event: txHash=%s blockNumber=%d",
+					logger.Info("DEPOSIT-SOURCE: Received blockchain log event: txHash=%s blockNumber=%d",
 						vLog.TxHash.Hex(), vLog.BlockNumber)
+
+					startProcessingTime := time.Now()
+
+					// Log block progression
+					if lastProcessedBlock > 0 {
+						blockDiff := vLog.BlockNumber - lastProcessedBlock
+						if blockDiff > 1 {
+							logger.Info("DEPOSIT-SOURCE: Processing block %d (skipped %d blocks since last event)",
+								vLog.BlockNumber, blockDiff-1)
+						} else {
+							logger.Info("DEPOSIT-SOURCE: Processing consecutive block %d", vLog.BlockNumber)
+						}
+					} else {
+						logger.Info("DEPOSIT-SOURCE: Processing first block %d", vLog.BlockNumber)
+					}
+					lastProcessedBlock = vLog.BlockNumber
+
 					event, err := l.parseDepositEvent(vLog)
 					if err != nil {
 						logger.Error("Failed to parse deposit event: %v", err)
 						errors <- fmt.Errorf("parse error: %v", err)
 						continue
 					}
+
+					processingTime := time.Since(startProcessingTime)
+					logger.Info("DEPOSIT-SOURCE: Processed deposit event ID %s in %v",
+						event.DepositId.String(), processingTime)
+
 					logger.Info("Successfully parsed deposit event: ID=%s, Amount=%s, Currency=%s",
 						event.DepositId.String(), event.Amount.String(),
 						CurrencyTypeToString(event.Currency))
+
+					sendStart := time.Now()
 					events <- event
+					sendTime := time.Since(sendStart)
+
+					if sendTime > 100*time.Millisecond {
+						logger.Warn("DEPOSIT-SOURCE: Slow channel send for ID %s took %v",
+							event.DepositId.String(), sendTime)
+					}
 				case <-ctx.Done():
 					logger.Info("Context done, stopping active subscription")
 					sub.Unsubscribe()
