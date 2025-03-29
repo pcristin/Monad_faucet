@@ -358,3 +358,128 @@ func (db *DB) UpdateDistributionWithAmount(depositID *big.Int, status, txHash st
 	}
 	return nil
 }
+
+// BulkUpdateDistributions updates multiple distributions in a single database transaction
+func (db *DB) BulkUpdateDistributions(distributions []*Distribution) error {
+	if len(distributions) == 0 {
+		return nil
+	}
+
+	// Start a transaction
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				logger.Error("Failed to rollback transaction: %v", rbErr)
+			}
+		}
+	}()
+
+	// Use prepared statement for better performance
+	stmt, err := tx.Prepare(`
+		UPDATE distributions 
+		SET status = $1, 
+			monad_tx_hash = $2, 
+			mon_amount = CASE 
+				WHEN $3 IS NOT NULL AND (mon_amount IS NULL OR mon_amount = '0') THEN $3
+				ELSE mon_amount
+			END,
+			updated_at = $4
+		WHERE deposit_id = $5
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	// Track successful updates for logging
+	successCount := 0
+	now := time.Now()
+
+	// Process each distribution update
+	for _, dist := range distributions {
+		if dist.DepositID == nil {
+			logger.Warn("Skipping distribution update: deposit ID is nil")
+			continue
+		}
+
+		depositIDStr := dist.DepositID.String()
+
+		// If distribution doesn't exist, create it first
+		exists, existsErr := checkDistributionExists(tx, depositIDStr)
+		if existsErr != nil {
+			logger.Error("Failed to check if distribution exists for deposit ID %s: %v", depositIDStr, existsErr)
+			continue
+		}
+
+		if !exists {
+			// Create new distribution record
+			if dist.MonAmount == nil {
+				logger.Error("Cannot create distribution for deposit ID %s: MonAmount is nil", depositIDStr)
+				continue
+			}
+
+			_, createErr := tx.Exec(
+				`INSERT INTO distributions 
+				(deposit_id, wallet_address, mon_amount, status, monad_tx_hash, created_at, updated_at) 
+				VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+				depositIDStr,
+				dist.WalletAddress.Hex(),
+				dist.MonAmount.String(),
+				dist.Status,
+				dist.MonadTxHash,
+				now,
+				now,
+			)
+
+			if createErr != nil {
+				logger.Error("Failed to create distribution for deposit ID %s: %v", depositIDStr, createErr)
+				continue
+			}
+
+			logger.Info("Created new distribution record for deposit ID %s with status %s",
+				depositIDStr, dist.Status)
+			successCount++
+			continue
+		}
+
+		// Distribution exists, update it
+		var monAmountStr string
+		if dist.MonAmount != nil {
+			monAmountStr = dist.MonAmount.String()
+		}
+
+		_, execErr := stmt.Exec(
+			dist.Status,
+			dist.MonadTxHash,
+			monAmountStr,
+			now,
+			depositIDStr,
+		)
+
+		if execErr != nil {
+			logger.Error("Failed to update distribution for deposit ID %s: %v", depositIDStr, execErr)
+			continue
+		}
+
+		successCount++
+	}
+
+	// Commit the transaction
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	logger.Info("Successfully bulk updated %d/%d distributions", successCount, len(distributions))
+	return nil
+}
+
+// Helper function to check if a distribution exists
+func checkDistributionExists(tx *sql.Tx, depositID string) (bool, error) {
+	var exists bool
+	err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM distributions WHERE deposit_id = $1)`, depositID).Scan(&exists)
+	return exists, err
+}

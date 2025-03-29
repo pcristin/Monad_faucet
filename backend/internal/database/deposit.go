@@ -445,3 +445,62 @@ func (db *DB) GetDepositsByStatus(status string, limit, offset int) ([]*Deposit,
 // 	}
 // 	return ""
 // }
+
+// BulkUpdateDeposits updates multiple deposit statuses in a single database transaction
+func (db *DB) BulkUpdateDeposits(deposits []*Deposit) error {
+	if len(deposits) == 0 {
+		return nil
+	}
+
+	// Start a transaction
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				logger.Error("Failed to rollback transaction: %v", rbErr)
+			}
+		}
+	}()
+
+	// Use prepared statement for better performance
+	stmt, err := tx.Prepare(`
+		UPDATE deposits 
+		SET status = $1, updated_at = $2 
+		WHERE deposit_id = $3
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	// Track successful updates for logging
+	successCount := 0
+	now := time.Now()
+
+	// Process each deposit update
+	for _, deposit := range deposits {
+		if deposit.DepositID == nil {
+			logger.Warn("Skipping deposit update: deposit ID is nil")
+			continue
+		}
+
+		depositIDStr := deposit.DepositID.String()
+		_, execErr := stmt.Exec(deposit.Status, now, depositIDStr)
+		if execErr != nil {
+			logger.Error("Failed to update deposit ID %s: %v", depositIDStr, execErr)
+			continue
+		}
+		successCount++
+	}
+
+	// Commit the transaction
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	logger.Info("Successfully bulk updated %d/%d deposits", successCount, len(deposits))
+	return nil
+}
