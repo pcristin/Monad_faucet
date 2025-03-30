@@ -134,7 +134,18 @@ func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) e
 	time.Sleep(500 * time.Millisecond)
 
 	logger.Info("Delegating refund for deposit ID %s to ArbitrumDepositor", depositId.String())
-	err = s.arbDepositor.RefundDeposit(ctx, depositId)
+	refundTxHash, err := s.arbDepositor.RefundDeposit(ctx, depositId)
+
+	// Store the refund transaction hash even if there's an error (if we have a hash)
+	if refundTxHash != "" {
+		if refundErr := s.db.UpdateRefundTransactionHash(depositId, refundTxHash); refundErr != nil {
+			logger.Warn("Failed to update refund transaction hash for deposit ID %s: %v",
+				depositId.String(), refundErr)
+		} else {
+			logger.Info("Stored refund transaction hash %s for deposit ID %s",
+				refundTxHash, depositId.String())
+		}
+	}
 
 	// If refund was successful, update status
 	if err == nil {
@@ -151,6 +162,10 @@ func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) e
 
 		// Also release any DB lock to ensure this deposit can be properly handled in the future if needed
 		s.releaseLock(depositId)
+	} else {
+		logger.Error("Refund failed for deposit ID %s: %v", depositId.String(), err)
+		// Don't change status if we couldn't process the refund, leave it as "refunding"
+		// This way we can retry later
 	}
 
 	return err

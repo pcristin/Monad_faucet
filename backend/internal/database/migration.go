@@ -31,6 +31,11 @@ type MigrationRecord struct {
 func (db *DB) SchemaMigration() error {
 	logger.Info("Starting database schema migration...")
 
+	// Add refund_tx_hash column if it doesn't exist
+	if err := db.addRefundTxHashColumn(); err != nil {
+		return fmt.Errorf("failed to add refund_tx_hash column: %w", err)
+	}
+
 	// Check if transaction_history table exists
 	tableExists, err := db.checkTableExists("transaction_history")
 	if err != nil {
@@ -395,5 +400,40 @@ func (db *DB) execSchemaSQL() error {
 		return fmt.Errorf("failed to create distributions monad_tx_hash index: %w", err)
 	}
 
+	return nil
+}
+
+// addRefundTxHashColumn adds the refund_tx_hash column to the transaction_history table if it doesn't exist
+func (db *DB) addRefundTxHashColumn() error {
+	// Check if column exists
+	var columnExists bool
+	query := `
+		SELECT EXISTS (
+			SELECT FROM information_schema.columns 
+			WHERE table_name = 'transaction_history' 
+			AND column_name = 'refund_tx_hash'
+		)
+	`
+	err := db.QueryRow(query).Scan(&columnExists)
+	if err != nil {
+		return fmt.Errorf("failed to check if refund_tx_hash column exists: %w", err)
+	}
+
+	if columnExists {
+		logger.Info("refund_tx_hash column already exists, skipping addition")
+		return nil
+	}
+
+	// Add the column
+	logger.Info("Adding refund_tx_hash column to transaction_history table...")
+	_, err = db.Exec(`
+		ALTER TABLE transaction_history ADD COLUMN refund_tx_hash VARCHAR(66);
+		CREATE INDEX IF NOT EXISTS idx_transaction_history_refund_tx_hash ON transaction_history(refund_tx_hash);
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to add refund_tx_hash column: %w", err)
+	}
+
+	logger.Info("Successfully added refund_tx_hash column to transaction_history table")
 	return nil
 }

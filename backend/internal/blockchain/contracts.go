@@ -383,7 +383,7 @@ func getEthSwapRatioWithRetry(ctx context.Context, d *ArbitrumDepositor, retryCl
 }
 
 // RefundDeposit initiates a refund for a failed deposit
-func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.Int) error {
+func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.Int) (string, error) {
 	// Create retry client
 	retryClient := NewRetryClient(d.Client)
 
@@ -397,7 +397,7 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to get deposit events: %v", err)
+		return "", fmt.Errorf("failed to get deposit events: %v", err)
 	}
 
 	// Find the deposit with the matching ID
@@ -422,13 +422,13 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 	}
 
 	if !found {
-		return fmt.Errorf("deposit ID %s not found", depositId.String())
+		return "", fmt.Errorf("deposit ID %s not found", depositId.String())
 	}
 
 	// Get current gas price with a small buffer (20% increase)
 	gasPrice, err := d.Client.SuggestGasPrice(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get gas price: %v", err)
+		return "", fmt.Errorf("failed to get gas price: %v", err)
 	}
 	gasPrice = new(big.Int).Mul(gasPrice, big.NewInt(12))
 	gasPrice = new(big.Int).Div(gasPrice, big.NewInt(10))
@@ -442,14 +442,14 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 		uint8(depositEvent.Currency),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to pack refund data: %v", err)
+		return "", fmt.Errorf("failed to pack refund data: %v", err)
 	}
 
 	// Get our wallet's address from the private key
 	publicKey := d.PrivateKey.Public()
 	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
 	if !ok {
-		return fmt.Errorf("error casting public key to ECDSA")
+		return "", fmt.Errorf("error casting public key to ECDSA")
 	}
 	fromAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
 
@@ -470,7 +470,7 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 
 	err = RetryWithBackoff(estimateGasOp, DefaultRetryConfig())
 	if err != nil {
-		return fmt.Errorf("failed to estimate gas: %v", err)
+		return "", fmt.Errorf("failed to estimate gas: %v", err)
 	}
 
 	// Add 20% buffer to gas limit
@@ -486,7 +486,7 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 
 	err = RetryWithBackoff(nonceOp, DefaultRetryConfig())
 	if err != nil {
-		return fmt.Errorf("failed to get nonce: %v", err)
+		return "", fmt.Errorf("failed to get nonce: %v", err)
 	}
 
 	tx := types.NewTx(&types.LegacyTx{
@@ -501,7 +501,7 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 	// Sign and send transaction
 	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(d.ChainID), d.PrivateKey)
 	if err != nil {
-		return fmt.Errorf("failed to sign transaction: %v", err)
+		return "", fmt.Errorf("failed to sign transaction: %v", err)
 	}
 
 	// Send transaction with retry
@@ -511,21 +511,23 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 
 	err = RetryWithBackoff(sendTxOp, DefaultRetryConfig())
 	if err != nil {
-		return fmt.Errorf("failed to send refund transaction: %v", err)
+		return "", fmt.Errorf("failed to send refund transaction: %v", err)
 	}
+
+	txHash := signedTx.Hash().Hex()
 
 	// Wait for transaction receipt
 	receipt, err := bind.WaitMined(ctx, d.Client, signedTx)
 	if err != nil {
-		return fmt.Errorf("failed to wait for refund transaction: %v", err)
+		return txHash, fmt.Errorf("failed to wait for refund transaction: %v", err)
 	}
 
 	if receipt.Status == 0 {
-		return fmt.Errorf("refund transaction failed")
+		return txHash, fmt.Errorf("refund transaction failed")
 	}
 
-	logger.Info("Successfully refunded deposit ID %s (tx: %s)", depositId.String(), signedTx.Hash().Hex())
-	return nil
+	logger.Info("Successfully refunded deposit ID %s (tx: %s)", depositId.String(), txHash)
+	return txHash, nil
 }
 
 // TransactWithGasBuffer is a wrapper around BoundContract.Transact that adds a buffer to gas estimation

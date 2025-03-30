@@ -40,6 +40,7 @@ type Transaction struct {
 	Status        string
 	TxHash        string         // Arbitrum transaction hash
 	MonadTxHash   string         // Monad transaction hash
+	RefundTxHash  string         // Refund transaction hash
 	Metadata      sql.NullString // User-provided metadata for this transaction
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
@@ -50,8 +51,8 @@ func (db *DB) CreateTransaction(tx *Transaction) error {
 	// Use RETURNING clause to get the inserted ID (PostgreSQL compatible)
 	err := db.QueryRow(
 		`INSERT INTO transaction_history 
-		(deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, metadata) 
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		(deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, refund_tx_hash, metadata) 
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id`,
 		tx.DepositID.String(),
 		tx.WalletAddress.Hex(),
@@ -61,6 +62,7 @@ func (db *DB) CreateTransaction(tx *Transaction) error {
 		tx.Status,
 		tx.TxHash,
 		tx.MonadTxHash,
+		tx.RefundTxHash,
 		tx.Metadata,
 	).Scan(&tx.ID)
 
@@ -211,7 +213,7 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 	)
 
 	err := db.QueryRow(
-		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, metadata, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, refund_tx_hash, metadata, created_at, updated_at 
 		FROM transaction_history 
 		WHERE deposit_id = $1`,
 		depositIDStr,
@@ -225,6 +227,7 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 		&tx.Status,
 		&tx.TxHash,
 		&tx.MonadTxHash,
+		&tx.RefundTxHash,
 		&metadataStr,
 		&tx.CreatedAt,
 		&tx.UpdatedAt,
@@ -284,29 +287,29 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 
 // GetTransactionByArbitrumTxHash retrieves a transaction by its Arbitrum transaction hash
 func (db *DB) GetTransactionByArbitrumTxHash(txHash string) (*Transaction, error) {
-	// First, check if we have a transaction with this hash as the tx_hash
 	var (
-		tx                                        Transaction
-		depositIDStr, walletAddressStr, amountStr string
-		monAmountStr                              sql.NullString
-		currencyInt                               int
+		tx                          Transaction
+		depositIDStr, walletAddress string
+		amountStr, monAmountStr     sql.NullString
+		currencyInt                 int
 	)
 
 	err := db.QueryRow(
-		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, refund_tx_hash, created_at, updated_at 
 		FROM transaction_history 
 		WHERE tx_hash = $1`,
 		txHash,
 	).Scan(
 		&tx.ID,
 		&depositIDStr,
-		&walletAddressStr,
+		&walletAddress,
 		&amountStr,
 		&currencyInt,
 		&monAmountStr,
 		&tx.Status,
 		&tx.TxHash,
 		&tx.MonadTxHash,
+		&tx.RefundTxHash,
 		&tx.CreatedAt,
 		&tx.UpdatedAt,
 	)
@@ -322,7 +325,7 @@ func (db *DB) GetTransactionByArbitrumTxHash(txHash string) (*Transaction, error
 			).Scan(
 				&tx.ID,
 				&depositIDStr,
-				&walletAddressStr,
+				&walletAddress,
 				&amountStr,
 				&currencyInt,
 				&monAmountStr,
@@ -347,8 +350,8 @@ func (db *DB) GetTransactionByArbitrumTxHash(txHash string) (*Transaction, error
 
 	// Convert strings to appropriate types
 	tx.DepositID, _ = new(big.Int).SetString(depositIDStr, 10)
-	tx.WalletAddress = common.HexToAddress(walletAddressStr)
-	tx.Amount, _ = new(big.Int).SetString(amountStr, 10)
+	tx.WalletAddress = common.HexToAddress(walletAddress)
+	tx.Amount, _ = new(big.Int).SetString(amountStr.String, 10)
 	tx.Currency = CurrencyType(currencyInt)
 
 	// Handle NULL mon_amount values
@@ -453,18 +456,18 @@ func (db *DB) GetTransactionsByWallet(wallet common.Address, limit, offset int) 
 	return transactions, nil
 }
 
-// GetRecentTransactions retrieves recent transactions
+// GetRecentTransactions retrieves the most recent transactions
 func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 	rows, err := db.Query(
-		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, metadata, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, refund_tx_hash, metadata, created_at, updated_at 
 		FROM transaction_history 
-		ORDER BY created_at DESC 
+		ORDER BY created_at DESC
 		LIMIT $1 OFFSET $2`,
 		limit,
 		offset,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query transactions: %w", err)
+		return nil, fmt.Errorf("failed to get recent transactions: %w", err)
 	}
 	defer rows.Close()
 
@@ -474,8 +477,8 @@ func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 			tx                                        Transaction
 			depositIDStr, walletAddressStr, amountStr string
 			monAmountStr                              sql.NullString
-			metadataStr                               sql.NullString // Handle NULL metadata
-			currencyInt                               int
+			currency                                  int
+			metadataStr                               sql.NullString
 		)
 
 		err := rows.Scan(
@@ -483,11 +486,12 @@ func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 			&depositIDStr,
 			&walletAddressStr,
 			&amountStr,
-			&currencyInt,
+			&currency,
 			&monAmountStr,
 			&tx.Status,
 			&tx.TxHash,
 			&tx.MonadTxHash,
+			&tx.RefundTxHash,
 			&metadataStr,
 			&tx.CreatedAt,
 			&tx.UpdatedAt,
@@ -500,7 +504,7 @@ func (db *DB) GetRecentTransactions(limit, offset int) ([]*Transaction, error) {
 		tx.DepositID, _ = new(big.Int).SetString(depositIDStr, 10)
 		tx.WalletAddress = common.HexToAddress(walletAddressStr)
 		tx.Amount, _ = new(big.Int).SetString(amountStr, 10)
-		tx.Currency = CurrencyType(currencyInt)
+		tx.Currency = CurrencyType(currency)
 
 		// Handle NULL mon_amount values
 		if monAmountStr.Valid {
@@ -671,21 +675,20 @@ func (db *DB) UpdateMonadTransactionHash(depositID *big.Int, monadTxHash string)
 
 // GetTransactionByMonadTxHash retrieves a transaction by Monad transaction hash
 func (db *DB) GetTransactionByMonadTxHash(monadTxHash string) (*Transaction, error) {
-	var transaction Transaction
-	var depositIDStr, walletAddressStr, amountStr string
-	var currencyInt int
-	var monAmountStr sql.NullString // Change to sql.NullString to handle NULL values
-	var metadataStr sql.NullString  // Handle NULL metadata
-
-	row := db.QueryRow(
-		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, metadata, created_at, updated_at
-		FROM transaction_history 
-		WHERE monad_tx_hash = $1 
-		LIMIT 1`,
-		monadTxHash,
+	var (
+		transaction                               Transaction
+		depositIDStr, walletAddressStr, amountStr string
+		monAmountStr                              sql.NullString
+		currencyInt                               int
+		metadataStr                               sql.NullString
 	)
 
-	err := row.Scan(
+	err := db.QueryRow(
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, refund_tx_hash, metadata, created_at, updated_at 
+		FROM transaction_history 
+		WHERE monad_tx_hash = $1`,
+		monadTxHash,
+	).Scan(
 		&transaction.ID,
 		&depositIDStr,
 		&walletAddressStr,
@@ -695,6 +698,7 @@ func (db *DB) GetTransactionByMonadTxHash(monadTxHash string) (*Transaction, err
 		&transaction.Status,
 		&transaction.TxHash,
 		&transaction.MonadTxHash,
+		&transaction.RefundTxHash,
 		&metadataStr,
 		&transaction.CreatedAt,
 		&transaction.UpdatedAt,
@@ -888,52 +892,44 @@ func (db *DB) GetLockedDeposits() ([]*big.Int, error) {
 	return deposits, nil
 }
 
-// GetTransactionsByStatus retrieves transactions with the specified status
-// limit: maximum number of transactions to return (use 0 for no limit)
-// offset: number of transactions to skip (use for pagination)
+// GetTransactionsByStatus retrieves all transactions with a specific status
 func (db *DB) GetTransactionsByStatus(status string, limit, offset int) ([]*Transaction, error) {
-	query := `
-		SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, metadata, created_at, updated_at
-		FROM transaction_history
+	rows, err := db.Query(
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, refund_tx_hash, metadata, created_at, updated_at 
+		FROM transaction_history 
 		WHERE status = $1
 		ORDER BY created_at DESC
-	`
-
-	args := []interface{}{status}
-
-	if limit > 0 {
-		query += " LIMIT $2"
-		args = append(args, limit)
-
-		if offset > 0 {
-			query += " OFFSET $3"
-			args = append(args, offset)
-		}
-	}
-
-	rows, err := db.Query(query, args...)
+		LIMIT $2 OFFSET $3`,
+		status,
+		limit,
+		offset,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query transactions by status: %w", err)
+		return nil, fmt.Errorf("failed to get transactions by status: %w", err)
 	}
 	defer rows.Close()
 
 	var transactions []*Transaction
 	for rows.Next() {
-		var tx Transaction
-		var depositIDStr, amountStr, walletAddrStr string
-		var monAmountStr sql.NullString // Use sql.NullString to handle NULL values
-		var metadataStr sql.NullString  // Handle NULL metadata
+		var (
+			tx                                        Transaction
+			depositIDStr, walletAddressStr, amountStr string
+			monAmountStr                              sql.NullString
+			currency                                  int
+			metadataStr                               sql.NullString
+		)
 
 		err := rows.Scan(
 			&tx.ID,
 			&depositIDStr,
-			&walletAddrStr,
+			&walletAddressStr,
 			&amountStr,
-			&tx.Currency,
-			&monAmountStr, // This will handle NULL values properly
+			&currency,
+			&monAmountStr,
 			&tx.Status,
 			&tx.TxHash,
 			&tx.MonadTxHash,
+			&tx.RefundTxHash,
 			&metadataStr,
 			&tx.CreatedAt,
 			&tx.UpdatedAt,
@@ -942,36 +938,39 @@ func (db *DB) GetTransactionsByStatus(status string, limit, offset int) ([]*Tran
 			return nil, fmt.Errorf("failed to scan transaction row: %w", err)
 		}
 
-		// Convert deposit_id string to *big.Int
+		// Convert deposit ID string to *big.Int
 		depositID, ok := new(big.Int).SetString(depositIDStr, 10)
 		if !ok {
-			return nil, fmt.Errorf("failed to convert deposit_id %s to big.Int", depositIDStr)
+			return nil, fmt.Errorf("failed to convert deposit ID %s to big.Int", depositIDStr)
 		}
 		tx.DepositID = depositID
 
 		// Convert amount string to *big.Int
-		amount, ok := new(big.Int).SetString(amountStr, 10)
+		amountBigInt, ok := new(big.Int).SetString(amountStr, 10)
 		if !ok {
 			return nil, fmt.Errorf("failed to convert amount %s to big.Int", amountStr)
 		}
-		tx.Amount = amount
+		tx.Amount = amountBigInt
 
-		// Convert mon_amount string to *big.Int - handle NULL values
+		// Convert currency integer to CurrencyType
+		tx.Currency = CurrencyType(currency)
+
+		// Handle NULL mon_amount values
 		if monAmountStr.Valid {
-			monAmount, ok := new(big.Int).SetString(monAmountStr.String, 10)
+			var ok bool
+			tx.MonAmount, ok = new(big.Int).SetString(monAmountStr.String, 10)
 			if !ok {
-				return nil, fmt.Errorf("failed to convert mon_amount %s to big.Int", monAmountStr.String)
+				logger.Warn("Failed to parse MON amount: %s for transaction ID %d, defaulting to 0",
+					monAmountStr.String, tx.ID)
+				tx.MonAmount = big.NewInt(0)
 			}
-			tx.MonAmount = monAmount
 		} else {
-			// For NULL mon_amount, set to zero
 			tx.MonAmount = big.NewInt(0)
-			logger.Debug("Transaction ID %d for deposit ID %s has NULL mon_amount, setting to 0",
-				tx.ID, depositIDStr)
+			logger.Debug("Transaction ID %d has NULL mon_amount, setting to 0", tx.ID)
 		}
 
 		// Convert wallet address string to common.Address
-		tx.WalletAddress = common.HexToAddress(walletAddrStr)
+		tx.WalletAddress = common.HexToAddress(walletAddressStr)
 
 		// Handle NULL metadata values
 		if metadataStr.Valid {
@@ -1053,4 +1052,37 @@ func (db *DB) UpdateTransactionWithMonAmount(depositID *big.Int, status, txHash 
 	}
 
 	return fmt.Errorf("failed to update transaction with MON amount after multiple attempts: %w", err)
+}
+
+// UpdateRefundTransactionHash updates the refund transaction hash of a transaction
+func (db *DB) UpdateRefundTransactionHash(depositID *big.Int, refundTxHash string) error {
+	if depositID == nil {
+		return fmt.Errorf("invalid deposit ID: nil")
+	}
+
+	depositIDStr := depositID.String()
+	logger.Info("Updating refund transaction hash for deposit ID %s to %s", depositIDStr, refundTxHash)
+
+	result, err := db.Exec(
+		`UPDATE transaction_history 
+		SET refund_tx_hash = $1, updated_at = CURRENT_TIMESTAMP 
+		WHERE deposit_id = $2`,
+		refundTxHash,
+		depositIDStr,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to update refund transaction hash: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		logger.Error("Error getting rows affected for refund tx hash update: %v", err)
+	} else if rowsAffected == 0 {
+		logger.Warn("No rows affected when updating refund tx hash for deposit ID %s", depositIDStr)
+	} else {
+		logger.Info("Successfully updated refund tx hash for deposit ID %s (%d rows affected)", depositIDStr, rowsAffected)
+	}
+
+	return nil
 }

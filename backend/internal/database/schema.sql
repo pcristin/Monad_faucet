@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS transaction_history (
     status VARCHAR(20) NOT NULL,
     tx_hash VARCHAR(66),
     monad_tx_hash VARCHAR(66),
+    refund_tx_hash VARCHAR(66),
     metadata TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -136,4 +137,7 @@ CREATE INDEX IF NOT EXISTS idx_distributions_status ON distributions(status);
 CREATE INDEX IF NOT EXISTS idx_distributions_monad_tx_hash ON distributions(monad_tx_hash);
 CREATE INDEX IF NOT EXISTS idx_transaction_history_wallet_address ON transaction_history(wallet_address);
 CREATE INDEX IF NOT EXISTS idx_transaction_history_status ON transaction_history(status);
-CREATE INDEX IF NOT EXISTS idx_transaction_history_created_at ON transaction_history(created_at DESC); 
+CREATE INDEX IF NOT EXISTS idx_transaction_history_created_at ON transaction_history(created_at DESC);
+
+-- Create index for refund_tx_hash
+CREATE INDEX IF NOT EXISTS idx_transaction_history_refund_tx_hash ON transaction_history(refund_tx_hash); 
