@@ -3,7 +3,6 @@ package bridge
 import (
 	"context"
 	"fmt"
-	"log"
 	"math/big"
 	"time"
 
@@ -28,32 +27,7 @@ func (s *BridgeService) validateDepositWithAmount(state *blockchain.ContractStat
 		return fmt.Errorf("insufficient MON balance in distributor")
 	}
 
-	// Minimum deposit validation removed - this check is already done at the smart contract level.
-	// If a deposit event was emitted, it means the minimum amount check has already passed on-chain.
-
 	return nil
-}
-
-// waitForConfirmations waits until the target block is reached.
-func (s *BridgeService) waitForConfirmations(ctx context.Context, blockNumber uint64, confirmations uint64) error {
-	targetBlock := blockNumber + confirmations
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			currentBlock, err := s.arbDepositor.Client.BlockNumber(ctx)
-			if err != nil {
-				log.Printf("Error getting block number: %v", err)
-				continue
-			}
-			if currentBlock >= targetBlock {
-				return nil
-			}
-		}
-	}
 }
 
 // mintTokens mints MON tokens on the Monad blockchain.

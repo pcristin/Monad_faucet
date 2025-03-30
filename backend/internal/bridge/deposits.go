@@ -124,20 +124,6 @@ func (s *BridgeService) processDeposit(event listener.DepositEvent) error {
 	}
 
 	logger.Info("Waiting for confirmations for deposit ID %s, block %d", event.DepositId.String(), event.BlockNumber)
-	if err := s.waitForConfirmations(context.Background(), event.BlockNumber, 10); err != nil {
-		logger.Error("Failed to wait for confirmations for deposit ID %s: %v", event.DepositId.String(), err)
-
-		// Update status via worker pool
-		updateStatusTask := workers.NewDatabaseTask("update_deposit_status", map[string]interface{}{
-			"deposit_id": event.DepositId.String(),
-			"status":     database.StatusFailed,
-		})
-		s.SubmitDatabaseTask(updateStatusTask)
-
-		logger.Info("Queueing refund for deposit ID %s", event.DepositId.String())
-		s.QueueRefund(event.DepositId)
-		return fmt.Errorf("failed to wait for confirmations: %w", err)
-	}
 
 	logger.Info("Minting %s MON tokens for wallet %s (deposit ID %s)", formatMonAmount(monAmount), event.Depositor.Hex(), event.DepositId.String())
 
