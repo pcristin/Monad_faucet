@@ -107,7 +107,7 @@ func (s *BridgeService) processDeposit(event listener.DepositEvent) error {
 		}
 	}
 
-	logger.Info("Validating deposit ID %s", event.DepositId.String())
+	logger.Debug("Validating deposit ID %s", event.DepositId.String())
 	if err := s.validateDepositWithAmount(state, monAmount); err != nil {
 		logger.Error("Deposit validation failed for ID %s: %v", event.DepositId.String(), err)
 
@@ -123,12 +123,12 @@ func (s *BridgeService) processDeposit(event listener.DepositEvent) error {
 		return fmt.Errorf("invalid deposit: %w", err)
 	}
 
-	logger.Info("Waiting for confirmations for deposit ID %s, block %d", event.DepositId.String(), event.BlockNumber)
+	logger.Debug("Waiting for confirmations for deposit ID %s, block %d", event.DepositId.String(), event.BlockNumber)
 
 	logger.Info("Minting %s MON tokens for wallet %s (deposit ID %s)", formatMonAmount(monAmount), event.Depositor.Hex(), event.DepositId.String())
 
 	// Last-minute duplicate prevention.
-	logger.Info("Checking for existing transaction for deposit ID %s", event.DepositId.String())
+	logger.Debug("Checking for existing transaction for deposit ID %s", event.DepositId.String())
 	if txHash, exists := s.checkExistingTransaction(context.Background(), event.DepositId); exists {
 		logger.Info("Duplicate prevention: deposit ID %s already processed with tx %s", event.DepositId.String(), txHash)
 		return nil
@@ -146,7 +146,7 @@ func (s *BridgeService) processDeposit(event listener.DepositEvent) error {
 	if !s.SubmitDistributionTask(distributionTask) {
 		// Check if we can use worker pools directly for batching
 		if s.workerPools != nil {
-			logger.Info("Using worker pools batching for deposit ID %s", event.DepositId.String())
+			logger.Debug("Using worker pools batching for deposit ID %s", event.DepositId.String())
 
 			// Create a distribution job
 			distJob := &DistributionJob{
@@ -157,7 +157,7 @@ func (s *BridgeService) processDeposit(event listener.DepositEvent) error {
 
 			// Add the job to the batch processing system
 			s.workerPools.addToDistributionBatch(distJob)
-			logger.Info("Added deposit ID %s to batch processing via worker pools", event.DepositId.String())
+			logger.Debug("Added deposit ID %s to batch processing via worker pools", event.DepositId.String())
 		} else {
 			// Last resort: Fall back to direct minting if worker pools are not available
 			logger.Warn("Failed to submit distribution task and worker pools not available, falling back to direct minting")
@@ -176,7 +176,7 @@ func (s *BridgeService) processDeposit(event listener.DepositEvent) error {
 					return fmt.Errorf("duplicate mint attempt: %w", err)
 				}
 				logger.Error("Mint tokens failed for deposit ID %s: %v", event.DepositId.String(), err)
-				logger.Info("Updating transaction status to failed for deposit ID %s", event.DepositId.String())
+				logger.Debug("Updating transaction status to failed for deposit ID %s", event.DepositId.String())
 				_ = s.UpdateTransactionStatus(context.Background(), event.DepositId, database.StatusFailed, "")
 				logger.Info("Queueing refund for deposit ID %s", event.DepositId.String())
 				s.QueueRefund(event.DepositId)
@@ -198,7 +198,7 @@ func (s *BridgeService) processDeposit(event listener.DepositEvent) error {
 			}
 		}
 	} else {
-		logger.Info("Distribution task successfully submitted to worker pool for deposit ID %s", event.DepositId.String())
+		logger.Debug("Distribution task successfully submitted to worker pool for deposit ID %s", event.DepositId.String())
 	}
 
 	logger.Info("Processing completed for deposit ID %s in %v", event.DepositId.String(), time.Since(startTime))
@@ -209,10 +209,10 @@ func (s *BridgeService) processDeposit(event listener.DepositEvent) error {
 // If a record exists, it returns it. If not, it creates a new record.
 func (s *BridgeService) ensureTransactionRecord(event listener.DepositEvent, monAmount *big.Int) (*database.Transaction, error) {
 	// First check if the transaction already exists
-	logger.Info("Checking for existing transaction record for deposit ID %s", event.DepositId.String())
+	logger.Debug("Checking for existing transaction record for deposit ID %s", event.DepositId.String())
 	existingTx, err := s.db.GetTransactionByDepositID(event.DepositId)
 	if err == nil && existingTx != nil {
-		logger.Info("Found existing transaction record for deposit ID %s: status=%s",
+		logger.Debug("Found existing transaction record for deposit ID %s: status=%s",
 			event.DepositId.String(), existingTx.Status)
 		return existingTx, nil
 	} else if err != nil {
@@ -221,7 +221,7 @@ func (s *BridgeService) ensureTransactionRecord(event listener.DepositEvent, mon
 	}
 
 	// Create a new transaction record
-	logger.Info("Creating new transaction record for deposit ID %s from wallet %s, amount %s, metadata: '%s'",
+	logger.Debug("Creating new transaction record for deposit ID %s from wallet %s, amount %s, metadata: '%s'",
 		event.DepositId.String(), event.Depositor.Hex(), event.Amount.String(), event.Metadata)
 
 	txRecord := &database.Transaction{
@@ -238,7 +238,7 @@ func (s *BridgeService) ensureTransactionRecord(event listener.DepositEvent, mon
 	// Try multiple times to create the transaction
 	var createErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		logger.Info("Attempt %d/3: Creating transaction record for deposit ID %s",
+		logger.Debug("Attempt %d/3: Creating transaction record for deposit ID %s",
 			attempt, event.DepositId.String())
 
 		if err := s.db.CreateTransaction(txRecord); err != nil {
@@ -261,7 +261,7 @@ func (s *BridgeService) ensureTransactionRecord(event listener.DepositEvent, mon
 	}
 
 	// Verify the transaction was created
-	logger.Info("Verifying transaction record was created for deposit ID %s", event.DepositId.String())
+	logger.Debug("Verifying transaction record was created for deposit ID %s", event.DepositId.String())
 	verifyTx, err := s.db.GetTransactionByDepositID(event.DepositId)
 	if err != nil {
 		logger.Error("Failed to verify transaction creation: %v", err)
@@ -271,7 +271,7 @@ func (s *BridgeService) ensureTransactionRecord(event listener.DepositEvent, mon
 		return txRecord, fmt.Errorf("transaction not found after creation")
 	}
 
-	logger.Info("Transaction record successfully created and verified for deposit ID %s: ID=%d",
+	logger.Debug("Transaction record successfully created and verified for deposit ID %s: ID=%d",
 		event.DepositId.String(), verifyTx.ID)
 	return verifyTx, nil
 }
@@ -286,7 +286,7 @@ func (s *BridgeService) isProcessingDeposit(depositID *big.Int) bool {
 		return true
 	}
 	if tx, err := s.GetTransactionByDepositID(context.Background(), depositID); err == nil && tx != nil && tx.Status == database.StatusCompleted {
-		logger.Info("Transaction for deposit ID %s already completed", depositIDStr)
+		logger.Debug("Transaction for deposit ID %s already completed", depositIDStr)
 		return true
 	}
 	locked, _ := s.acquireLockWithRetries(context.Background(), depositID)
@@ -294,6 +294,6 @@ func (s *BridgeService) isProcessingDeposit(depositID *big.Int) bool {
 		return true
 	}
 	s.processingDeposits[depositIDStr] = true
-	logger.Info("Acquired processing lock for deposit ID %s", depositIDStr)
+	logger.Debug("Acquired processing lock for deposit ID %s", depositIDStr)
 	return false
 }

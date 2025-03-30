@@ -42,7 +42,7 @@ func (s *BridgeService) validateDepositWithAmount(state *blockchain.ContractStat
 // mintTokens mints MON tokens on the Monad blockchain.
 func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address, amount *big.Int, depositId *big.Int) (string, error) {
 	depositIDStr := depositId.String()
-	logger.Info("Acquiring lock for deposit ID %s in mintTokens", depositIDStr)
+	logger.Debug("Acquiring lock for deposit ID %s in mintTokens", depositIDStr)
 
 	// Validate the amount before proceeding
 	if amount == nil || amount.Cmp(big.NewInt(0)) <= 0 {
@@ -50,7 +50,7 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 	}
 
 	// Log the current amount for debugging
-	logger.Info("Minting amount for deposit ID %s: %s Wei", depositIDStr, amount.String())
+	logger.Debug("Minting amount for deposit ID %s: %s Wei", depositIDStr, amount.String())
 
 	// Safety check - ensure amount is reasonable
 	minAmount := big.NewInt(1000000) // 0.001 MON minimum
@@ -61,7 +61,8 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 
 	// Check for existing transaction before acquiring lock
 	if tx, err := s.GetTransactionByDepositID(ctx, depositId); err == nil && tx != nil && tx.Status == database.StatusCompleted && tx.MonadTxHash != "" {
-		logger.Info("Duplicate prevention: deposit ID %s already processed", depositIDStr)
+		logger.Info("Deposit ID %s already processed", depositIDStr)
+		logger.Debug("Duplicate prevention check: found completed tx for deposit ID %s", depositIDStr)
 		return tx.MonadTxHash, nil
 	}
 
@@ -72,11 +73,13 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		for retryCount := 0; retryCount < 5; retryCount++ {
 			time.Sleep(2 * time.Second)
 			if tx, err := s.GetTransactionByDepositID(ctx, depositId); err == nil && tx != nil && tx.Status == database.StatusCompleted && tx.MonadTxHash != "" {
-				logger.Info("Duplicate prevention: deposit ID %s already processed", depositIDStr)
+				logger.Info("Deposit ID %s already processed", depositIDStr)
+				logger.Debug("Duplicate prevention during lock retry: found completed tx for deposit ID %s", depositIDStr)
 				return tx.MonadTxHash, nil
 			}
 			if txHash, _ := s.checkMonadBlockchainForTransaction(ctx, depositId); txHash != "" {
-				logger.Info("Duplicate prevention (blockchain): found tx %s for deposit ID %s", txHash, depositIDStr)
+				logger.Info("Found tx %s for deposit ID %s on blockchain", txHash, depositIDStr)
+				logger.Debug("Duplicate prevention (blockchain check): found tx %s for deposit ID %s", txHash, depositIDStr)
 				_ = s.UpdateTransactionStatus(ctx, depositId, database.StatusCompleted, txHash)
 				return txHash, nil
 			}
@@ -87,7 +90,8 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 	defer s.releaseLock(depositId)
 
 	if txHash, exists := s.checkExistingTransaction(ctx, depositId); exists {
-		logger.Info("Duplicate prevention in mintTokens: deposit ID %s already processed with tx %s", depositIDStr, txHash)
+		logger.Info("Deposit ID %s already processed with tx %s", depositIDStr, txHash)
+		logger.Debug("Duplicate prevention in mintTokens: found existing tx %s for deposit ID %s", txHash, depositIDStr)
 		return txHash, nil
 	}
 
@@ -96,7 +100,7 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 	s.txCacheMutex.RLock()
 	if cached, found := s.txCache[txLookupKey]; found && cached.Status == database.StatusCompleted && cached.MonadTxHash != "" {
 		s.txCacheMutex.RUnlock()
-		logger.Info("Using cached tx hash %s for deposit ID %s", cached.MonadTxHash, depositIDStr)
+		logger.Debug("Using cached tx hash %s for deposit ID %s", cached.MonadTxHash, depositIDStr)
 		return cached.MonadTxHash, nil
 	}
 	s.txCacheMutex.RUnlock()
@@ -109,11 +113,12 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		if err := s.UpdateTransactionStatus(ctx, depositId, database.StatusPending, ""); err != nil {
 			logger.Error("Failed to mark tx as pending: %v", err)
 		} else {
-			logger.Info("Marked transaction as pending for deposit ID %s", depositIDStr)
+			logger.Debug("Marked transaction as pending for deposit ID %s", depositIDStr)
 		}
 		time.Sleep(1 * time.Second) // Allow race conditions to resolve.
 		if txHash, _ := s.checkMonadBlockchainForTransaction(ctx, depositId); txHash != "" {
-			logger.Info("Race condition check: found existing tx %s for deposit ID %s", txHash, depositIDStr)
+			logger.Info("Found existing tx %s for deposit ID %s", txHash, depositIDStr)
+			logger.Debug("Race condition check: found existing tx %s for deposit ID %s", txHash, depositIDStr)
 			_ = s.UpdateTransactionStatus(ctx, depositId, database.StatusCompleted, txHash)
 			return txHash, nil
 		}
@@ -133,7 +138,9 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 		return "", fmt.Errorf("failed to get transaction options: %v", err)
 	}
 
-	logger.Info("Submitting Monad tx for deposit ID %s with amount %s", depositIDStr, amount.String())
+	logger.Info("Submitting Monad tx for deposit ID %s", depositIDStr)
+	logger.Debug("Submitting Monad tx for deposit ID %s with amount %s Wei", depositIDStr, amount.String())
+
 	// Use our new TransactWithGasBuffer method instead of calling Transact directly
 	// This will estimate the gas and add a 20% buffer
 	tx, err := s.monadDistributor.TransactWithGasBuffer(opts, "distributeFunds", transfer)
@@ -145,7 +152,7 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 	}
 
 	txHash := tx.Hash().Hex()
-	logger.Info("Waiting for tx %s to be mined for deposit ID %s", txHash, depositIDStr)
+	logger.Debug("Waiting for tx %s to be mined for deposit ID %s", txHash, depositIDStr)
 
 	// Update with pending status including the hash
 	if err := s.UpdateTransactionStatus(ctx, depositId, database.StatusPending, txHash); err != nil {
@@ -180,14 +187,12 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 				continue
 			}
 		} else {
-			logger.Info("DB update confirmed for deposit ID %s with tx %s", depositIDStr, txHash)
-
-			// CRITICAL: Always ensure deposit status is updated after transaction update
-			logger.Info("Ensuring deposit status is updated to 'processed' for ID %s", depositIDStr)
+			logger.Debug("DB update confirmed for deposit ID %s with tx %s", depositIDStr, txHash)
+			logger.Debug("Ensuring deposit status is updated to 'processed' for ID %s", depositIDStr)
 
 			// Directly update the deposit status
 			if err := s.db.UpdateDepositStatus(depositId, database.StatusProcessed); err != nil {
-				logger.Error("Failed to directly update deposit status for ID %s: %v", depositIDStr, err)
+				logger.Error("Failed to update deposit status for ID %s: %v", depositIDStr, err)
 			}
 
 			// Double check the deposit status after update
@@ -197,21 +202,21 @@ func (s *BridgeService) mintTokens(ctx context.Context, recipient common.Address
 			} else if deposit == nil {
 				logger.Error("Deposit ID %s not found after update", depositIDStr)
 			} else {
-				logger.Info("Deposit ID %s current status: %s", depositIDStr, deposit.Status)
+				logger.Debug("Deposit ID %s current status: %s", depositIDStr, deposit.Status)
 			}
-
 			break
 		}
 	}
 	s.updateTxCache(depositId, database.StatusCompleted, txHash)
-	logger.Info("Minting complete for deposit ID %s with tx %s and amount %s", depositIDStr, txHash, amount.String())
+	logger.Info("Minting complete for deposit ID %s with tx %s", depositIDStr, txHash)
+	logger.Debug("Minting complete for deposit ID %s with tx %s and amount %s", depositIDStr, txHash, amount.String())
 
 	// Final verification.
 	if updatedTx, err := s.GetTransactionByDepositID(ctx, depositId); err == nil {
 		if updatedTx.Status != database.StatusCompleted || updatedTx.MonadTxHash != txHash {
 			logger.Error("Tx status verification failed for deposit ID %s", depositIDStr)
 		} else {
-			logger.Info("Tx status verified for deposit ID %s", depositIDStr)
+			logger.Debug("Tx status verified for deposit ID %s", depositIDStr)
 		}
 	} else {
 		logger.Error("Failed to verify tx status: %v", err)
@@ -237,7 +242,8 @@ func (s *BridgeService) createDistributionRecord(depositId *big.Int, recipient c
 		MonadTxHash:   txHash,
 	}
 
-	logger.Info("Creating distribution record for deposit ID %s with amount %s and status %s",
+	logger.Info("Creating distribution record for deposit ID %s", depositId.String())
+	logger.Debug("Creating distribution record for deposit ID %s with amount %s and status %s",
 		depositId.String(), amount.String(), status)
 	return s.db.CreateDistribution(dist)
 }

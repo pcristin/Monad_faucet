@@ -90,12 +90,12 @@ func loadSettingsFromDB() {
 func UpdateMonUsdRatio(newRatio *big.Int) {
 	// Update the in-memory value
 	globalMonUsdRatio.Set(newRatio)
-	log.Printf("MON/USD ratio updated to: %s", newRatio.String())
+	logger.Info("MON/USD ratio updated to: %s", newRatio.String())
 
 	// Update the database if available
 	if dbInstance != nil {
 		if err := dbInstance.SetBigIntSetting("mon_usd_ratio", newRatio); err != nil {
-			log.Printf("Error updating MON/USD ratio in database: %v", err)
+			logger.Error("Error updating MON/USD ratio in database: %v", err)
 		}
 	}
 }

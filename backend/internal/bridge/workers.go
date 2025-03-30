@@ -43,7 +43,7 @@ func (pool *WorkerPool) Start(processFunc func(context.Context, interface{})) {
 		workerID := i
 		go func() {
 			defer pool.wg.Done()
-			logger.Info("[%s] Worker %d started", pool.name, workerID)
+			logger.Debug("[%s] Worker %d started", pool.name, workerID)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -52,12 +52,12 @@ func (pool *WorkerPool) Start(processFunc func(context.Context, interface{})) {
 				select {
 				case job, ok := <-pool.jobChan:
 					if !ok {
-						logger.Info("[%s] Worker %d stopping: job channel closed", pool.name, workerID)
+						logger.Debug("[%s] Worker %d stopping: job channel closed", pool.name, workerID)
 						return
 					}
 					processFunc(ctx, job)
 				case <-pool.quit:
-					logger.Info("[%s] Worker %d stopping: quit signal received", pool.name, workerID)
+					logger.Debug("[%s] Worker %d stopping: quit signal received", pool.name, workerID)
 					return
 				}
 			}
@@ -67,10 +67,10 @@ func (pool *WorkerPool) Start(processFunc func(context.Context, interface{})) {
 
 // Stop stops the worker pool
 func (pool *WorkerPool) Stop() {
-	logger.Info("[%s] Stopping worker pool", pool.name)
+	logger.Debug("[%s] Stopping worker pool", pool.name)
 	close(pool.quit)
 	pool.wg.Wait()
-	logger.Info("[%s] Worker pool stopped", pool.name)
+	logger.Debug("[%s] Worker pool stopped", pool.name)
 }
 
 // Submit submits a job to the worker pool

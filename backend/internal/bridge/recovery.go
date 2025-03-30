@@ -41,7 +41,7 @@ func (s *BridgeService) RecoverStuckTransactions(ctx context.Context) error {
 		if err != nil {
 			logger.Error("Failed to get completed distributions: %v", err)
 		} else {
-			logger.Info("Found %d completed distributions to check against pending deposits", len(completedDistributions))
+			logger.Debug("Found %d completed distributions to check against pending deposits", len(completedDistributions))
 
 			// Recover deposits with completed distributions
 			for _, dist := range completedDistributions {
@@ -62,7 +62,7 @@ func (s *BridgeService) RecoverStuckTransactions(ctx context.Context) error {
 	// Original transaction recovery logic
 	for _, tx := range pendingTxs {
 		if time.Since(tx.CreatedAt) < 5*time.Minute {
-			logger.Info("Skipping recent tx for deposit ID %s", tx.DepositID.String())
+			logger.Debug("Skipping recent tx for deposit ID %s", tx.DepositID.String())
 			continue
 		}
 		monadTxHash, status, err := s.FindMonadTransactionByDepositID(ctx, tx.DepositID)
@@ -77,7 +77,7 @@ func (s *BridgeService) RecoverStuckTransactions(ctx context.Context) error {
 				if depositErr := s.db.UpdateDepositStatus(tx.DepositID, database.StatusProcessed); depositErr != nil {
 					logger.Error("Failed to update deposit status during recovery: %v", depositErr)
 				} else {
-					logger.Info("Also updated deposit status to 'processed' during recovery")
+					logger.Debug("Also updated deposit status to 'processed' during recovery")
 				}
 			}
 			continue
@@ -183,7 +183,7 @@ func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) e
 		if updateErr := s.db.UpdateDepositStatus(depositId, database.StatusRefunded); updateErr != nil {
 			logger.Warn("Failed to update deposit status for ID %s: %v", depositId.String(), updateErr)
 		} else {
-			logger.Info("Updated deposit status to refunded for ID %s", depositId.String())
+			logger.Debug("Updated deposit status to refunded for ID %s", depositId.String())
 		}
 
 		// NEW CODE: Release the processing lock for this deposit ID to ensure clean state
@@ -191,7 +191,7 @@ func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) e
 		s.processingMutex.Lock()
 		delete(s.processingDeposits, depositIdStr)
 		s.processingMutex.Unlock()
-		logger.Info("Released processing lock for deposit ID %s after refund", depositIdStr)
+		logger.Debug("Released processing lock for deposit ID %s after refund", depositIdStr)
 
 		// Also release any DB lock to ensure this deposit can be properly handled in the future if needed
 		s.releaseLock(depositId)
@@ -201,7 +201,7 @@ func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) e
 		if updateErr := s.UpdateTransactionStatus(ctx, depositId, database.StatusFailed, ""); updateErr != nil {
 			logger.Error("Failed to update status to failed for deposit ID %s: %v", depositId.String(), updateErr)
 		} else {
-			logger.Info("Updated transaction status to failed for deposit ID %s after refund failure", depositId.String())
+			logger.Debug("Updated transaction status to failed for deposit ID %s after refund failure", depositId.String())
 		}
 
 		// Update deposit status to failed as well

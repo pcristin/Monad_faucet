@@ -83,13 +83,13 @@ func (s *BridgeService) HandleDeposit(event listener.DepositEvent) {
 		// For worker manager, we need to provide a meaningful task implementation
 		// Since DepositTask.Process() is empty, we're bypassing that worker pool
 		// and directly queuing the event to the deposit channel for processing
-		logger.Info("Queueing deposit ID %s for full processing", event.DepositId.String())
+		logger.Debug("Queueing deposit ID %s for full processing", event.DepositId.String())
 
 		// Using a separate goroutine to avoid blocking the event listener
 		go func() {
 			select {
 			case s.depositChan <- event:
-				logger.Info("Successfully queued deposit ID %s to processing channel", event.DepositId.String())
+				logger.Debug("Successfully queued deposit ID %s to processing channel", event.DepositId.String())
 			default:
 				logger.Error("Deposit processing channel full, deposit ID %s may not be processed",
 					event.DepositId.String())
@@ -97,7 +97,7 @@ func (s *BridgeService) HandleDeposit(event listener.DepositEvent) {
 		}()
 	} else {
 		// Direct channel approach (fallback)
-		logger.Info("Using direct channel for deposit ID %s", event.DepositId.String())
+		logger.Debug("Using direct channel for deposit ID %s", event.DepositId.String())
 		s.depositChan <- event
 	}
 }
@@ -108,7 +108,7 @@ func (s *BridgeService) recordDepositImmediately(event listener.DepositEvent) er
 	// Check if this deposit has already been recorded
 	existing, err := s.db.GetDepositByID(event.DepositId)
 	if err == nil && existing != nil {
-		logger.Info("Deposit ID %s already recorded in database", event.DepositId.String())
+		logger.Debug("Deposit ID %s already recorded in database", event.DepositId.String())
 		return nil
 	}
 
@@ -148,10 +148,10 @@ func (s *BridgeService) recordDepositImmediately(event listener.DepositEvent) er
 			event.DepositId.String(), err)
 		// Don't return an error here, the deposit is already recorded which is the main goal
 	} else {
-		logger.Info("Successfully created transaction record for deposit ID %s", event.DepositId.String())
+		logger.Debug("Successfully created transaction record for deposit ID %s", event.DepositId.String())
 	}
 
-	logger.Info("Successfully recorded deposit ID %s in database", event.DepositId.String())
+	logger.Debug("Successfully recorded deposit ID %s in database", event.DepositId.String())
 	return nil
 }
 
@@ -218,7 +218,7 @@ func (s *BridgeService) GetTransactionByDepositID(ctx context.Context, depositID
 
 // UpdateTransactionStatus updates the status of a transaction.
 func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *big.Int, status, txHash string) error {
-	logger.Info("Updating transaction status for deposit ID %s to %s with txHash %s",
+	logger.Debug("Updating transaction status for deposit ID %s to %s with txHash %s",
 		depositID.String(), status, txHash)
 
 	// If this is a completed transaction, handle the distribution record FIRST
@@ -246,7 +246,7 @@ func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *
 
 				// Check if we should use worker pools for distribution record
 				if s.workerPools != nil {
-					logger.Info("Using worker pools for distribution record management")
+					logger.Debug("Using worker pools for distribution record management")
 
 					// Submit distribution creation/update to worker pool
 					s.workerPools.DBPool.Submit(&DBWorkerJob{
@@ -264,7 +264,7 @@ func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *
 					existingDist, _ := s.db.GetDistributionByDepositID(depositID)
 					if existingDist != nil {
 						// Update existing distribution
-						logger.Info("Updating existing distribution record for deposit ID %s with txHash %s",
+						logger.Debug("Updating existing distribution record for deposit ID %s with txHash %s",
 							depositID.String(), txHash)
 
 						if err := s.db.UpdateDistributionStatus(depositID, database.DistStatusCompleted, txHash); err != nil {
@@ -274,12 +274,12 @@ func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *
 							updatedDist, _ := s.db.GetDistributionByDepositID(depositID)
 							if updatedDist != nil && updatedDist.MonAmount != nil {
 								monAmount = updatedDist.MonAmount
-								logger.Info("Using MON amount %s from updated distribution record", monAmount.String())
+								logger.Debug("Using MON amount %s from updated distribution record", monAmount.String())
 							}
 						}
 					} else {
 						// Create new distribution record
-						logger.Info("Creating new distribution record for deposit ID %s with txHash %s and amount %s",
+						logger.Debug("Creating new distribution record for deposit ID %s with txHash %s and amount %s",
 							depositID.String(), txHash, monAmount.String())
 
 						dist := &database.Distribution{
@@ -302,7 +302,7 @@ func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *
 	// Now, update the transaction with the MON amount
 	var err error
 	if monAmount != nil && monAmount.Cmp(big.NewInt(0)) > 0 {
-		logger.Info("Updating transaction with explicit MON amount: %s for ID %s",
+		logger.Debug("Updating transaction with explicit MON amount: %s for ID %s",
 			monAmount.String(), depositID.String())
 
 		// Custom update that directly sets the MON amount
@@ -335,14 +335,14 @@ func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *
 				Status:    depositStatus,
 			},
 		})
-		logger.Info("Queued deposit status update to worker pool for ID %s", depositID.String())
+		logger.Debug("Queued deposit status update to worker pool for ID %s", depositID.String())
 	} else {
 		// Direct update if worker pools not available
 		if err := s.db.UpdateDepositStatus(depositID, depositStatus); err != nil {
 			logger.Error("Failed to update deposit status after updating transaction: %v", err)
 			// Don't return error here - we still successfully updated the transaction
 		} else {
-			logger.Info("Successfully updated deposit status for ID %s", depositID.String())
+			logger.Debug("Successfully updated deposit status for ID %s", depositID.String())
 		}
 	}
 

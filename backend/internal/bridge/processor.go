@@ -46,9 +46,9 @@ func (s *BridgeService) processDeposits() {
 						s.QueueRefund(event.DepositId)
 					}
 				}
-				logger.Info("Direct processing time: %v", time.Since(start))
+				logger.Debug("Direct processing time: %v", time.Since(start))
 			} else {
-				logger.Info("Successfully queued deposit ID %s to worker pool", event.DepositId.String())
+				logger.Debug("Successfully queued deposit ID %s to worker pool", event.DepositId.String())
 			}
 		}
 	}

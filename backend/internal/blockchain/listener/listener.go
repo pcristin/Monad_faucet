@@ -90,7 +90,7 @@ func (l *EventListener) ListenToDeposits(ctx context.Context) (<-chan DepositEve
 
 			if !lastEventTime.IsZero() {
 				timeSinceLast := now.Sub(lastEventTime)
-				logger.Info("DEPOSIT-INFLOW: Deposit %d received after %v since previous (ID: %s)",
+				logger.Debug("DEPOSIT-INFLOW: Deposit %d received after %v since previous (ID: %s)",
 					eventCount, timeSinceLast, evt.DepositId.String())
 
 				// Log warning for significant delays
@@ -99,7 +99,7 @@ func (l *EventListener) ListenToDeposits(ctx context.Context) (<-chan DepositEve
 						timeSinceLast, eventCount-1, eventCount)
 				}
 			} else {
-				logger.Info("DEPOSIT-INFLOW: Deposit %d received (first deposit, ID: %s)",
+				logger.Debug("DEPOSIT-INFLOW: Deposit %d received (first deposit, ID: %s)",
 					eventCount, evt.DepositId.String())
 			}
 
@@ -109,7 +109,7 @@ func (l *EventListener) ListenToDeposits(ctx context.Context) (<-chan DepositEve
 			if eventCount > 1 {
 				elapsed := lastEventTime.Sub(firstEventTime)
 				rate := float64(eventCount) / elapsed.Seconds()
-				logger.Info("DEPOSIT-INFLOW: Current rate: %.2f deposits/sec (%d in %v)",
+				logger.Debug("DEPOSIT-INFLOW: Current rate: %.2f deposits/sec (%d in %v)",
 					rate, eventCount, elapsed.Round(time.Millisecond))
 			}
 
@@ -253,7 +253,7 @@ func (l *EventListener) listenWithAlchemyOptimization(ctx context.Context, event
 									if log.BlockNumber > 0 {
 										// Only log once in a while to reduce overhead
 										if log.BlockNumber%10 == 0 {
-											logger.Info("DEPOSIT-SOURCE: Processing block %d, event ID %s",
+											logger.Debug("DEPOSIT-SOURCE: Processing block %d, event ID %s",
 												log.BlockNumber, depositEvent.DepositId.String())
 										}
 									}

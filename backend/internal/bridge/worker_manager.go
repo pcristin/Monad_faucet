@@ -27,13 +27,13 @@ func (s *BridgeService) QueueRefund(depositID *big.Int) {
 // SetWorkerManager sets the worker manager for the bridge service
 func (s *BridgeService) SetWorkerManager(manager *workers.Manager) {
 	s.workerManager = manager
-	logger.Info("Worker manager set for bridge service")
+	logger.Debug("Worker manager set for bridge service")
 }
 
 // SetWorkerPools sets the bridge worker pools
 func (s *BridgeService) SetWorkerPools(pools *BridgeWorkerPools) {
 	s.workerPools = pools
-	logger.Info("Worker pools set for batch processing")
+	logger.Debug("Worker pools set for batch processing")
 }
 
 // GetWorkerManager returns the worker manager
@@ -137,14 +137,14 @@ func (s *BridgeService) HandleDepositTask(task *workers.DepositTask) error {
 		return err
 	}
 
-	logger.Info("Worker pool processing time for deposit %s: %v",
+	logger.Debug("Worker pool processing time for deposit %s: %v",
 		task.DepositID, time.Since(start))
 	return nil
 }
 
 // HandleDistributionTask processes distribution tasks from the worker pool
 func (s *BridgeService) HandleDistributionTask(task *workers.DistributionTask) error {
-	logger.Info("Handling distribution task %s for deposit %s", task.DistributionID, task.DepositID)
+	logger.Debug("Handling distribution task %s for deposit %s", task.DistributionID, task.DepositID)
 
 	// Convert the task data to the format needed for minting tokens
 	depositID, ok := new(big.Int).SetString(task.DepositID, 10)
@@ -167,7 +167,7 @@ func (s *BridgeService) HandleDistributionTask(task *workers.DistributionTask) e
 	// IMPORTANT CHANGE: Instead of directly calling mintTokens, create a distribution job
 	// and submit it to the worker pool for batch processing
 	if s.workerPools != nil {
-		logger.Info("Submitting distribution for deposit ID %s to batch processing system", depositID.String())
+		logger.Debug("Submitting distribution for deposit ID %s to batch processing system", depositID.String())
 
 		// Create a distribution job
 		distJob := &DistributionJob{
@@ -179,7 +179,7 @@ func (s *BridgeService) HandleDistributionTask(task *workers.DistributionTask) e
 		// Add the job to the distribution batch (this will be processed as part of a batch)
 		s.workerPools.addToDistributionBatch(distJob)
 
-		logger.Info("Distribution for deposit ID %s successfully added to batch processing", depositID.String())
+		logger.Debug("Distribution for deposit ID %s successfully added to batch processing", depositID.String())
 		return nil
 	}
 
@@ -206,14 +206,14 @@ func (s *BridgeService) HandleDistributionTask(task *workers.DistributionTask) e
 		logger.Error("Failed to create/update distribution record: %v", err)
 	}
 
-	logger.Info("Worker pool distribution time for deposit %s: %v",
+	logger.Debug("Worker pool distribution time for deposit %s: %v",
 		task.DepositID, time.Since(start))
 	return nil
 }
 
 // HandleDatabaseTask processes database tasks from the worker pool
 func (s *BridgeService) HandleDatabaseTask(task *workers.DatabaseTask) error {
-	logger.Info("Handling database task with operation %s", task.Operation)
+	logger.Debug("Handling database task with operation %s", task.Operation)
 
 	switch task.Operation {
 	case "create_deposit":
