@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/pcristin/monad-faucet/internal/blockchain"
+	"github.com/pcristin/monad-faucet/internal/blockchain/listener"
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/internal/workers"
 	"github.com/pcristin/monad-faucet/pkg/logger"
@@ -119,7 +119,7 @@ func (s *BridgeService) HandleDepositTask(task *workers.DepositTask) error {
 	}
 
 	// Cast the event data back to the original event type
-	event, ok := task.EventData.(blockchain.DepositEvent)
+	event, ok := task.EventData.(listener.DepositEvent)
 	if !ok {
 		return fmt.Errorf("invalid event data type in deposit task")
 	}

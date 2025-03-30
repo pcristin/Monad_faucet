@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pcristin/monad-faucet/internal/blockchain"
+	"github.com/pcristin/monad-faucet/internal/blockchain/listener"
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/internal/workers"
 	"github.com/pcristin/monad-faucet/pkg/logger"
@@ -19,7 +20,7 @@ import (
 //
 
 // processDeposit processes a single deposit event.
-func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
+func (s *BridgeService) processDeposit(event listener.DepositEvent) error {
 	startTime := time.Now()
 	logger.Info("Starting deposit processing for ID %s, amount %s", event.DepositId.String(), event.Amount.String())
 
@@ -220,7 +221,7 @@ func (s *BridgeService) processDeposit(event blockchain.DepositEvent) error {
 
 // ensureTransactionRecord ensures that a transaction record exists in the database for the given deposit event.
 // If a record exists, it returns it. If not, it creates a new record.
-func (s *BridgeService) ensureTransactionRecord(event blockchain.DepositEvent, monAmount *big.Int) (*database.Transaction, error) {
+func (s *BridgeService) ensureTransactionRecord(event listener.DepositEvent, monAmount *big.Int) (*database.Transaction, error) {
 	// First check if the transaction already exists
 	logger.Info("Checking for existing transaction record for deposit ID %s", event.DepositId.String())
 	existingTx, err := s.db.GetTransactionByDepositID(event.DepositId)

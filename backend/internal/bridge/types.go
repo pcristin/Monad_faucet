@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pcristin/monad-faucet/internal/blockchain"
+	"github.com/pcristin/monad-faucet/internal/blockchain/listener"
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/internal/workers"
 	"github.com/pcristin/monad-faucet/pkg/logger"
@@ -17,7 +18,7 @@ import (
 type BridgeService struct {
 	arbDepositor        *blockchain.ArbitrumDepositor
 	monadDistributor    *blockchain.MonadDistributor
-	depositChan         chan blockchain.DepositEvent
+	depositChan         chan listener.DepositEvent
 	refundChan          chan *big.Int
 	wg                  sync.WaitGroup
 	ctx                 context.Context
@@ -50,7 +51,7 @@ func NewBridgeService(
 	return &BridgeService{
 		arbDepositor:        arbDepositor,
 		monadDistributor:    monadDistributor,
-		depositChan:         make(chan blockchain.DepositEvent, 1000),
+		depositChan:         make(chan listener.DepositEvent, 1000),
 		refundChan:          make(chan *big.Int, 1000),
 		wg:                  sync.WaitGroup{},
 		ctx:                 ctx,

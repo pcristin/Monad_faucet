@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
+	"github.com/pcristin/monad-faucet/internal/blockchain/listener"
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
@@ -19,7 +20,7 @@ import (
 //
 
 // validateDepositWithAmount validates a deposit using pre-calculated MON amount.
-func (s *BridgeService) validateDepositWithAmount(state *blockchain.ContractState, event blockchain.DepositEvent, monAmount *big.Int) error {
+func (s *BridgeService) validateDepositWithAmount(state *blockchain.ContractState, event listener.DepositEvent, monAmount *big.Int) error {
 	if state.IsPaused {
 		return fmt.Errorf("bridge is paused")
 	}

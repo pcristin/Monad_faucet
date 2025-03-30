@@ -10,11 +10,13 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/gin-gonic/gin"
 
 	"github.com/pcristin/monad-faucet/config"
 	"github.com/pcristin/monad-faucet/internal/api"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
+	"github.com/pcristin/monad-faucet/internal/blockchain/listener"
 	"github.com/pcristin/monad-faucet/internal/bridge"
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/internal/workers"
@@ -65,12 +67,12 @@ func main() {
 	}
 
 	// Create blockchain clients
-	arbClient, err := blockchain.NewClient(cfg.ArbRpcURL)
+	arbClient, err := ethclient.Dial(cfg.ArbRpcURL)
 	if err != nil {
 		logger.Fatal("Failed to connect to Arbitrum network: %v", err)
 	}
 
-	monadClient, err := blockchain.NewClient(cfg.MonadRpcURL)
+	monadClient, err := ethclient.Dial(cfg.MonadRpcURL)
 	if err != nil {
 		logger.Fatal("Failed to connect to Monad network: %v", err)
 	}
@@ -131,7 +133,7 @@ func main() {
 
 	// Create event listener for Arbitrum deposits
 	logger.Info("Creating event listener for Arbitrum deposits with contract address: %s", cfg.ArbDepositorAddr)
-	listener, err := blockchain.NewEventListener(cfg.ArbRpcURL, common.HexToAddress(cfg.ArbDepositorAddr))
+	listener, err := listener.NewEventListener(cfg.ArbRpcURL, common.HexToAddress(cfg.ArbDepositorAddr))
 	if err != nil {
 		logger.Fatal("Failed to create event listener: %v", err)
 	}

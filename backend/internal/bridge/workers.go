@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
+	"github.com/pcristin/monad-faucet/internal/blockchain/listener"
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
@@ -86,7 +87,7 @@ func (pool *WorkerPool) Submit(job interface{}) {
 
 // DepositJob represents a job for deposit event processing
 type DepositJob struct {
-	Event blockchain.DepositEvent
+	Event listener.DepositEvent
 }
 
 // CalculationJob represents a job for MON amount calculation
@@ -223,7 +224,7 @@ func (pools *BridgeWorkerPools) Stop() {
 }
 
 // SubmitDepositEvent adds a deposit event to the deposit worker pool
-func (pools *BridgeWorkerPools) SubmitDepositEvent(event blockchain.DepositEvent) {
+func (pools *BridgeWorkerPools) SubmitDepositEvent(event listener.DepositEvent) {
 	depositId := event.DepositId.String()
 	startTime := time.Now()
 
@@ -362,7 +363,7 @@ func (pools *BridgeWorkerPools) processCalculationJob(ctx context.Context, job *
 
 	// Validate the deposit and amount
 	validateStart := time.Now()
-	err := pools.service.validateDepositWithAmount(job.State, blockchain.DepositEvent{
+	err := pools.service.validateDepositWithAmount(job.State, listener.DepositEvent{
 		DepositId:   job.Deposit.DepositID,
 		Depositor:   job.Deposit.WalletAddress,
 		Amount:      job.Deposit.Amount,

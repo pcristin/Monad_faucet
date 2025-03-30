@@ -9,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
+	"github.com/pcristin/monad-faucet/internal/blockchain/listener"
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
@@ -70,7 +71,7 @@ func (s *BridgeService) Stop() error {
 }
 
 // HandleDeposit queues a deposit for processing.
-func (s *BridgeService) HandleDeposit(event blockchain.DepositEvent) {
+func (s *BridgeService) HandleDeposit(event listener.DepositEvent) {
 	// First ensure the deposit is recorded in the database immediately
 	if err := s.recordDepositImmediately(event); err != nil {
 		logger.Error("Failed to immediately record deposit %s: %v", event.DepositId.String(), err)
@@ -103,7 +104,7 @@ func (s *BridgeService) HandleDeposit(event blockchain.DepositEvent) {
 
 // recordDepositImmediately creates a deposit record in the database as soon as an event is detected
 // This ensures we don't miss deposits even if the full processing pipeline fails
-func (s *BridgeService) recordDepositImmediately(event blockchain.DepositEvent) error {
+func (s *BridgeService) recordDepositImmediately(event listener.DepositEvent) error {
 	// Check if this deposit has already been recorded
 	existing, err := s.db.GetDepositByID(event.DepositId)
 	if err == nil && existing != nil {
