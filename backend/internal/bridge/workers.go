@@ -363,13 +363,7 @@ func (pools *BridgeWorkerPools) processCalculationJob(ctx context.Context, job *
 
 	// Validate the deposit and amount
 	validateStart := time.Now()
-	err := pools.service.validateDepositWithAmount(job.State, listener.DepositEvent{
-		DepositId:   job.Deposit.DepositID,
-		Depositor:   job.Deposit.WalletAddress,
-		Amount:      job.Deposit.Amount,
-		Currency:    blockchain.CurrencyType(job.Deposit.Currency),
-		BlockNumber: job.Deposit.BlockNumber,
-	}, monAmount)
+	err := pools.service.validateDepositWithAmount(job.State, monAmount)
 	logger.Info("TIMING: validateDepositWithAmount for ID %s took %v", job.Deposit.DepositID.String(), time.Since(validateStart))
 
 	if err != nil {
