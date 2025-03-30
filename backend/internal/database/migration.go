@@ -467,9 +467,17 @@ func (db *DB) addRefundTxHashColumn() error {
 		) b
 		WHERE a.deposit_id = b.deposit_id AND a.id < b.max_id;
 
-		-- Add unique constraint on deposit_id
-		ALTER TABLE transaction_history 
-		ADD CONSTRAINT IF NOT EXISTS deposit_id_unique_tx UNIQUE (deposit_id);
+		-- Add unique constraint on deposit_id using a DO block for compatibility
+		DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint 
+				WHERE conname = 'deposit_id_unique_tx'
+			) THEN
+				ALTER TABLE transaction_history 
+				ADD CONSTRAINT deposit_id_unique_tx UNIQUE (deposit_id);
+			END IF;
+		END $$;
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to deduplicate records and add constraint: %w", err)

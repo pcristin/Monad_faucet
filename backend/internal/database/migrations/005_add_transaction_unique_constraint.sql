@@ -8,6 +8,14 @@ USING (
 ) b
 WHERE a.deposit_id = b.deposit_id AND a.id < b.max_id;
 
--- Add unique constraint on deposit_id
-ALTER TABLE transaction_history 
-ADD CONSTRAINT IF NOT EXISTS deposit_id_unique_tx UNIQUE (deposit_id); 
+-- Add unique constraint with compatibility check
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint 
+        WHERE conname = 'deposit_id_unique_tx'
+    ) THEN
+        ALTER TABLE transaction_history 
+        ADD CONSTRAINT deposit_id_unique_tx UNIQUE (deposit_id);
+    END IF;
+END $$; 

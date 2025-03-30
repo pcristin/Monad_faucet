@@ -54,9 +54,20 @@ CREATE TABLE IF NOT EXISTS transaction_history (
     refund_tx_hash VARCHAR(66),
     metadata TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT deposit_id_unique_tx UNIQUE (deposit_id)
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Add unique constraint with compatibility check
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint 
+        WHERE conname = 'deposit_id_unique_tx'
+    ) THEN
+        ALTER TABLE transaction_history 
+        ADD CONSTRAINT deposit_id_unique_tx UNIQUE (deposit_id);
+    END IF;
+END $$;
 
 -- Create function for sanitizing mon_amount
 CREATE OR REPLACE FUNCTION sanitize_mon_amount() RETURNS TRIGGER AS $$
