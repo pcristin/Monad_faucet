@@ -49,10 +49,22 @@ type Transaction struct {
 // CreateTransaction creates a new transaction record in the database
 func (db *DB) CreateTransaction(tx *Transaction) error {
 	// Use RETURNING clause to get the inserted ID (PostgreSQL compatible)
+	// Use ON CONFLICT to handle duplicate deposit_id (UPSERT)
 	err := db.QueryRow(
 		`INSERT INTO transaction_history 
 		(deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, refund_tx_hash, metadata) 
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (deposit_id) DO UPDATE SET
+			wallet_address = EXCLUDED.wallet_address,
+			amount = EXCLUDED.amount,
+			currency = EXCLUDED.currency,
+			mon_amount = COALESCE(transaction_history.mon_amount, EXCLUDED.mon_amount),
+			status = CASE
+				WHEN transaction_history.status = 'failed' OR transaction_history.status = 'pending' THEN EXCLUDED.status
+				ELSE transaction_history.status
+			END,
+			tx_hash = COALESCE(transaction_history.tx_hash, EXCLUDED.tx_hash),
+			updated_at = CURRENT_TIMESTAMP
 		RETURNING id`,
 		tx.DepositID.String(),
 		tx.WalletAddress.Hex(),
@@ -69,6 +81,9 @@ func (db *DB) CreateTransaction(tx *Transaction) error {
 	if err != nil {
 		return fmt.Errorf("failed to create transaction: %w", err)
 	}
+
+	logger.Info("Successfully created or updated transaction record for deposit ID %s with status %s",
+		tx.DepositID.String(), tx.Status)
 
 	return nil
 }

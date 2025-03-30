@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS transaction_history (
     refund_tx_hash VARCHAR(66),
     metadata TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT deposit_id_unique_tx UNIQUE (deposit_id)
 );
 
 -- Create function for sanitizing mon_amount

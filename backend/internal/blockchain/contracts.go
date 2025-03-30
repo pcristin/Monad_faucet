@@ -383,47 +383,21 @@ func getEthSwapRatioWithRetry(ctx context.Context, d *ArbitrumDepositor, retryCl
 }
 
 // RefundDeposit initiates a refund for a failed deposit
-func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.Int) (string, error) {
-	// Create retry client
-	retryClient := NewRetryClient(d.Client)
-
-	// Get deposit details from events
-	logs, err := retryClient.FilterLogsWithRetry(ctx, ethereum.FilterQuery{
-		FromBlock: big.NewInt(0),
-		ToBlock:   nil,
-		Addresses: []common.Address{d.Address},
-		Topics: [][]common.Hash{
-			{DepositorABI.Events["DepositEvent"].ID},
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to get deposit events: %v", err)
+func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.Int, deposit *database.Deposit) (string, error) {
+	// Validate inputs
+	if depositId == nil {
+		return "", fmt.Errorf("invalid deposit ID: nil")
 	}
 
-	// Find the deposit with the matching ID
-	var depositEvent struct {
-		Depositor common.Address
-		Amount    *big.Int
-		DepositId *big.Int
-		Currency  uint8
+	// If deposit info is not provided, we can't proceed
+	if deposit == nil {
+		return "", fmt.Errorf("deposit information is required for refund, deposit ID %s not found", depositId.String())
 	}
 
-	found := false
-	for _, log := range logs {
-		err = d.BoundContract.UnpackLog(&depositEvent, "DepositEvent", log)
-		if err != nil {
-			continue
-		}
-
-		if depositEvent.DepositId.Cmp(depositId) == 0 {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		return "", fmt.Errorf("deposit ID %s not found", depositId.String())
-	}
+	// Log the deposit information we're using
+	logger.Info("Processing refund for deposit ID %s, wallet %s, amount %s, tx %s, block %d",
+		depositId.String(), deposit.WalletAddress.Hex(), deposit.Amount.String(),
+		deposit.TxHash, deposit.BlockNumber)
 
 	// Get current gas price with a small buffer (20% increase)
 	gasPrice, err := d.Client.SuggestGasPrice(ctx)
@@ -437,9 +411,9 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 	input, err := DepositorABI.Pack(
 		"refundDeposit",
 		depositId,
-		depositEvent.Depositor,
-		depositEvent.Amount,
-		uint8(depositEvent.Currency),
+		deposit.WalletAddress,
+		deposit.Amount,
+		uint8(deposit.Currency),
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to pack refund data: %v", err)
@@ -515,6 +489,7 @@ func (d *ArbitrumDepositor) RefundDeposit(ctx context.Context, depositId *big.In
 	}
 
 	txHash := signedTx.Hash().Hex()
+	logger.Info("Successfully sent refund transaction for deposit ID %s (tx: %s)", depositId.String(), txHash)
 
 	// Wait for transaction receipt
 	receipt, err := bind.WaitMined(ctx, d.Client, signedTx)

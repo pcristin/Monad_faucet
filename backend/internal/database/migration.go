@@ -421,19 +421,60 @@ func (db *DB) addRefundTxHashColumn() error {
 
 	if columnExists {
 		logger.Info("refund_tx_hash column already exists, skipping addition")
+	} else {
+		// Add the column
+		logger.Info("Adding refund_tx_hash column to transaction_history table...")
+		_, err = db.Exec(`
+			ALTER TABLE transaction_history ADD COLUMN refund_tx_hash VARCHAR(66);
+			CREATE INDEX IF NOT EXISTS idx_transaction_history_refund_tx_hash ON transaction_history(refund_tx_hash);
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to add refund_tx_hash column: %w", err)
+		}
+
+		logger.Info("Successfully added refund_tx_hash column to transaction_history table")
+	}
+
+	// Check if the unique constraint exists
+	var constraintExists bool
+	constraintQuery := `
+		SELECT EXISTS (
+			SELECT FROM information_schema.table_constraints 
+			WHERE constraint_name = 'deposit_id_unique_tx' 
+			AND table_name = 'transaction_history'
+		)
+	`
+	err = db.QueryRow(constraintQuery).Scan(&constraintExists)
+	if err != nil {
+		return fmt.Errorf("failed to check if unique constraint exists: %w", err)
+	}
+
+	if constraintExists {
+		logger.Info("Unique constraint on deposit_id already exists, skipping addition")
 		return nil
 	}
 
-	// Add the column
-	logger.Info("Adding refund_tx_hash column to transaction_history table...")
+	// Run deduplication and add constraint
+	logger.Info("Deduplicating transaction records and adding unique constraint...")
 	_, err = db.Exec(`
-		ALTER TABLE transaction_history ADD COLUMN refund_tx_hash VARCHAR(66);
-		CREATE INDEX IF NOT EXISTS idx_transaction_history_refund_tx_hash ON transaction_history(refund_tx_hash);
+		-- First, remove duplicate records keeping only the most recent one
+		DELETE FROM transaction_history a 
+		USING (
+			SELECT MAX(id) as max_id, deposit_id
+			FROM transaction_history
+			GROUP BY deposit_id
+			HAVING COUNT(*) > 1
+		) b
+		WHERE a.deposit_id = b.deposit_id AND a.id < b.max_id;
+
+		-- Add unique constraint on deposit_id
+		ALTER TABLE transaction_history 
+		ADD CONSTRAINT IF NOT EXISTS deposit_id_unique_tx UNIQUE (deposit_id);
 	`)
 	if err != nil {
-		return fmt.Errorf("failed to add refund_tx_hash column: %w", err)
+		return fmt.Errorf("failed to deduplicate records and add constraint: %w", err)
 	}
 
-	logger.Info("Successfully added refund_tx_hash column to transaction_history table")
+	logger.Info("Successfully deduplicated transaction records and added unique constraint")
 	return nil
 }

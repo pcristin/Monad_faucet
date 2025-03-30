@@ -120,8 +120,16 @@ func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) e
 	// Check if this deposit has already been refunded to prevent duplicates
 	tx, err := s.db.GetTransactionByDepositID(depositId)
 	if err == nil && (tx.Status == database.StatusRefunded || strings.Contains(tx.Status, "refund")) {
-		logger.Info("Deposit ID %s has already been refunded, skipping duplicate refund", depositId.String())
-		return nil
+		// Check if we have a refund_tx_hash - if yes, the refund was likely successful
+		if tx.RefundTxHash != "" {
+			logger.Info("Deposit ID %s has already been refunded (tx: %s), skipping duplicate refund",
+				depositId.String(), tx.RefundTxHash)
+			return nil
+		}
+
+		// If we have a refunding status but no refund_tx_hash, it was likely a failed attempt
+		logger.Info("Deposit ID %s is marked as refunding but has no refund transaction hash, attempting refund again",
+			depositId.String())
 	}
 
 	// IMPORTANT: Mark as refunding BEFORE attempting the refund to prevent race conditions
@@ -133,8 +141,24 @@ func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) e
 	// Ensure the database changes have time to propagate
 	time.Sleep(500 * time.Millisecond)
 
-	logger.Info("Delegating refund for deposit ID %s to ArbitrumDepositor", depositId.String())
-	refundTxHash, err := s.arbDepositor.RefundDeposit(ctx, depositId)
+	// Get deposit information from the database
+	depositInfo, err := s.db.GetDepositByID(depositId)
+	if err != nil {
+		logger.Error("Failed to get deposit information for ID %s: %v", depositId.String(), err)
+		return fmt.Errorf("failed to get deposit information: %w", err)
+	}
+
+	if depositInfo == nil {
+		logger.Error("Deposit ID %s not found in database", depositId.String())
+		// Update transaction status to failed since we can't process the refund
+		if updateErr := s.UpdateTransactionStatus(ctx, depositId, database.StatusFailed, ""); updateErr != nil {
+			logger.Error("Failed to update status to failed for deposit ID %s: %v", depositId.String(), updateErr)
+		}
+		return fmt.Errorf("deposit ID %s not found", depositId.String())
+	}
+
+	logger.Info("Delegating refund for deposit ID %s to ArbitrumDepositor with deposit information", depositId.String())
+	refundTxHash, err := s.arbDepositor.RefundDeposit(ctx, depositId, depositInfo)
 
 	// Store the refund transaction hash even if there's an error (if we have a hash)
 	if refundTxHash != "" {
@@ -151,6 +175,15 @@ func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) e
 	if err == nil {
 		if updateErr := s.UpdateTransactionStatus(ctx, depositId, database.StatusRefunded, ""); updateErr != nil {
 			logger.Warn("Failed to update status after refund for deposit ID %s: %v", depositId.String(), updateErr)
+		} else {
+			logger.Info("Updated transaction status to refunded for deposit ID %s", depositId.String())
+		}
+
+		// Also update deposit status
+		if updateErr := s.db.UpdateDepositStatus(depositId, database.StatusRefunded); updateErr != nil {
+			logger.Warn("Failed to update deposit status for ID %s: %v", depositId.String(), updateErr)
+		} else {
+			logger.Info("Updated deposit status to refunded for ID %s", depositId.String())
 		}
 
 		// NEW CODE: Release the processing lock for this deposit ID to ensure clean state
@@ -164,8 +197,17 @@ func (s *BridgeService) refundDeposit(ctx context.Context, depositId *big.Int) e
 		s.releaseLock(depositId)
 	} else {
 		logger.Error("Refund failed for deposit ID %s: %v", depositId.String(), err)
-		// Don't change status if we couldn't process the refund, leave it as "refunding"
-		// This way we can retry later
+		// Update status to failed if the refund failed
+		if updateErr := s.UpdateTransactionStatus(ctx, depositId, database.StatusFailed, ""); updateErr != nil {
+			logger.Error("Failed to update status to failed for deposit ID %s: %v", depositId.String(), updateErr)
+		} else {
+			logger.Info("Updated transaction status to failed for deposit ID %s after refund failure", depositId.String())
+		}
+
+		// Update deposit status to failed as well
+		if updateErr := s.db.UpdateDepositStatus(depositId, database.StatusFailed); updateErr != nil {
+			logger.Error("Failed to update deposit status for ID %s: %v", depositId.String(), updateErr)
+		}
 	}
 
 	return err
