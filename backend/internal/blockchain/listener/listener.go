@@ -195,7 +195,7 @@ func (l *EventListener) listenWithAlchemyOptimization(ctx context.Context, event
 			}
 
 			// Only use one subscription method - the native one
-			msgChan := make(chan types.Log, 100) // Buffered to prevent blocking
+			msgChan := make(chan types.Log, 200) // Buffered to prevent blocking
 			sub, err := l.client.SubscribeFilterLogs(ctx, filterQuery, msgChan)
 			if err != nil {
 				reconnectAttempt++
