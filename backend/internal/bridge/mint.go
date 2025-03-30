@@ -9,7 +9,6 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
-	"github.com/pcristin/monad-faucet/internal/blockchain/listener"
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
@@ -19,11 +18,21 @@ import (
 //
 
 // validateDepositWithAmount validates a deposit using pre-calculated MON amount.
-func (s *BridgeService) validateDepositWithAmount(state *blockchain.ContractState, event listener.DepositEvent, monAmount *big.Int) error {
+func (s *BridgeService) validateDepositWithAmount(state *blockchain.ContractState, monAmount *big.Int) error {
 	if state.IsPaused {
 		return fmt.Errorf("bridge is paused")
 	}
-	if state.MonBalance.Cmp(monAmount) < 0 {
+	// 100 MON = 100 * 10^18 wei
+	oneHundredMon := new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	if state.MonBalance.Cmp(monAmount) < 0 || state.MonBalance.Cmp(oneHundredMon) < 0 {
+		// Call PauseDeposits to prevent further deposits due to low MON balance
+		ctx := context.Background()
+		if err := s.PauseDeposits(ctx); err != nil {
+			logger.Error("Failed to pause deposits: %v", err)
+			// Continue with the error return below, but log the failure
+		} else {
+			logger.Info("Paused deposits due to low MON balance")
+		}
 		return fmt.Errorf("insufficient MON balance in distributor")
 	}
 

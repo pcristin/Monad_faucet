@@ -108,7 +108,7 @@ func (s *BridgeService) processDeposit(event listener.DepositEvent) error {
 	}
 
 	logger.Info("Validating deposit ID %s", event.DepositId.String())
-	if err := s.validateDepositWithAmount(state, event, monAmount); err != nil {
+	if err := s.validateDepositWithAmount(state, monAmount); err != nil {
 		logger.Error("Deposit validation failed for ID %s: %v", event.DepositId.String(), err)
 
 		// Update status via worker pool
