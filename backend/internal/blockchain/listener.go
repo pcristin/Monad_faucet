@@ -289,22 +289,25 @@ func (l *EventListener) listenWithAlchemyOptimization(ctx context.Context, event
 				l.client = ethclient.NewClient(l.rpcClient)
 			}
 
-			logger.Info("Creating new Alchemy minedTransactions subscription (attempt %d)", reconnectAttempt+1)
+			logger.Info("Creating new logs subscription for deposit events (attempt %d)", reconnectAttempt+1)
 
-			// Set up subscription parameters for contract address
-			params := map[string]interface{}{
-				"addresses": []map[string]string{
-					{"to": l.address.Hex()}, // Filter for transactions TO our contract
+			// Use 'logs' subscription with event-specific filter for better performance
+			// This directly listens for DepositEvent emissions instead of watching all transactions
+			depositEventID := l.contractABI.Events["DepositEvent"].ID
+
+			// Create the logs filter for the specific event we're looking for
+			filterParams := map[string]interface{}{
+				"address": l.address.Hex(),
+				"topics": []interface{}{
+					depositEventID.Hex(), // First topic is the event signature
 				},
-				"includeRemoved": false,
-				"hashesOnly":     false, // We need full transaction details
 			}
 
-			// Subscribe to alchemy_minedTransactions with our filter
-			err := l.rpcClient.Call(&subscriptionID, "eth_subscribe", "alchemy_minedTransactions", params)
+			// Subscribe to logs with our filter
+			err := l.rpcClient.Call(&subscriptionID, "eth_subscribe", "logs", filterParams)
 			if err != nil {
 				reconnectAttempt++
-				logger.Error("Failed to subscribe to Alchemy mined transactions (attempt %d): %v",
+				logger.Error("Failed to subscribe to logs (attempt %d): %v",
 					reconnectAttempt, err)
 				errors <- fmt.Errorf("subscription error: %v", err)
 				continue
@@ -312,7 +315,8 @@ func (l *EventListener) listenWithAlchemyOptimization(ctx context.Context, event
 
 			// Reset reconnect counter on successful connection
 			reconnectAttempt = 0
-			logger.Info("Alchemy subscription created successfully with ID: %s", subscriptionID)
+			logger.Info("Logs subscription created successfully with ID: %s and event ID: %s",
+				subscriptionID, depositEventID.Hex())
 
 			// Set up ping timer for keepalive
 			pingTimer := time.NewTicker(pingInterval)
@@ -320,20 +324,26 @@ func (l *EventListener) listenWithAlchemyOptimization(ctx context.Context, event
 
 			// Use proper channels for subscription
 			msgChan := make(chan interface{})
-			sub, err := l.rpcClient.EthSubscribe(ctx, msgChan, "alchemy_minedTransactions", params)
+			sub, err := l.rpcClient.EthSubscribe(ctx, msgChan, "logs", filterParams)
 			if err != nil {
 				reconnectAttempt++
-				logger.Error("Failed to subscribe to Alchemy mined transactions (attempt %d): %v",
+				logger.Error("Failed to subscribe to logs (attempt %d): %v",
 					reconnectAttempt, err)
 				errors <- fmt.Errorf("subscription error: %v", err)
 				continue
 			}
 
+			// Track subscription throughput
+			eventCounter := 0
+			throughputStart := time.Now()
+			throughputTicker := time.NewTicker(10 * time.Second)
+			defer throughputTicker.Stop()
+
 			// Subscribe to responses
 			for {
 				select {
 				case <-ctx.Done():
-					logger.Info("Context done, stopping active Alchemy subscription")
+					logger.Info("Context done, stopping active logs subscription")
 					sub.Unsubscribe()
 					return
 				case <-pingTimer.C:
@@ -342,6 +352,15 @@ func (l *EventListener) listenWithAlchemyOptimization(ctx context.Context, event
 					if err != nil {
 						logger.Error("Ping failed, connection might be dead: %v", err)
 						goto RECONNECT
+					}
+				case <-throughputTicker.C:
+					if eventCounter > 0 {
+						elapsed := time.Since(throughputStart)
+						rate := float64(eventCounter) / elapsed.Seconds()
+						logger.Info("SUBSCRIPTION-THROUGHPUT: Received %d events in last %v (%.2f/sec)",
+							eventCounter, elapsed.Round(time.Second), rate)
+						eventCounter = 0
+						throughputStart = time.Now()
 					}
 				case <-l.reconnectChan:
 					logger.Info("Reconnection requested by error handler")
@@ -353,86 +372,78 @@ func (l *EventListener) listenWithAlchemyOptimization(ctx context.Context, event
 						goto RECONNECT
 					}
 				case msg := <-msgChan:
-					// Parse the message
-					var alcMsg AlchemySubscriptionMsg
+					// Parse the log event message
 					jsonData, err := json.Marshal(msg)
 					if err != nil {
 						logger.Error("Failed to marshal message: %v", err)
 						continue
 					}
 
-					if err := json.Unmarshal(jsonData, &alcMsg); err != nil {
-						logger.Error("Failed to unmarshal Alchemy message: %v", err)
+					// Track subscription throughput
+					eventCounter++
+
+					// The log subscription directly gives us the log object
+					var subscriptionMsg struct {
+						JSONRPC string `json:"jsonrpc"`
+						Method  string `json:"method"`
+						Params  struct {
+							Subscription string    `json:"subscription"`
+							Result       types.Log `json:"result"`
+						} `json:"params"`
+					}
+
+					// Try to parse as subscription message
+					if err := json.Unmarshal(jsonData, &subscriptionMsg); err != nil {
+						logger.Error("Failed to unmarshal log message as subscription response: %v", err)
 						continue
 					}
 
-					// Process the received transaction
-					if alcMsg.Method == "eth_subscription" && alcMsg.Params.Subscription == subscriptionID {
-						tx := alcMsg.Params.Result.Transaction
+					// Get the log from the subscription
+					vLog := subscriptionMsg.Params.Result
 
-						// Only process transactions to our contract address
-						if common.HexToAddress(tx.To) == l.address {
-							logger.Info("DEPOSIT-SOURCE: Received transaction to contract: %s", tx.Hash)
-							startProcessingTime := time.Now()
+					// Process the received log event
+					if vLog.Address == l.address && len(vLog.Topics) > 0 && vLog.Topics[0] == depositEventID {
+						logger.Info("DEPOSIT-SOURCE: Received log event: txHash=%s blockNumber=%d",
+							vLog.TxHash.Hex(), vLog.BlockNumber)
 
-							// Get the full transaction to decode data
-							actualTx, isPending, err := l.client.TransactionByHash(ctx, common.HexToHash(tx.Hash))
-							if err != nil {
-								logger.Error("Failed to get transaction by hash: %v", err)
-								continue
-							}
+						startProcessingTime := time.Now()
 
-							if isPending {
-								logger.Warn("Transaction is still pending, which is unexpected in mined transactions")
-								continue
-							}
-
-							// Get the block to get the actual block number
-							blockNumInt, ok := new(big.Int).SetString(tx.BlockNumber[2:], 16) // Remove "0x" prefix
-							if !ok {
-								logger.Error("Failed to parse block number: %s", tx.BlockNumber)
-								continue
-							}
-							blockNum := blockNumInt.Uint64()
-
-							// Log block progression
-							if lastProcessedBlock > 0 {
-								blockDiff := blockNum - lastProcessedBlock
-								if blockDiff > 1 {
-									logger.Info("DEPOSIT-SOURCE: Processing block %d (skipped %d blocks since last event)",
-										blockNum, blockDiff-1)
-								} else {
-									logger.Info("DEPOSIT-SOURCE: Processing consecutive block %d", blockNum)
-								}
+						// Log block progression
+						if lastProcessedBlock > 0 {
+							blockDiff := vLog.BlockNumber - lastProcessedBlock
+							if blockDiff > 1 {
+								logger.Info("DEPOSIT-SOURCE: Processing block %d (skipped %d blocks since last event)",
+									vLog.BlockNumber, blockDiff-1)
 							} else {
-								logger.Info("DEPOSIT-SOURCE: Processing first block %d", blockNum)
+								logger.Info("DEPOSIT-SOURCE: Processing consecutive block %d", vLog.BlockNumber)
 							}
-							lastProcessedBlock = blockNum
-
-							// Parse the transaction input data to get the deposit event data
-							depositEvent, err := l.parseTransactionInput(ctx, actualTx, blockNum)
-							if err != nil {
-								logger.Error("Failed to parse transaction input: %v", err)
-								continue
-							}
-
-							// Add the transaction hash to the deposit event
-							depositEvent.TxHash = tx.Hash
-
-							processingTime := time.Since(startProcessingTime)
-							logger.Info("DEPOSIT-SOURCE: Processed deposit event ID %s in %v",
-								depositEvent.DepositId.String(), processingTime)
-
-							// Send the deposit event to the events channel
-							sendStart := time.Now()
-							events <- depositEvent
-							sendTime := time.Since(sendStart)
-
-							if sendTime > 100*time.Millisecond {
-								logger.Warn("DEPOSIT-SOURCE: Slow channel send for ID %s took %v",
-									depositEvent.DepositId.String(), sendTime)
-							}
+						} else {
+							logger.Info("DEPOSIT-SOURCE: Processing first block %d", vLog.BlockNumber)
 						}
+						lastProcessedBlock = vLog.BlockNumber
+
+						// Parse the deposit event directly from the log
+						depositEvent, err := l.parseDepositEvent(vLog)
+						if err != nil {
+							logger.Error("Failed to parse deposit event: %v", err)
+							continue
+						}
+
+						processingTime := time.Since(startProcessingTime)
+						logger.Info("DEPOSIT-SOURCE: Processed deposit event ID %s in %v",
+							depositEvent.DepositId.String(), processingTime)
+
+						// Send the deposit event to the events channel
+						sendStart := time.Now()
+						events <- depositEvent
+						sendTime := time.Since(sendStart)
+
+						if sendTime > 100*time.Millisecond {
+							logger.Warn("DEPOSIT-SOURCE: Slow channel send for ID %s took %v",
+								depositEvent.DepositId.String(), sendTime)
+						}
+					} else {
+						logger.Warn("Received log event that doesn't match our filter criteria, ignoring")
 					}
 				case <-time.After(30 * time.Second):
 					// No message received, check connection health
