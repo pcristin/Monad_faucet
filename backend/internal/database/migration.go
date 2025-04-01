@@ -498,43 +498,102 @@ func (db *DB) RunMigrations(ctx context.Context) error {
 	migrations := []migration{
 		// Add source_chain column to transactions and deposits
 		func(tx *sql.Tx) error {
-			// Add source_chain column to transactions
-			_, err := tx.Exec(`
-				ALTER TABLE transactions
-				ADD COLUMN IF NOT EXISTS source_chain VARCHAR(50) DEFAULT 'Arbitrum'
-			`)
+			// Check if source_chain column exists in transaction_history
+			var columnExistsTxHistory bool
+			err := tx.QueryRow(`
+				SELECT EXISTS (
+					SELECT FROM information_schema.columns 
+					WHERE table_name = 'transaction_history' 
+					AND column_name = 'source_chain'
+				)
+			`).Scan(&columnExistsTxHistory)
 			if err != nil {
-				return fmt.Errorf("failed to add source_chain column to transactions: %w", err)
+				return fmt.Errorf("failed to check if source_chain column exists in transaction_history: %w", err)
 			}
 
-			// Add source_chain column to deposits
+			// Add source_chain column to transaction_history if it doesn't exist
+			if !columnExistsTxHistory {
+				_, err := tx.Exec(`
+					ALTER TABLE transaction_history
+					ADD COLUMN source_chain VARCHAR(50) DEFAULT 'Arbitrum'
+				`)
+				if err != nil {
+					return fmt.Errorf("failed to add source_chain column to transaction_history: %w", err)
+				}
+				logger.Info("Added source_chain column to transaction_history table")
+			} else {
+				logger.Info("source_chain column already exists in transaction_history table")
+			}
+
+			// Check if deposits table exists
+			var depositsTableExists bool
+			err = tx.QueryRow(`
+				SELECT EXISTS (
+					SELECT FROM information_schema.tables 
+					WHERE table_schema = 'public' 
+					AND table_name = 'deposits'
+				)
+			`).Scan(&depositsTableExists)
+			if err != nil {
+				return fmt.Errorf("failed to check if deposits table exists: %w", err)
+			}
+
+			// Only try to modify deposits table if it exists
+			if depositsTableExists {
+				// Check if source_chain column exists in deposits
+				var columnExistsDeposits bool
+				err = tx.QueryRow(`
+					SELECT EXISTS (
+						SELECT FROM information_schema.columns 
+						WHERE table_name = 'deposits' 
+						AND column_name = 'source_chain'
+					)
+				`).Scan(&columnExistsDeposits)
+				if err != nil {
+					return fmt.Errorf("failed to check if source_chain column exists in deposits: %w", err)
+				}
+
+				// Add source_chain column to deposits if it doesn't exist
+				if !columnExistsDeposits {
+					_, err := tx.Exec(`
+						ALTER TABLE deposits
+						ADD COLUMN source_chain VARCHAR(50) DEFAULT 'Arbitrum'
+					`)
+					if err != nil {
+						return fmt.Errorf("failed to add source_chain column to deposits: %w", err)
+					}
+					logger.Info("Added source_chain column to deposits table")
+				} else {
+					logger.Info("source_chain column already exists in deposits table")
+				}
+			}
+
+			// Create index on transaction_history(deposit_id, source_chain) if it doesn't exist
 			_, err = tx.Exec(`
-				ALTER TABLE deposits
-				ADD COLUMN IF NOT EXISTS source_chain VARCHAR(50) DEFAULT 'Arbitrum'
+				CREATE INDEX IF NOT EXISTS idx_transaction_history_deposit_id_source_chain 
+				ON transaction_history(deposit_id, source_chain)
 			`)
 			if err != nil {
-				return fmt.Errorf("failed to add source_chain column to deposits: %w", err)
+				logger.Warn("Failed to create index on transaction_history: %v", err)
+				// Continue despite error, as index creation might fail for various reasons
+			} else {
+				logger.Info("Created index on transaction_history(deposit_id, source_chain)")
 			}
 
-			// Create index on transactions(deposit_id, source_chain) for faster lookups
-			_, err = tx.Exec(`
-				CREATE INDEX IF NOT EXISTS idx_transactions_deposit_id_source_chain 
-				ON transactions(deposit_id, source_chain)
-			`)
-			if err != nil {
-				return fmt.Errorf("failed to create index on transactions: %w", err)
+			// Create index on deposits(deposit_id, source_chain) if the table exists
+			if depositsTableExists {
+				_, err = tx.Exec(`
+					CREATE INDEX IF NOT EXISTS idx_deposits_deposit_id_source_chain 
+					ON deposits(deposit_id, source_chain)
+				`)
+				if err != nil {
+					logger.Warn("Failed to create index on deposits: %v", err)
+					// Continue despite error
+				} else {
+					logger.Info("Created index on deposits(deposit_id, source_chain)")
+				}
 			}
 
-			// Create index on deposits(deposit_id, source_chain) for faster lookups
-			_, err = tx.Exec(`
-				CREATE INDEX IF NOT EXISTS idx_deposits_deposit_id_source_chain 
-				ON deposits(deposit_id, source_chain)
-			`)
-			if err != nil {
-				return fmt.Errorf("failed to create index on deposits: %w", err)
-			}
-
-			logger.Info("Added source_chain column to transactions and deposits tables")
 			return nil
 		},
 	}

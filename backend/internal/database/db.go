@@ -56,6 +56,13 @@ func NewDB(ctx context.Context, dsn string) (*DB, error) {
 		return nil, fmt.Errorf("error migrating schema: %w", err)
 	}
 
+	// Run database migrations for new features
+	if err := wrappedDB.RunMigrations(ctx); err != nil {
+		logger.Error("Error running migrations: %v", err)
+		// We continue even if migrations fail, as the application may still work
+		// Just log the error instead of returning it
+	}
+
 	return wrappedDB, nil
 }
 

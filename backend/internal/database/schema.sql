@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS processing_locks (
 -- Index for quick lookups and expirations
 CREATE INDEX IF NOT EXISTS idx_processing_locks_expires_at ON processing_locks(expires_at);
 
--- Table for storing deposit transactions from Arbitrum
+-- Table for storing deposit transactions from L2 networks (Arbitrum, Base, Optimism)
 CREATE TABLE IF NOT EXISTS deposits (
     id SERIAL PRIMARY KEY,
     deposit_id VARCHAR(100) NOT NULL,
@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS deposits (
     metadata TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    source_chain VARCHAR(50) DEFAULT 'Arbitrum',
     CONSTRAINT deposit_id_unique_deposits UNIQUE (deposit_id)
 );
 
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS transaction_history (
     monad_tx_hash VARCHAR(66),
     refund_tx_hash VARCHAR(66),
     metadata TEXT NOT NULL DEFAULT '',
+    source_chain VARCHAR(50) DEFAULT 'Arbitrum',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -144,12 +146,14 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_deposits_wallet_address ON deposits(wallet_address);
 CREATE INDEX IF NOT EXISTS idx_deposits_tx_hash ON deposits(tx_hash);
 CREATE INDEX IF NOT EXISTS idx_deposits_status ON deposits(status);
+CREATE INDEX IF NOT EXISTS idx_deposits_deposit_id_source_chain ON deposits(deposit_id, source_chain);
 CREATE INDEX IF NOT EXISTS idx_distributions_wallet_address ON distributions(wallet_address);
 CREATE INDEX IF NOT EXISTS idx_distributions_status ON distributions(status);
 CREATE INDEX IF NOT EXISTS idx_distributions_monad_tx_hash ON distributions(monad_tx_hash);
 CREATE INDEX IF NOT EXISTS idx_transaction_history_wallet_address ON transaction_history(wallet_address);
 CREATE INDEX IF NOT EXISTS idx_transaction_history_status ON transaction_history(status);
 CREATE INDEX IF NOT EXISTS idx_transaction_history_created_at ON transaction_history(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_transaction_history_deposit_id_source_chain ON transaction_history(deposit_id, source_chain);
 
 -- Create index for refund_tx_hash
 CREATE INDEX IF NOT EXISTS idx_transaction_history_refund_tx_hash ON transaction_history(refund_tx_hash); 
