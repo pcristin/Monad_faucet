@@ -26,11 +26,20 @@ func (e DepositEvent) String() string {
 	divisor := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil))
 	amount.Quo(amount, divisor)
 
-	return fmt.Sprintf("Deposit: %s %.6f %s (ID: %s, Metadata: %s)",
+	// Get network type info
+	networkName, isTestnet := GetChainInfo(e.Chain)
+	networkType := "Mainnet"
+	if isTestnet {
+		networkType = "Testnet"
+	}
+
+	return fmt.Sprintf("Deposit: %s %.6f %s (ID: %s, Chain: %s-%s, Metadata: %s)",
 		e.Depositor.Hex(),
 		amount,
 		blockchain.CurrencyTypeToString(e.Currency),
 		e.DepositId.String(),
+		networkName,
+		networkType,
 		e.Metadata)
 }
 
@@ -316,6 +325,7 @@ func (l *EventListener) parseDepositEvent(vLog types.Log) (DepositEvent, error) 
 		BlockNumber: raw.BlockNumber,
 		TxHash:      vLog.TxHash.Hex(), // Set transaction hash from the log
 		Metadata:    raw.Metadata,      // Include the metadata in the parsed event
+		Chain:       l.chain,           // Include the chain information
 	}, nil
 }
 

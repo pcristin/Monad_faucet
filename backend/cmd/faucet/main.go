@@ -35,6 +35,29 @@ func main() {
 		logger.Fatal("Configuration validation failed: %v", err)
 	}
 
+	// Determine if we're in production mode
+	isProduction := true
+	if os.Getenv("PRODUCTION") == "false" {
+		isProduction = false
+		logger.Info("Running in STAGING mode - will use testnet networks")
+	} else {
+		logger.Info("Running in PRODUCTION mode - will use mainnet networks")
+	}
+
+	// Set up chain types based on environment
+	var arbChain, baseChain, optimismChain listener.ChainType
+	if isProduction {
+		arbChain = listener.ChainArbitrumMainnet
+		baseChain = listener.ChainBaseMainnet
+		optimismChain = listener.ChainOptimismMainnet
+		logger.Info("Using mainnet networks: Arbitrum, Base, Optimism")
+	} else {
+		arbChain = listener.ChainArbitrumSepolia
+		baseChain = listener.ChainBaseSepolia
+		optimismChain = listener.ChainOptimismSepolia
+		logger.Info("Using testnet networks: Arbitrum Sepolia, Base Sepolia, Optimism Sepolia")
+	}
+
 	// Set production mode for logging if running in production environment
 	if os.Getenv("PRODUCTION") == "true" || os.Getenv("RENDER") == "true" {
 		logger.SetProduction(true)
@@ -72,6 +95,16 @@ func main() {
 		logger.Fatal("Failed to connect to Arbitrum network: %v", err)
 	}
 
+	optimismClient, err := ethclient.Dial(cfg.OptimismRpcURL)
+	if err != nil {
+		logger.Fatal("Failed to connect to Optimism network: %v", err)
+	}
+
+	baseClient, err := ethclient.Dial(cfg.BaseRpcURL)
+	if err != nil {
+		logger.Fatal("Failed to connect to Base network: %v", err)
+	}
+
 	monadClient, err := ethclient.Dial(cfg.MonadRpcURL)
 	if err != nil {
 		logger.Fatal("Failed to connect to Monad network: %v", err)
@@ -86,6 +119,21 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to create Arbitrum depositor: %v", err)
 	}
+
+	optimismDepositor, err := blockchain.NewOptimismDepositor(
+		optimismClient,
+		common.HexToAddress(cfg.OptimismDepositorAddr),
+		privateKey,
+	)
+	if err != nil {
+		logger.Fatal("Failed to create Optimism distributor: %v", err)
+	}
+
+	baseDepositor, err := blockchain.NewBaseDepositor(
+		baseClient,
+		common.HexToAddress(cfg.BaseDepositorAddr),
+		privateKey,
+	)
 
 	monadDistributor, err := blockchain.NewMonadDistributor(
 		monadClient,
@@ -115,6 +163,8 @@ func main() {
 	// Create bridge service
 	bridgeService := bridge.NewBridgeService(
 		arbDepositor,
+		optimismDepositor,
+		baseDepositor,
 		monadDistributor,
 		db,
 	)
@@ -133,38 +183,74 @@ func main() {
 
 	// Create event listener for Arbitrum deposits
 	logger.Info("Creating event listener for Arbitrum deposits with contract address: %s", cfg.ArbDepositorAddr)
-	listener, err := listener.NewEventListener(cfg.ArbRpcURL, common.HexToAddress(cfg.ArbDepositorAddr))
+	arbListener, err := listener.NewEventListener(cfg.ArbRpcURL, common.HexToAddress(cfg.ArbDepositorAddr), arbChain)
 	if err != nil {
-		logger.Fatal("Failed to create event listener: %v", err)
+		logger.Fatal("Failed to create Arbitrum event listener: %v", err)
 	}
-	defer listener.Close()
+	defer arbListener.Close()
 
-	// Start listening for deposit events
-	go func() {
-		logger.Info("Starting to listen for deposit events from Arbitrum contract: %s", cfg.ArbDepositorAddr)
-		// Get deposit events channel
-		depositChan, errChan := listener.ListenToDeposits(ctx)
+	// Create event listeners for Base and Optimism if configured
+	var baseListener, optimismListener *listener.EventListener
 
-		// Process deposit events
-		for {
-			select {
-			case deposit := <-depositChan:
-				logger.Info("Deposit event received: ID=%s, Amount=%s, Wallet=%s, Currency=%s",
-					deposit.DepositId.String(), deposit.Amount.String(), deposit.Depositor.Hex(),
-					blockchain.CurrencyTypeToString(deposit.Currency))
-
-				// Forward the deposit to the bridge service for processing
-				logger.Info("Forwarding deposit ID=%s to bridge service for immediate database recording and processing",
-					deposit.DepositId.String())
-				bridgeService.HandleDeposit(deposit)
-
-			case err := <-errChan:
-				logger.Error("Error listening for deposits: %v", err)
-			case <-ctx.Done():
-				return
-			}
+	if cfg.BaseRpcURL != "" && cfg.BaseDepositorAddr != "" {
+		logger.Info("Creating event listener for Base deposits with contract address: %s", cfg.BaseDepositorAddr)
+		baseListener, err = listener.NewEventListener(cfg.BaseRpcURL, common.HexToAddress(cfg.BaseDepositorAddr), baseChain)
+		if err != nil {
+			logger.Fatal("Failed to create Base event listener: %v", err)
 		}
-	}()
+		defer baseListener.Close()
+	}
+
+	if cfg.OptimismRpcURL != "" && cfg.OptimismDepositorAddr != "" {
+		logger.Info("Creating event listener for Optimism deposits with contract address: %s", cfg.OptimismDepositorAddr)
+		optimismListener, err = listener.NewEventListener(cfg.OptimismRpcURL, common.HexToAddress(cfg.OptimismDepositorAddr), optimismChain)
+		if err != nil {
+			logger.Fatal("Failed to create Optimism event listener: %v", err)
+		}
+		defer optimismListener.Close()
+	}
+
+	// Log network status for all configured networks
+	networkUrls := map[string]string{
+		"Arbitrum": cfg.ArbRpcURL,
+		"Base":     cfg.BaseRpcURL,
+		"Optimism": cfg.OptimismRpcURL,
+		"Monad":    cfg.MonadRpcURL,
+	}
+
+	contractAddresses := map[string]string{
+		"Arbitrum_Depositor": cfg.ArbDepositorAddr,
+		"Base_Depositor":     cfg.BaseDepositorAddr,
+		"Optimism_Depositor": cfg.OptimismDepositorAddr,
+		"Monad_Distributor":  cfg.MonadDistributorAddr,
+	}
+
+	// Log environment and network type information
+	logger.Info("=== Environment Configuration ===")
+	if isProduction {
+		logger.Info("Environment: PRODUCTION - Using mainnet networks")
+	} else {
+		logger.Info("Environment: STAGING - Using testnet networks")
+	}
+	logger.Info("Arbitrum chain: %s", listener.ChainTypeToString(arbChain))
+	logger.Info("Base chain: %s", listener.ChainTypeToString(baseChain))
+	logger.Info("Optimism chain: %s", listener.ChainTypeToString(optimismChain))
+
+	// Log status of all configured networks and contracts
+	blockchain.LogNetworkStatus(networkUrls, contractAddresses)
+
+	// Start listening for deposit events from Arbitrum
+	go startListener(ctx, arbListener, bridgeService, "Arbitrum")
+
+	// Start listening for deposit events from Base if configured
+	if baseListener != nil {
+		go startListener(ctx, baseListener, bridgeService, "Base")
+	}
+
+	// Start listening for deposit events from Optimism if configured
+	if optimismListener != nil {
+		go startListener(ctx, optimismListener, bridgeService, "Optimism")
+	}
 
 	// Create API server
 	router := gin.Default()
@@ -210,4 +296,45 @@ func main() {
 	bridgeService.GracefulShutdown(shutdownCtx)
 
 	logger.Info("Server exited properly")
+}
+
+// Helper function to start a listener
+func startListener(ctx context.Context, eventListener *listener.EventListener, bridgeService *bridge.BridgeService, chainName string) {
+	chain := eventListener.GetChain()
+	networkName, isTestnet := listener.GetChainInfo(chain)
+	networkType := "Mainnet"
+	if isTestnet {
+		networkType = "Testnet"
+	}
+
+	logger.Info("Starting to listen for deposit events from %s-%s contract", networkName, networkType)
+
+	// Get deposit events channel
+	depositChan, errChan := eventListener.ListenToDeposits(ctx)
+
+	// Process deposit events
+	for {
+		select {
+		case deposit := <-depositChan:
+			networkName, isTestnet := listener.GetChainInfo(deposit.Chain)
+			networkLabel := networkName
+			if isTestnet {
+				networkLabel = networkName + "-Testnet"
+			}
+
+			logger.Info("[%s] Deposit event received: ID=%s, Amount=%s, Wallet=%s, Currency=%s",
+				networkLabel, deposit.DepositId.String(), deposit.Amount.String(), deposit.Depositor.Hex(),
+				blockchain.CurrencyTypeToString(deposit.Currency))
+
+			// Forward the deposit to the bridge service for processing
+			logger.Info("[%s] Forwarding deposit ID=%s to bridge service for immediate database recording and processing",
+				networkLabel, deposit.DepositId.String())
+			bridgeService.HandleDeposit(deposit)
+
+		case err := <-errChan:
+			logger.Error("[%s-%s] Error listening for deposits: %v", networkName, networkType, err)
+		case <-ctx.Done():
+			return
+		}
+	}
 }

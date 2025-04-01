@@ -22,7 +22,14 @@ import (
 // processDeposit processes a single deposit event.
 func (s *BridgeService) processDeposit(event listener.DepositEvent) error {
 	startTime := time.Now()
-	logger.Info("Starting deposit processing for ID %s, amount %s", event.DepositId.String(), event.Amount.String())
+	networkName, isTestnet := listener.GetChainInfo(event.Chain)
+	networkType := "Mainnet"
+	if isTestnet {
+		networkType = "Testnet"
+	}
+
+	logger.Info("Starting deposit processing for ID %s, amount %s from chain %s-%s",
+		event.DepositId.String(), event.Amount.String(), networkName, networkType)
 
 	// Check if we've already processed this deposit
 	alreadyProcessing := s.isProcessingDeposit(event.DepositId)
@@ -47,11 +54,12 @@ func (s *BridgeService) processDeposit(event listener.DepositEvent) error {
 	}
 
 	// Log the deposit details
-	logger.Info("Processing deposit %s from wallet %s, amount %s, currency %s",
+	logger.Info("Processing deposit %s from wallet %s, amount %s, currency %s, chain %s-%s",
 		event.DepositId.String(),
 		event.Depositor.Hex(),
 		event.Amount.String(),
-		blockchain.CurrencyTypeToString(event.Currency))
+		blockchain.CurrencyTypeToString(event.Currency),
+		networkName, networkType)
 
 	// Get bridge state
 	logger.Debug("Getting bridge state for deposit ID %s", event.DepositId.String())
@@ -221,8 +229,15 @@ func (s *BridgeService) ensureTransactionRecord(event listener.DepositEvent, mon
 	}
 
 	// Create a new transaction record
-	logger.Debug("Creating new transaction record for deposit ID %s from wallet %s, amount %s, metadata: '%s'",
-		event.DepositId.String(), event.Depositor.Hex(), event.Amount.String(), event.Metadata)
+	networkName, isTestnet := listener.GetChainInfo(event.Chain)
+	networkType := "Mainnet"
+	if isTestnet {
+		networkType = "Testnet"
+	}
+
+	logger.Debug("Creating new transaction record for deposit ID %s from wallet %s, amount %s, chain %s-%s, metadata: '%s'",
+		event.DepositId.String(), event.Depositor.Hex(), event.Amount.String(),
+		networkName, networkType, event.Metadata)
 
 	txRecord := &database.Transaction{
 		DepositID:     event.DepositId,

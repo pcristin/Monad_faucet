@@ -10,20 +10,24 @@ import (
 
 // Config holds all application configuration
 type Config struct {
-	ServerAddr           string           // HTTP server address with port
-	DatabaseURL          string           // PostgreSQL connection string
-	ArbRpcURL            string           // Arbitrum RPC URL
-	MonadRpcURL          string           // Monad RPC URL
-	ArbDepositorAddr     string           // Arbitrum depositor contract address
-	MonadDistributorAddr string           // Monad distributor contract address
-	ChainlinkEthUsdFeed  string           // Chainlink ETH/USD price feed contract address
-	WalletPrivateKey     string           // Private key for transaction signing
-	AdminAPIKeys         []string         // API keys for admin endpoints
-	AdminPasswords       []string         // Passwords for admin auth
-	LogLevel             string           // Logging level
-	WorkerPoolConfig     WorkerPoolConfig // Configuration for worker pools
-	UseWebhook           bool             // Flag to use webhooks for distribution events instead of polling
-	WebhookProvider      string           // Which webhook provider to use ("quicknode" or "alchemy")
+	ServerAddr            string           // HTTP server address with port
+	DatabaseURL           string           // PostgreSQL connection string
+	ArbRpcURL             string           // Arbitrum RPC URL
+	MonadRpcURL           string           // Monad RPC URL
+	ArbDepositorAddr      string           // Arbitrum depositor contract address
+	BaseRpcURL            string           // Base RPC URL
+	BaseDepositorAddr     string           // Base depositor contract address
+	OptimismRpcURL        string           // Optimism RPC URL
+	OptimismDepositorAddr string           // Optimism depositor contract address
+	MonadDistributorAddr  string           // Monad distributor contract address
+	ChainlinkEthUsdFeed   string           // Chainlink ETH/USD price feed contract address
+	WalletPrivateKey      string           // Private key for transaction signing
+	AdminAPIKeys          []string         // API keys for admin endpoints
+	AdminPasswords        []string         // Passwords for admin auth
+	LogLevel              string           // Logging level
+	WorkerPoolConfig      WorkerPoolConfig // Configuration for worker pools
+	UseWebhook            bool             // Flag to use webhooks for distribution events instead of polling
+	WebhookProvider       string           // Which webhook provider to use ("quicknode" or "alchemy")
 }
 
 // WorkerPoolConfig holds configuration for all worker pools
@@ -115,20 +119,6 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// Admin passwords
-	adminPasswords := []string{
-		getEnvOrDefault("ADMIN_PASSWORD_1", ""),
-		getEnvOrDefault("ADMIN_PASSWORD_2", ""), // Optional second password
-	}
-
-	// Filter out empty passwords
-	var filteredPasswords []string
-	for _, pw := range adminPasswords {
-		if pw != "" {
-			filteredPasswords = append(filteredPasswords, pw)
-		}
-	}
-
 	// Get webhook configuration
 	useWebhook := getEnvAsBoolOrDefault("USE_WEBHOOK", false)
 
@@ -147,17 +137,20 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		ServerAddr:           serverAddr,
-		DatabaseURL:          dbURL,
-		ArbRpcURL:            getEnvOrFatal("ARB_RPC_URL"),
-		MonadRpcURL:          getEnvOrFatal("MONAD_RPC_URL"),
-		ArbDepositorAddr:     getEnvOrDefault("ARB_DEPOSITOR_ADDRESS", "0x487177C3278FAA36dd317DBB4CA97425a4F4Ee31"),
-		MonadDistributorAddr: getEnvOrDefault("MONAD_DISTRIBUTOR_ADDRESS", "0xc11350Fd29aC48181b0117bd1935dBE781cdd03d"),
-		ChainlinkEthUsdFeed:  getEnvOrDefault("CHAINLINK_ETH_USD_FEED", "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612"),
-		WalletPrivateKey:     strings.TrimPrefix(getEnvOrFatal("WALLET_PRIVATE_KEY"), "0x"),
-		AdminAPIKeys:         filteredAPIKeys,
-		AdminPasswords:       filteredPasswords,
-		LogLevel:             getEnvOrDefault("LOG_LEVEL", "info"),
+		ServerAddr:            serverAddr,
+		DatabaseURL:           dbURL,
+		ArbRpcURL:             getEnvOrFatal("ARB_RPC_URL"),
+		MonadRpcURL:           getEnvOrFatal("MONAD_RPC_URL"),
+		ArbDepositorAddr:      getEnvOrDefault("ARB_DEPOSITOR_ADDRESS", "0x487177C3278FAA36dd317DBB4CA97425a4F4Ee31"),
+		BaseRpcURL:            getEnvOrDefault("BASE_RPC_URL", ""),               // Optional, empty if not provided
+		BaseDepositorAddr:     getEnvOrDefault("BASE_DEPOSITOR_ADDRESS", ""),     // Optional
+		OptimismRpcURL:        getEnvOrDefault("OPTIMISM_RPC_URL", ""),           // Optional
+		OptimismDepositorAddr: getEnvOrDefault("OPTIMISM_DEPOSITOR_ADDRESS", ""), // Optional
+		MonadDistributorAddr:  getEnvOrDefault("MONAD_DISTRIBUTOR_ADDRESS", "0xc11350Fd29aC48181b0117bd1935dBE781cdd03d"),
+		ChainlinkEthUsdFeed:   getEnvOrDefault("CHAINLINK_ETH_USD_FEED", "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612"),
+		WalletPrivateKey:      strings.TrimPrefix(getEnvOrFatal("WALLET_PRIVATE_KEY"), "0x"),
+		AdminAPIKeys:          filteredAPIKeys,
+		LogLevel:              getEnvOrDefault("LOG_LEVEL", "info"),
 		WorkerPoolConfig: WorkerPoolConfig{
 			DepositWorkers:      depositWorkers,
 			CalculationWorkers:  calculationWorkers,

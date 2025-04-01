@@ -246,6 +246,42 @@ func NewArbitrumDepositor(client *ethclient.Client, address common.Address, priv
 	}, nil
 }
 
+// NewOptimismDepositor creates a new instance of OptimismDepositor
+func NewOptimismDepositor(client *ethclient.Client, address common.Address, privateKey *ecdsa.PrivateKey) (*OptimismDepositor, error) {
+	boundContract := bind.NewBoundContract(address, DepositorABI, client, client, client)
+
+	// Get chain ID
+	chainID, err := client.ChainID(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get chain ID: %v", err)
+	}
+	return &OptimismDepositor{
+		Client:        client,
+		Address:       address,
+		ChainID:       chainID,
+		PrivateKey:    privateKey,
+		BoundContract: boundContract,
+	}, nil
+}
+
+// NewBaseDepositor creates a new instance of BaseDepositor
+func NewBaseDepositor(client *ethclient.Client, address common.Address, privateKey *ecdsa.PrivateKey) (*BaseDepositor, error) {
+	boundContract := bind.NewBoundContract(address, DepositorABI, client, client, client)
+
+	// Get chain ID
+	chainID, err := client.ChainID(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get chain ID: %v", err)
+	}
+	return &BaseDepositor{
+		Client:        client,
+		Address:       address,
+		ChainID:       chainID,
+		PrivateKey:    privateKey,
+		BoundContract: boundContract,
+	}, nil
+}
+
 // NewMonadDistributor creates a new instance of MonadDistributor
 func NewMonadDistributor(client *ethclient.Client, address common.Address, privateKey *ecdsa.PrivateKey) (*MonadDistributor, error) {
 	boundContract := bind.NewBoundContract(address, DistributorABI, client, client, client)

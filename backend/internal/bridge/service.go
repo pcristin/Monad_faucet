@@ -125,8 +125,15 @@ func (s *BridgeService) recordDepositImmediately(event listener.DepositEvent) er
 	}
 
 	// Write to database
-	logger.Info("Immediately recording deposit ID %s from wallet %s, amount %s, tx %s, metadata: '%s'",
-		event.DepositId.String(), event.Depositor.Hex(), event.Amount.String(), event.TxHash, event.Metadata)
+	networkName, isTestnet := listener.GetChainInfo(event.Chain)
+	networkType := "Mainnet"
+	if isTestnet {
+		networkType = "Testnet"
+	}
+
+	logger.Info("Immediately recording deposit ID %s from wallet %s, amount %s, tx %s, chain %s-%s, metadata: '%s'",
+		event.DepositId.String(), event.Depositor.Hex(), event.Amount.String(), event.TxHash,
+		networkName, networkType, event.Metadata)
 
 	if err := s.db.CreateDeposit(deposit); err != nil {
 		return fmt.Errorf("failed to create immediate deposit record: %w", err)

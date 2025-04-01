@@ -43,6 +43,24 @@ type ArbitrumDepositor struct {
 	*bind.BoundContract
 }
 
+// OptimismDepositor represents the Optimism depositor contract
+type OptimismDepositor struct {
+	Client     *ethclient.Client
+	Address    common.Address
+	ChainID    *big.Int
+	PrivateKey *ecdsa.PrivateKey
+	*bind.BoundContract
+}
+
+// BaseDepositor represents the Base depositor contract
+type BaseDepositor struct {
+	Client     *ethclient.Client
+	Address    common.Address
+	ChainID    *big.Int
+	PrivateKey *ecdsa.PrivateKey
+	*bind.BoundContract
+}
+
 // MonadDistributor represents the Monad distributor contract
 type MonadDistributor struct {
 	Client     *ethclient.Client

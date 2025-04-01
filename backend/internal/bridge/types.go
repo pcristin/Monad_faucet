@@ -18,6 +18,8 @@ import (
 type BridgeService struct {
 	arbDepositor        *blockchain.ArbitrumDepositor
 	monadDistributor    *blockchain.MonadDistributor
+	optimismDepositor   *blockchain.OptimismDepositor
+	baseDepositor       *blockchain.BaseDepositor
 	depositChan         chan listener.DepositEvent
 	refundChan          chan *big.Int
 	wg                  sync.WaitGroup
@@ -43,6 +45,8 @@ type BridgeService struct {
 // NewBridgeService creates a new instance of BridgeService.
 func NewBridgeService(
 	arbDepositor *blockchain.ArbitrumDepositor,
+	optimismDepositor *blockchain.OptimismDepositor,
+	baseDepositor *blockchain.BaseDepositor,
 	monadDistributor *blockchain.MonadDistributor,
 	db *database.DB,
 ) *BridgeService {
@@ -50,6 +54,8 @@ func NewBridgeService(
 	instanceID := fmt.Sprintf("instance-%d", time.Now().UnixNano())
 	return &BridgeService{
 		arbDepositor:        arbDepositor,
+		optimismDepositor:   optimismDepositor,
+		baseDepositor:       baseDepositor,
 		monadDistributor:    monadDistributor,
 		depositChan:         make(chan listener.DepositEvent, 1000),
 		refundChan:          make(chan *big.Int, 1000),
@@ -72,11 +78,4 @@ func (s *BridgeService) SetWebhookConfig(useWebhook bool, provider string) {
 	s.UseWebhook = useWebhook
 	s.WebhookProvider = provider
 	logger.Info("Webhook configuration: enabled=%v, provider=%s", useWebhook, provider)
-}
-
-// SetUseQuickNodeWebhook sets the UseQuickNodeWebhook flag (deprecated, use SetWebhookConfig instead)
-func (s *BridgeService) SetUseQuickNodeWebhook(useWebhook bool) {
-	s.UseWebhook = useWebhook
-	s.WebhookProvider = "quicknode"
-	logger.Info("QuickNode webhook for distribution events: %v (legacy method)", useWebhook)
 }
