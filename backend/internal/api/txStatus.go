@@ -59,13 +59,13 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 
 	// Map chain names to chainIDs
 	chainIDMap := map[string]int{
-		"Arbitrum":        42161,  // Arbitrum chainID
-		"ArbitrumSepolia": 421611, // Arbitrum Sepolia chainID
-		"Base":            8453,   // Base chainID
-		"BaseSepolia":     84532,  // Base Sepolia chainID
-		"Optimism":        10,     // Optimism chainID
-		"OptimismSepolia": 101,    // Optimism Sepolia chainID
-		"Monad":           20482,  // Monad chainID (used as destination)
+		"Arbitrum":        42161,    // Arbitrum chainID
+		"ArbitrumSepolia": 421614,   // Arbitrum Sepolia chainID
+		"Base":            8453,     // Base chainID
+		"BaseSepolia":     84532,    // Base Sepolia chainID
+		"Optimism":        10,       // Optimism chainID
+		"OptimismSepolia": 11155420, // Optimism Sepolia chainID
+		"Monad":           20482,    // Monad chainID (used as destination)
 	}
 
 	// Helper function to create response
