@@ -26,12 +26,13 @@ func (s *BridgeService) validateDepositWithAmount(state *blockchain.ContractStat
 	oneHundredMon := new(big.Int).Mul(big.NewInt(100), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 	if state.MonBalance.Cmp(monAmount) < 0 || state.MonBalance.Cmp(oneHundredMon) < 0 {
 		// Call PauseDeposits to prevent further deposits due to low MON balance
+		// This will pause Arbitrum first and then sync to other chains
 		ctx := context.Background()
 		if err := s.PauseDeposits(ctx); err != nil {
-			logger.Error("Failed to pause deposits: %v", err)
+			logger.Error("Failed to pause deposits due to low MON balance: %v", err)
 			// Continue with the error return below, but log the failure
 		} else {
-			logger.Info("Paused deposits due to low MON balance")
+			logger.Info("Paused deposits due to low MON balance (starting with Arbitrum)")
 		}
 		return fmt.Errorf("insufficient MON balance in distributor")
 	}

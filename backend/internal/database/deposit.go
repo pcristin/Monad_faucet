@@ -114,10 +114,10 @@ func (db *DB) UpdateDepositStatus(depositID *big.Int, status string) error {
 			return fmt.Errorf("deposit does not exist and could not create: %w", txErr)
 		}
 
-		// Create the deposit record with data from the transaction
+		// Create the deposit record with data from the transaction, including source_chain
 		_, err = tx.Exec(
-			`INSERT INTO deposits (deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata, created_at, updated_at) 
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			`INSERT INTO deposits (deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata, source_chain, created_at, updated_at) 
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 			depositIDStr,
 			txData.WalletAddress.Hex(),
 			txData.Amount.String(),
@@ -125,7 +125,8 @@ func (db *DB) UpdateDepositStatus(depositID *big.Int, status string) error {
 			txData.TxHash,
 			0, // We don't know the block number here
 			status,
-			txData.Metadata, // No metadata available from transaction record
+			txData.Metadata.String, // Use metadata from transaction record
+			txData.SourceChain,     // Copy source_chain from transaction
 			time.Now(),
 			time.Now(),
 		)
@@ -135,7 +136,8 @@ func (db *DB) UpdateDepositStatus(depositID *big.Int, status string) error {
 			return fmt.Errorf("failed to create deposit: %w", err)
 		}
 
-		logger.Info("Successfully created deposit record with ID %s and status %s", depositIDStr, status)
+		logger.Info("Successfully created deposit record with ID %s, status %s, chain %s",
+			depositIDStr, status, txData.SourceChain)
 
 		// Commit the transaction
 		if err = tx.Commit(); err != nil {
@@ -146,27 +148,66 @@ func (db *DB) UpdateDepositStatus(depositID *big.Int, status string) error {
 		return nil
 	}
 
-	// Deposit exists, update its status
-	result, err := tx.Exec(
-		"UPDATE deposits SET status = $1, updated_at = $2 WHERE deposit_id = $3",
-		status,
-		time.Now(),
-		depositIDStr,
-	)
+	// For existing deposits, check if we need to update the source_chain from transaction_history
+	var updateSourceChain bool
+	var txSourceChain string
 
-	if err != nil {
-		logger.Error("Failed to update deposit status: %v", err)
-		return fmt.Errorf("failed to update deposit status: %w", err)
-	}
+	// Check if transaction_history has a different source_chain than deposits
+	err = tx.QueryRow(`
+		SELECT t.source_chain, 
+			CASE WHEN (t.source_chain IS NOT NULL AND d.source_chain != t.source_chain) 
+				OR d.source_chain IS NULL THEN true ELSE false END
+		FROM transaction_history t
+		JOIN deposits d ON t.deposit_id = d.deposit_id
+		WHERE t.deposit_id = $1
+	`, depositIDStr).Scan(&txSourceChain, &updateSourceChain)
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		logger.Error("Error getting rows affected: %v", err)
-	} else if rowsAffected == 0 {
-		logger.Warn("No rows affected when updating deposit status for ID %s", depositIDStr)
+	// Only proceed with source_chain check if the query was successful
+	if err == nil && updateSourceChain && txSourceChain != "" {
+		logger.Info("Updating deposit source_chain from %s to %s for ID %s",
+			"unknown/different", txSourceChain, depositIDStr)
+
+		// Update both status and source_chain
+		result, err := tx.Exec(
+			"UPDATE deposits SET status = $1, source_chain = $2, updated_at = $3 WHERE deposit_id = $4",
+			status,
+			txSourceChain,
+			time.Now(),
+			depositIDStr,
+		)
+
+		if err != nil {
+			logger.Error("Failed to update deposit status and source_chain: %v", err)
+			return fmt.Errorf("failed to update deposit: %w", err)
+		}
+
+		rowsAffected, _ := result.RowsAffected()
+		logger.Info("Successfully updated status and source_chain for deposit ID %s (%d rows affected)",
+			depositIDStr, rowsAffected)
+
 	} else {
-		logger.Info("Successfully updated status for deposit ID %s to %s (%d rows affected)",
-			depositIDStr, status, rowsAffected)
+		// Just update status (standard path)
+		result, err := tx.Exec(
+			"UPDATE deposits SET status = $1, updated_at = $2 WHERE deposit_id = $3",
+			status,
+			time.Now(),
+			depositIDStr,
+		)
+
+		if err != nil {
+			logger.Error("Failed to update deposit status: %v", err)
+			return fmt.Errorf("failed to update deposit status: %w", err)
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			logger.Error("Error getting rows affected: %v", err)
+		} else if rowsAffected == 0 {
+			logger.Warn("No rows affected when updating deposit status for ID %s", depositIDStr)
+		} else {
+			logger.Info("Successfully updated status for deposit ID %s to %s (%d rows affected)",
+				depositIDStr, status, rowsAffected)
+		}
 	}
 
 	// Commit the transaction

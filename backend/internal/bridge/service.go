@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -44,6 +45,10 @@ func (s *BridgeService) Start() error {
 	// Start recovery process for stuck transactions
 	s.wg.Add(1)
 	go s.recoverStuckTransactionsPeriodically()
+
+	// Start periodic chain state synchronization to keep all chains in sync with Arbitrum
+	s.wg.Add(1)
+	go s.syncChainStatesPeriodically()
 
 	logger.Info("Bridge service started successfully, all processors running")
 	return nil
@@ -177,9 +182,18 @@ func (s *BridgeService) recordDepositImmediately(event listener.DepositEvent) er
 	return nil
 }
 
-// GetState returns the current state of both contracts.
+// GetState returns the current state of the contracts.
 func (s *BridgeService) GetState(ctx context.Context) (*blockchain.ContractState, error) {
-	return blockchain.GetContractState(ctx, s.arbDepositor, s.monadDistributor)
+	// Get state from Arbitrum - this is the main/leader contract
+	state, err := blockchain.GetContractState(ctx, s.arbDepositor, s.monadDistributor)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Arbitrum contract state: %w", err)
+	}
+
+	// We only consider Arbitrum's pause status as the authoritative state
+	// No need to check other chains, as they should follow Arbitrum's state
+
+	return state, nil
 }
 
 //
@@ -190,6 +204,19 @@ func (s *BridgeService) CheckBlockchainConnections() error {
 	if _, err := s.arbDepositor.Client.BlockNumber(context.Background()); err != nil {
 		return fmt.Errorf("arbitrum connection failed: %w", err)
 	}
+
+	if s.baseDepositor != nil {
+		if _, err := s.baseDepositor.Client.BlockNumber(context.Background()); err != nil {
+			return fmt.Errorf("base connection failed: %w", err)
+		}
+	}
+
+	if s.optimismDepositor != nil {
+		if _, err := s.optimismDepositor.Client.BlockNumber(context.Background()); err != nil {
+			return fmt.Errorf("optimism connection failed: %w", err)
+		}
+	}
+
 	if _, err := s.monadDistributor.Client.BlockNumber(context.Background()); err != nil {
 		return fmt.Errorf("monad connection failed: %w", err)
 	}
@@ -220,6 +247,38 @@ func (s *BridgeService) GetArbitrumClient() *ethclient.Client {
 // GetArbitrumContractAddress returns the Arbitrum contract address.
 func (s *BridgeService) GetArbitrumContractAddress() common.Address {
 	return s.arbDepositor.Address
+}
+
+// GetBaseClient returns the Base blockchain client.
+func (s *BridgeService) GetBaseClient() *ethclient.Client {
+	if s.baseDepositor == nil {
+		return nil
+	}
+	return s.baseDepositor.Client
+}
+
+// GetBaseContractAddress returns the Base contract address.
+func (s *BridgeService) GetBaseContractAddress() common.Address {
+	if s.baseDepositor == nil {
+		return common.Address{}
+	}
+	return s.baseDepositor.Address
+}
+
+// GetOptimismClient returns the Optimism blockchain client.
+func (s *BridgeService) GetOptimismClient() *ethclient.Client {
+	if s.optimismDepositor == nil {
+		return nil
+	}
+	return s.optimismDepositor.Client
+}
+
+// GetOptimismContractAddress returns the Optimism contract address.
+func (s *BridgeService) GetOptimismContractAddress() common.Address {
+	if s.optimismDepositor == nil {
+		return common.Address{}
+	}
+	return s.optimismDepositor.Address
 }
 
 // GetMonadClient returns the Monad blockchain client.
@@ -369,4 +428,36 @@ func (s *BridgeService) UpdateTransactionStatus(ctx context.Context, depositID *
 	}
 
 	return nil
+}
+
+// syncChainStatesPeriodically periodically synchronizes the pause state across all chains.
+// It ensures all chains follow the Arbitrum contract's pause state.
+func (s *BridgeService) syncChainStatesPeriodically() {
+	defer s.wg.Done()
+
+	// Perform initial synchronization at startup
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := s.SyncDepositorPauseStates(ctx); err != nil {
+		logger.Error("Initial chain state synchronization failed: %v", err)
+	}
+	cancel()
+
+	// Synchronize chain states every 30 seconds
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			logger.Debug("Performing periodic chain state synchronization")
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := s.SyncDepositorPauseStates(ctx); err != nil {
+				logger.Error("Chain state synchronization failed: %v", err)
+			}
+			cancel()
+		case <-s.ctx.Done():
+			logger.Debug("Chain state synchronization stopped")
+			return
+		}
+	}
 }
