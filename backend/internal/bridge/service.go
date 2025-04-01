@@ -442,7 +442,7 @@ func (s *BridgeService) syncChainStatesPeriodically() {
 	}
 	cancel()
 
-	// Synchronize chain states every 5 minutes
+	// Synchronize chain states every five minutes
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
