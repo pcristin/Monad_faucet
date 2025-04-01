@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -26,6 +27,9 @@ type MigrationRecord struct {
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
+
+// Define a migration function type
+type migration func(tx *sql.Tx) error
 
 // SchemaMigration performs the migration from the old schema to the new schema.
 func (db *DB) SchemaMigration() error {
@@ -484,5 +488,81 @@ func (db *DB) addRefundTxHashColumn() error {
 	}
 
 	logger.Info("Successfully deduplicated transaction records and added unique constraint")
+	return nil
+}
+
+// RunMigrations performs all database migrations
+func (db *DB) RunMigrations(ctx context.Context) error {
+	logger.Info("Running database migrations...")
+
+	migrations := []migration{
+		// Add source_chain column to transactions and deposits
+		func(tx *sql.Tx) error {
+			// Add source_chain column to transactions
+			_, err := tx.Exec(`
+				ALTER TABLE transactions
+				ADD COLUMN IF NOT EXISTS source_chain VARCHAR(50) DEFAULT 'Arbitrum'
+			`)
+			if err != nil {
+				return fmt.Errorf("failed to add source_chain column to transactions: %w", err)
+			}
+
+			// Add source_chain column to deposits
+			_, err = tx.Exec(`
+				ALTER TABLE deposits
+				ADD COLUMN IF NOT EXISTS source_chain VARCHAR(50) DEFAULT 'Arbitrum'
+			`)
+			if err != nil {
+				return fmt.Errorf("failed to add source_chain column to deposits: %w", err)
+			}
+
+			// Create index on transactions(deposit_id, source_chain) for faster lookups
+			_, err = tx.Exec(`
+				CREATE INDEX IF NOT EXISTS idx_transactions_deposit_id_source_chain 
+				ON transactions(deposit_id, source_chain)
+			`)
+			if err != nil {
+				return fmt.Errorf("failed to create index on transactions: %w", err)
+			}
+
+			// Create index on deposits(deposit_id, source_chain) for faster lookups
+			_, err = tx.Exec(`
+				CREATE INDEX IF NOT EXISTS idx_deposits_deposit_id_source_chain 
+				ON deposits(deposit_id, source_chain)
+			`)
+			if err != nil {
+				return fmt.Errorf("failed to create index on deposits: %w", err)
+			}
+
+			logger.Info("Added source_chain column to transactions and deposits tables")
+			return nil
+		},
+	}
+
+	// Execute each migration in a separate transaction
+	for i, m := range migrations {
+		logger.Info("Running migration %d...", i+1)
+
+		// Begin a transaction
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction for migration %d: %w", i+1, err)
+		}
+
+		// Execute the migration
+		if err := m(tx); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migration %d failed: %w", i+1, err)
+		}
+
+		// Commit the transaction
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction for migration %d: %w", i+1, err)
+		}
+
+		logger.Info("Migration %d completed successfully", i+1)
+	}
+
+	logger.Info("All migrations completed successfully")
 	return nil
 }

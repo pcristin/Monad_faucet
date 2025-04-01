@@ -77,27 +77,33 @@ func (s *BridgeService) HandleDeposit(event listener.DepositEvent) {
 		logger.Error("Failed to immediately record deposit %s: %v", event.DepositId.String(), err)
 	}
 
+	// Get combined deposit ID for logging and processing
+	combinedDepositID := listener.GenerateCombinedDepositID(event.Chain, event.DepositId)
+	networkName, _ := listener.GetChainInfo(event.Chain)
+
 	// Then handle the full processing through the appropriate channel
 	// Check if we're using the worker manager or the direct channel approach
 	if wm := s.GetWorkerManager(); wm != nil {
 		// For worker manager, we need to provide a meaningful task implementation
 		// Since DepositTask.Process() is empty, we're bypassing that worker pool
 		// and directly queuing the event to the deposit channel for processing
-		logger.Debug("Queueing deposit ID %s for full processing", event.DepositId.String())
+		logger.Debug("Queueing deposit ID %s (%s chain) for full processing",
+			combinedDepositID.String(), networkName)
 
 		// Using a separate goroutine to avoid blocking the event listener
 		go func() {
 			select {
 			case s.depositChan <- event:
-				logger.Debug("Successfully queued deposit ID %s to processing channel", event.DepositId.String())
+				logger.Debug("Successfully queued deposit ID %s to processing channel",
+					combinedDepositID.String())
 			default:
 				logger.Error("Deposit processing channel full, deposit ID %s may not be processed",
-					event.DepositId.String())
+					combinedDepositID.String())
 			}
 		}()
 	} else {
 		// Direct channel approach (fallback)
-		logger.Debug("Using direct channel for deposit ID %s", event.DepositId.String())
+		logger.Debug("Using direct channel for deposit ID %s", combinedDepositID.String())
 		s.depositChan <- event
 	}
 }
@@ -105,16 +111,23 @@ func (s *BridgeService) HandleDeposit(event listener.DepositEvent) {
 // recordDepositImmediately creates a deposit record in the database as soon as an event is detected
 // This ensures we don't miss deposits even if the full processing pipeline fails
 func (s *BridgeService) recordDepositImmediately(event listener.DepositEvent) error {
-	// Check if this deposit has already been recorded
-	existing, err := s.db.GetDepositByID(event.DepositId)
+	// Get network name for source chain
+	networkName, _ := listener.GetChainInfo(event.Chain)
+
+	// Generate combined deposit ID (chain_id + deposit_id)
+	combinedDepositID := listener.GenerateCombinedDepositID(event.Chain, event.DepositId)
+
+	// Check if this deposit has already been recorded with the combined ID
+	existing, err := s.db.GetDepositByID(combinedDepositID)
 	if err == nil && existing != nil {
-		logger.Debug("Deposit ID %s already recorded in database", event.DepositId.String())
+		logger.Debug("Deposit ID %s (combined from chain %s, original ID %s) already recorded in database",
+			combinedDepositID.String(), networkName, event.DepositId.String())
 		return nil
 	}
 
-	// Create a new deposit record with pending status
+	// Create a new deposit record with pending status and the combined ID
 	deposit := &database.Deposit{
-		DepositID:     event.DepositId,
+		DepositID:     combinedDepositID,
 		WalletAddress: event.Depositor,
 		Amount:        event.Amount,
 		Currency:      database.CurrencyType(event.Currency),
@@ -122,6 +135,7 @@ func (s *BridgeService) recordDepositImmediately(event listener.DepositEvent) er
 		BlockNumber:   event.BlockNumber,
 		Status:        database.StatusPending,
 		Metadata:      string(event.Metadata),
+		SourceChain:   networkName,
 	}
 
 	// Write to database
@@ -131,9 +145,9 @@ func (s *BridgeService) recordDepositImmediately(event listener.DepositEvent) er
 		networkType = "Testnet"
 	}
 
-	logger.Info("Immediately recording deposit ID %s from wallet %s, amount %s, tx %s, chain %s-%s, metadata: '%s'",
-		event.DepositId.String(), event.Depositor.Hex(), event.Amount.String(), event.TxHash,
-		networkName, networkType, event.Metadata)
+	logger.Info("Immediately recording deposit with combined ID %s (chain %s, original ID %s) from wallet %s, amount %s, tx %s, chain %s-%s, metadata: '%s'",
+		combinedDepositID.String(), networkName, event.DepositId.String(), event.Depositor.Hex(),
+		event.Amount.String(), event.TxHash, networkName, networkType, event.Metadata)
 
 	if err := s.db.CreateDeposit(deposit); err != nil {
 		return fmt.Errorf("failed to create immediate deposit record: %w", err)
@@ -141,24 +155,25 @@ func (s *BridgeService) recordDepositImmediately(event listener.DepositEvent) er
 
 	// Also create a corresponding transaction record so status lookups work
 	txRecord := &database.Transaction{
-		DepositID:     event.DepositId,
+		DepositID:     combinedDepositID,
 		WalletAddress: event.Depositor,
 		Amount:        event.Amount,
 		Currency:      database.CurrencyType(event.Currency),
 		Status:        database.StatusPending,
 		TxHash:        event.TxHash,
 		Metadata:      sql.NullString{String: event.Metadata, Valid: event.Metadata != ""},
+		SourceChain:   networkName,
 	}
 
 	if err := s.db.CreateTransaction(txRecord); err != nil {
 		logger.Warn("Failed to create immediate transaction record for deposit ID %s: %v",
-			event.DepositId.String(), err)
+			combinedDepositID.String(), err)
 		// Don't return an error here, the deposit is already recorded which is the main goal
 	} else {
-		logger.Debug("Successfully created transaction record for deposit ID %s", event.DepositId.String())
+		logger.Debug("Successfully created transaction record for deposit ID %s", combinedDepositID.String())
 	}
 
-	logger.Debug("Successfully recorded deposit ID %s in database", event.DepositId.String())
+	logger.Debug("Successfully recorded deposit ID %s in database", combinedDepositID.String())
 	return nil
 }
 

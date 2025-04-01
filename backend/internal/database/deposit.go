@@ -23,23 +23,30 @@ type Deposit struct {
 	Metadata      string // User-provided metadata for this deposit
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+	SourceChain   string // Source chain of the deposit (Arbitrum, Base, Optimism)
 }
 
 // CreateDeposit creates a new deposit record in the database
 func (db *DB) CreateDeposit(deposit *Deposit) error {
+	// Use default source chain if not specified
+	if deposit.SourceChain == "" {
+		deposit.SourceChain = "Arbitrum"
+	}
+
 	// Use Postgres ON CONFLICT to handle duplicate deposit IDs
 	// This is essentially an UPSERT operation that will do an INSERT if the record doesn't exist,
 	// or an UPDATE if it does exist (which will update only the fields we want to update)
 	err := db.QueryRow(
 		`INSERT INTO deposits 
-		(deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		(deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata, source_chain)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (deposit_id) DO UPDATE SET
 		-- Only update fields that may need to be refreshed
 		status = CASE
 			WHEN deposits.status = 'failed' OR deposits.status = 'pending' THEN $7
 			ELSE deposits.status
 		END,
+		source_chain = $9,
 		updated_at = CURRENT_TIMESTAMP
 		RETURNING id`,
 		deposit.DepositID.String(),
@@ -50,14 +57,15 @@ func (db *DB) CreateDeposit(deposit *Deposit) error {
 		deposit.BlockNumber,
 		deposit.Status,
 		deposit.Metadata,
+		deposit.SourceChain,
 	).Scan(&deposit.ID)
 
 	if err != nil {
 		return fmt.Errorf("failed to create deposit: %w", err)
 	}
 
-	logger.Info("Successfully created or updated deposit record for ID %s with status %s",
-		deposit.DepositID.String(), deposit.Status)
+	logger.Info("Successfully created or updated deposit record for ID %s with status %s, chain %s",
+		deposit.DepositID.String(), deposit.Status, deposit.SourceChain)
 
 	return nil
 }
@@ -179,7 +187,7 @@ func (db *DB) GetDepositByID(depositID *big.Int) (*Deposit, error) {
 	)
 
 	err := db.QueryRow(
-		`SELECT id, deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, tx_hash, block_number, status, metadata, created_at, updated_at, COALESCE(source_chain, 'Arbitrum') as source_chain
 		FROM deposits 
 		WHERE deposit_id = $1`,
 		depositID.String(),
@@ -195,6 +203,7 @@ func (db *DB) GetDepositByID(depositID *big.Int) (*Deposit, error) {
 		&deposit.Metadata,
 		&deposit.CreatedAt,
 		&deposit.UpdatedAt,
+		&deposit.SourceChain,
 	)
 
 	if err != nil {

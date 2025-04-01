@@ -44,16 +44,22 @@ type Transaction struct {
 	Metadata      sql.NullString // User-provided metadata for this transaction
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+	SourceChain   string // Source chain of the deposit (Arbitrum, Base, Optimism)
 }
 
 // CreateTransaction creates a new transaction record in the database
 func (db *DB) CreateTransaction(tx *Transaction) error {
+	// Use default source chain if not specified
+	if tx.SourceChain == "" {
+		tx.SourceChain = "Arbitrum"
+	}
+
 	// Use RETURNING clause to get the inserted ID (PostgreSQL compatible)
 	// Use ON CONFLICT to handle duplicate deposit_id (UPSERT)
 	err := db.QueryRow(
 		`INSERT INTO transaction_history 
-		(deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, refund_tx_hash, metadata) 
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		(deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, refund_tx_hash, metadata, source_chain) 
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (deposit_id) DO UPDATE SET
 			wallet_address = EXCLUDED.wallet_address,
 			amount = EXCLUDED.amount,
@@ -64,6 +70,7 @@ func (db *DB) CreateTransaction(tx *Transaction) error {
 				ELSE transaction_history.status
 			END,
 			tx_hash = COALESCE(transaction_history.tx_hash, EXCLUDED.tx_hash),
+			source_chain = EXCLUDED.source_chain,
 			updated_at = CURRENT_TIMESTAMP
 		RETURNING id`,
 		tx.DepositID.String(),
@@ -76,6 +83,7 @@ func (db *DB) CreateTransaction(tx *Transaction) error {
 		tx.MonadTxHash,
 		tx.RefundTxHash,
 		tx.Metadata,
+		tx.SourceChain,
 	).Scan(&tx.ID)
 
 	if err != nil {
@@ -228,7 +236,7 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 	)
 
 	err := db.QueryRow(
-		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, refund_tx_hash, metadata, created_at, updated_at 
+		`SELECT id, deposit_id, wallet_address, amount, currency, mon_amount, status, tx_hash, monad_tx_hash, refund_tx_hash, metadata, created_at, updated_at, COALESCE(source_chain, 'Arbitrum') as source_chain 
 		FROM transaction_history 
 		WHERE deposit_id = $1`,
 		depositIDStr,
@@ -246,6 +254,7 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 		&metadataStr,
 		&tx.CreatedAt,
 		&tx.UpdatedAt,
+		&tx.SourceChain,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -294,8 +303,8 @@ func (db *DB) GetTransactionByDepositID(depositID *big.Int) (*Transaction, error
 		tx.Metadata = sql.NullString{}
 	}
 
-	logger.Debug("Found transaction for deposit ID %s: status=%s, monadTxHash=%s, monAmount=%s",
-		depositIDStr, tx.Status, tx.MonadTxHash, tx.MonAmount.String())
+	logger.Debug("Found transaction for deposit ID %s: status=%s, monadTxHash=%s, monAmount=%s, sourceChain=%s",
+		depositIDStr, tx.Status, tx.MonadTxHash, tx.MonAmount.String(), tx.SourceChain)
 
 	return &tx, nil
 }

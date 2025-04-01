@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -158,4 +159,56 @@ func GetChainInfo(chain ChainType) (name string, isTestnet bool) {
 // GetChain returns the chain type this listener is configured for
 func (l *EventListener) GetChain() ChainType {
 	return l.chain
+}
+
+// GenerateCombinedDepositID creates a unique ID by combining chain ID and deposit ID
+// Format: "{chainID}{depositID}", e.g. "42161123" for Arbitrum(42161) + DepositID(123)
+func GenerateCombinedDepositID(chainID ChainType, depositID *big.Int) *big.Int {
+	// Convert chain ID to big.Int
+	chainIDBig := new(big.Int).SetUint64(uint64(chainID))
+
+	// Create a copy of the deposit ID
+	depositIDCopy := new(big.Int).Set(depositID)
+
+	// Combine them by concatenating the values (chainID * 10^n + depositID)
+	// Calculate the number of digits in depositID
+	depositIDStr := depositIDCopy.String()
+	digitCount := len(depositIDStr)
+
+	// Create multiplier (10^digitCount)
+	multiplier := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(digitCount)), nil)
+
+	// Multiply chainID by multiplier and add depositID
+	result := new(big.Int).Mul(chainIDBig, multiplier)
+	result.Add(result, depositIDCopy)
+
+	return result
+}
+
+// GetOriginalDepositID extracts the original deposit ID from a combined ID
+func GetOriginalDepositID(chainID ChainType, combinedID *big.Int) *big.Int {
+	// Convert chain ID to string
+	chainIDStr := fmt.Sprintf("%d", chainID)
+
+	// Convert combined ID to string
+	combinedIDStr := combinedID.String()
+
+	// If combined ID starts with chain ID, extract the original deposit ID
+	if len(combinedIDStr) > len(chainIDStr) && strings.HasPrefix(combinedIDStr, chainIDStr) {
+		// Extract the deposit ID part
+		depositIDStr := combinedIDStr[len(chainIDStr):]
+
+		// Convert back to big.Int
+		depositID := new(big.Int)
+		depositID.SetString(depositIDStr, 10)
+		return depositID
+	}
+
+	// If format doesn't match, return the original ID (fallback)
+	return combinedID
+}
+
+// GetCombinedDepositIDString returns the combined ID as a string
+func GetCombinedDepositIDString(chainID ChainType, depositID *big.Int) string {
+	return fmt.Sprintf("%d%s", chainID, depositID.String())
 }
