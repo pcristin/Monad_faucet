@@ -1,9 +1,11 @@
 package api
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -110,13 +112,40 @@ func (h *Handler) GetWalletTransactions(c *gin.Context) {
 			txResponse.DepositID = tx.DepositID.String()
 		}
 
-		// Include transaction hashes
+		// Map chain names to chainIDs
+		chainIDMap := map[string]int{
+			"Arbitrum":        42161,  // Arbitrum chainID
+			"ArbitrumSepolia": 421611, // Arbitrum Sepolia chainID
+			"Base":            8453,   // Base chainID
+			"BaseSepolia":     84532,  // Base Sepolia chainID
+			"Optimism":        10,     // Optimism chainID
+			"OptimismSepolia": 101,    // Optimism Sepolia chainID
+			"Monad":           20482,  // Monad chainID (used as destination)
+		}
+
+		// Set default chain IDs
+		txResponse.SourceChainId = chainIDMap["Arbitrum"]   // Default to Arbitrum
+		txResponse.DestinationChainId = chainIDMap["Monad"] // Always Monad as destination
+
+		// Try to determine source chain from deposit ID format
+		if tx.DepositID != nil {
+			depositIDStr := tx.DepositID.String()
+			for chainName, chainID := range chainIDMap {
+				chainIDStr := fmt.Sprintf("%d", chainID)
+				if strings.HasPrefix(depositIDStr, chainIDStr) && chainName != "Monad" {
+					txResponse.SourceChainId = chainID
+					break
+				}
+			}
+		}
+
+		// Include transaction hashes with the new format
 		if tx.TxHash != "" {
-			txResponse.Txs["Arbitrum"] = tx.TxHash
+			txResponse.Txs["source_tx"] = tx.TxHash
 		}
 
 		if tx.MonadTxHash != "" {
-			txResponse.Txs["Monad"] = tx.MonadTxHash
+			txResponse.Txs["destination_tx"] = tx.MonadTxHash
 		}
 
 		response.Transactions = append(response.Transactions, txResponse)

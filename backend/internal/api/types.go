@@ -80,10 +80,12 @@ func (h *RateLimitHandler) GetResponseCache() *cache.Cache {
 }
 
 type TransactionResponse struct {
-	Status    string            `json:"status"`
-	Message   string            `json:"message"`
-	Txs       map[string]string `json:"txs"`
-	DepositID string            `json:"deposit_id,omitempty"`
+	Status             string            `json:"status"`
+	Message            string            `json:"message"`
+	Txs                map[string]string `json:"txs"`
+	DepositID          string            `json:"deposit_id,omitempty"`
+	SourceChainId      int               `json:"source_chain_id,omitempty"`
+	DestinationChainId int               `json:"destination_chain_id,omitempty"`
 }
 
 // AlchemyWebhookPayload represents the webhook payload from Alchemy
