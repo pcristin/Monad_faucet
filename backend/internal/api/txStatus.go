@@ -65,7 +65,7 @@ func (h *Handler) GetTransactionStatus(c *gin.Context) {
 		"BaseSepolia":     84532,    // Base Sepolia chainID
 		"Optimism":        10,       // Optimism chainID
 		"OptimismSepolia": 11155420, // Optimism Sepolia chainID
-		"Monad":           20482,    // Monad chainID (used as destination)
+		"Monad":           10143,    // Monad chainID (used as destination)
 	}
 
 	// Helper function to create response
