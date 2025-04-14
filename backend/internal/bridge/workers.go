@@ -162,14 +162,14 @@ type BridgeWorkerPools struct {
 // NewBridgeWorkerPools creates a new set of worker pools
 func NewBridgeWorkerPools(service *BridgeService) *BridgeWorkerPools {
 	return &BridgeWorkerPools{
-		DepositPool:        NewWorkerPool("deposit", 1, 500),
-		CalculationPool:    NewWorkerPool("calculation", 1, 500),
-		DistributionPool:   NewWorkerPool("distribution", 1, 500),
-		DBPool:             NewWorkerPool("database", 1, 500),
+		DepositPool:        NewWorkerPool("deposit", 5, 500),
+		CalculationPool:    NewWorkerPool("calculation", 5, 500),
+		DistributionPool:   NewWorkerPool("distribution", 5, 500),
+		DBPool:             NewWorkerPool("database", 5, 500),
 		calculationChannel: make(chan CalculatedDeposit, 500),
 		service:            service,
 		processingDeposits: sync.Map{},
-		distributionBatch:  make([]*DistributionJob, 0, 100),
+		distributionBatch:  make([]*DistributionJob, 0, 200),
 		mergeDelay:         20 * time.Second, // Very short delay to encourage faster batching
 		maxDeposits:        200,              // Small batch size to encourage more frequent batches
 	}
