@@ -384,7 +384,7 @@ func (db *DB) BulkUpdateDistributions(distributions []*Distribution) error {
 		SET status = $1, 
 			monad_tx_hash = $2, 
 			mon_amount = CASE 
-				WHEN $3 IS NOT NULL AND (mon_amount IS NULL OR mon_amount = '0') THEN $3::varchar
+				WHEN $3::varchar IS NOT NULL AND (mon_amount IS NULL OR mon_amount = '0') THEN $3::varchar
 				ELSE mon_amount
 			END,
 			updated_at = $4
@@ -425,7 +425,7 @@ func (db *DB) BulkUpdateDistributions(distributions []*Distribution) error {
 			_, createErr := tx.Exec(
 				`INSERT INTO distributions 
 				(deposit_id, wallet_address, mon_amount, status, monad_tx_hash, created_at, updated_at) 
-				VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+				VALUES ($1, $2, $3::varchar, $4, $5, $6, $7)`,
 				depositIDStr,
 				dist.WalletAddress.Hex(),
 				dist.MonAmount.String(),
