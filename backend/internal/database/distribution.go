@@ -384,7 +384,7 @@ func (db *DB) BulkUpdateDistributions(distributions []*Distribution) error {
 		SET status = $1, 
 			monad_tx_hash = $2, 
 			mon_amount = CASE 
-				WHEN $3 IS NOT NULL AND (mon_amount IS NULL OR mon_amount = '0') THEN $3
+				WHEN $3 IS NOT NULL AND (mon_amount IS NULL OR mon_amount = '0') THEN $3::varchar
 				ELSE mon_amount
 			END,
 			updated_at = $4
