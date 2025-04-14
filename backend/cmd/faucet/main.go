@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 )
 
 func main() {
+	runtime.GOMAXPROCS(0)
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
