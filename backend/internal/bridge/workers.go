@@ -148,8 +148,7 @@ type BridgeWorkerPools struct {
 	DBPool             *WorkerPool
 	calculationChannel chan CalculatedDeposit
 	service            *BridgeService
-	mu                 sync.Mutex
-	processingDeposits map[string]bool
+	processingDeposits sync.Map
 
 	// Batch processing fields
 	distributionBatch []*DistributionJob
@@ -169,11 +168,25 @@ func NewBridgeWorkerPools(service *BridgeService) *BridgeWorkerPools {
 		DBPool:             NewWorkerPool("database", 1, 500),
 		calculationChannel: make(chan CalculatedDeposit, 500),
 		service:            service,
-		processingDeposits: make(map[string]bool),
+		processingDeposits: sync.Map{},
 		distributionBatch:  make([]*DistributionJob, 0, 100),
 		mergeDelay:         20 * time.Second, // Very short delay to encourage faster batching
 		maxDeposits:        200,              // Small batch size to encourage more frequent batches
 	}
+}
+
+// markProcessing attempts to mark a depositID as being processed.
+// Returns true if it was already present (i.e., duplicate), false otherwise.
+func (pools *BridgeWorkerPools) markProcessing(depositID string) bool {
+	// LoadOrStore stores a value if the key is not already present.
+	// It returns the existing value and a bool indicating if the key already existed.
+	_, loaded := pools.processingDeposits.LoadOrStore(depositID, true)
+	return loaded
+}
+
+// unmarkProcessing removes a depositID from the processing map.
+func (pools *BridgeWorkerPools) unmarkProcessing(depositID string) {
+	pools.processingDeposits.Delete(depositID)
 }
 
 // Start starts all worker pools
@@ -229,14 +242,10 @@ func (pools *BridgeWorkerPools) SubmitDepositEvent(event listener.DepositEvent) 
 	startTime := time.Now()
 
 	// Prevent duplicate processing
-	pools.mu.Lock()
-	if pools.processingDeposits[depositId] {
+	if pools.markProcessing(depositId) {
 		logger.Info("Skipping duplicate deposit ID %s", depositId)
-		pools.mu.Unlock()
 		return
 	}
-	pools.processingDeposits[depositId] = true
-	pools.mu.Unlock()
 
 	logger.Info("PIPELINE-FLOW: Received deposit event ID %s in submission pipeline", depositId)
 
@@ -255,9 +264,7 @@ func (pools *BridgeWorkerPools) SubmitDepositEvent(event listener.DepositEvent) 
 // finishProcessingDeposit marks a deposit as done processing
 func (pools *BridgeWorkerPools) finishProcessingDeposit(depositID *big.Int) {
 	depositIDStr := depositID.String()
-	pools.mu.Lock()
-	defer pools.mu.Unlock()
-	delete(pools.processingDeposits, depositIDStr)
+	pools.unmarkProcessing(depositIDStr)
 }
 
 // processDepositJob processes a deposit job
@@ -1061,36 +1068,20 @@ func (pools *BridgeWorkerPools) processBatchDistributionJob(ctx context.Context,
 // processDistributionJob processes a distribution job
 func (pools *BridgeWorkerPools) processDistributionJob(ctx context.Context, job *DistributionJob) {
 	depositIDStr := job.DepositID.String()
-
-	// Create a unique processing key for this distribution job
 	processingKey := "distribution:" + depositIDStr
 
-	// Attempt to acquire lock for this deposit ID
-	pools.mu.Lock()
-	if _, exists := pools.processingDeposits[processingKey]; exists {
-		pools.mu.Unlock()
+	// Attempt to mark this deposit as being processed.
+	if pools.markProcessing(processingKey) {
 		logger.Info("Distribution for deposit ID %s is already being processed", depositIDStr)
 		return
 	}
+	// Ensure we unmark processing when done.
+	defer pools.unmarkProcessing(processingKey)
 
-	// Mark as processing and release global lock
-	pools.processingDeposits[processingKey] = true
-	pools.mu.Unlock()
-
-	// Ensure we clean up when we're done
-	defer func() {
-		pools.mu.Lock()
-		delete(pools.processingDeposits, processingKey)
-		pools.mu.Unlock()
-	}()
-
-	// First, check blockchain for existing transaction
-	// This is the most authoritative source
+	// First, check blockchain for an existing transaction.
 	txHash, err := pools.service.checkMonadBlockchainForTransaction(ctx, job.DepositID)
 	if err == nil && txHash != "" {
 		logger.Info("Distribution already exists on blockchain with tx %s for deposit ID %s", txHash, depositIDStr)
-
-		// Update records to match blockchain state
 		pools.DBPool.Submit(&DBWorkerJob{
 			JobType: JobUpdateDistributionStatus,
 			Distribution: &database.Distribution{
@@ -1109,22 +1100,12 @@ func (pools *BridgeWorkerPools) processDistributionJob(ctx context.Context, job 
 		return
 	}
 
-	// Second, check if the distribution exists in the database
+	// Second, check if the distribution exists in the database.
 	dist, err := pools.service.db.GetDistributionByDepositID(job.DepositID)
 	if err == nil && dist != nil {
 		if dist.Status == database.DistStatusCompleted && dist.MonadTxHash != "" {
 			logger.Info("Distribution for deposit ID %s already completed with tx hash %s in database",
 				depositIDStr, dist.MonadTxHash)
-
-			// Double-check blockchain for this transaction
-			if txHash, err := pools.service.checkMonadBlockchainForTransaction(ctx, job.DepositID); err == nil && txHash != "" {
-				if txHash != dist.MonadTxHash {
-					logger.Warn("Database tx hash %s doesn't match blockchain tx hash %s for deposit ID %s",
-						dist.MonadTxHash, txHash, depositIDStr)
-				}
-			}
-
-			// Ensure deposit status is also updated
 			pools.DBPool.Submit(&DBWorkerJob{
 				JobType: JobUpdateDepositStatus,
 				Deposit: &database.Deposit{
@@ -1136,122 +1117,119 @@ func (pools *BridgeWorkerPools) processDistributionJob(ctx context.Context, job 
 		}
 	}
 
-	// Verify we have valid amount
+	// Verify we have a valid MON amount.
 	if job.MonAmount == nil || job.MonAmount.Cmp(big.NewInt(0)) <= 0 {
 		logger.Error("Invalid MON amount for distribution: %v", job.MonAmount)
 		return
 	}
 
-	// Log the amount for debugging
 	logger.Info("Processing distribution of %s MON for deposit ID %s to wallet %s",
 		formatMonAmount(job.MonAmount), depositIDStr, job.WalletAddress.Hex())
 
-	// Execute the mint transaction
-	txHash, err = pools.service.mintTokens(ctx, job.WalletAddress, job.MonAmount, job.DepositID)
-
-	if err != nil {
-		// Check if this is a duplicate error - mint function should handle this internally
-		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "already") {
-			logger.Info("Duplicate mint detected: %v", err)
-
-			// If we got a transaction hash despite the error, update records
-			if txHash != "" {
+	// Delegate the blocking mint transaction and subsequent updates to a separate goroutine.
+	go func(job *DistributionJob, processingKey string) {
+		// Execute the mint transaction (this may block for several seconds).
+		txHash, err := pools.service.mintTokens(ctx, job.WalletAddress, job.MonAmount, job.DepositID)
+		if err != nil {
+			// If duplicate error detected, try to update records if txHash is returned.
+			if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "already") {
+				logger.Info("Duplicate mint detected: %v", err)
+				if txHash != "" {
+					pools.DBPool.Submit(&DBWorkerJob{
+						JobType: JobUpdateDistributionStatus,
+						Distribution: &database.Distribution{
+							DepositID:   job.DepositID,
+							Status:      database.DistStatusCompleted,
+							MonadTxHash: txHash,
+						},
+					})
+					pools.DBPool.Submit(&DBWorkerJob{
+						JobType: JobUpdateDepositStatus,
+						Deposit: &database.Deposit{
+							DepositID: job.DepositID,
+							Status:    database.StatusProcessed,
+						},
+					})
+				}
+			} else {
+				// A real error occurred: update failure status.
+				logger.Error("Mint transaction failed for deposit ID %s: %v", depositIDStr, err)
 				pools.DBPool.Submit(&DBWorkerJob{
 					JobType: JobUpdateDistributionStatus,
 					Distribution: &database.Distribution{
-						DepositID:   job.DepositID,
-						Status:      database.DistStatusCompleted,
-						MonadTxHash: txHash,
+						DepositID: job.DepositID,
+						Status:    database.DistStatusFailed,
 					},
 				})
 				pools.DBPool.Submit(&DBWorkerJob{
 					JobType: JobUpdateDepositStatus,
 					Deposit: &database.Deposit{
 						DepositID: job.DepositID,
-						Status:    database.StatusProcessed,
+						Status:    database.StatusFailed,
 					},
 				})
 			}
-		} else {
-			// Real error occurred
-			logger.Error("Mint transaction failed: %v", err)
-			pools.DBPool.Submit(&DBWorkerJob{
-				JobType: JobUpdateDistributionStatus,
-				Distribution: &database.Distribution{
-					DepositID: job.DepositID,
-					Status:    database.DistStatusFailed,
-				},
-			})
-			pools.DBPool.Submit(&DBWorkerJob{
-				JobType: JobUpdateDepositStatus,
-				Deposit: &database.Deposit{
-					DepositID: job.DepositID,
-					Status:    database.StatusFailed,
-				},
-			})
-		}
-		return
-	}
-
-	// Successfully minted tokens
-	logger.Info("Successfully minted %s MON for deposit ID %s with tx %s",
-		formatMonAmount(job.MonAmount), depositIDStr, txHash)
-
-	// CRITICAL: First check if distribution record exists, create if it doesn't
-	existingDist, distErr := pools.service.db.GetDistributionByDepositID(job.DepositID)
-	if distErr != nil || existingDist == nil {
-		logger.Info("Creating initial distribution record for deposit ID %s before updating status", depositIDStr)
-
-		// Create the distribution record directly to ensure it exists
-		initialDist := &database.Distribution{
-			DepositID:     job.DepositID,
-			WalletAddress: job.WalletAddress,
-			MonAmount:     job.MonAmount,
-			Status:        database.DistStatusCompleted,
-			MonadTxHash:   txHash,
+			// Release the lock inside the goroutine.
+			pools.unmarkProcessing(processingKey)
+			return
 		}
 
-		if err := pools.service.db.CreateDistribution(initialDist); err != nil {
-			logger.Error("Failed to create initial distribution record for deposit ID %s: %v", depositIDStr, err)
-			// Continue with update anyway - it might succeed if the record was created by another worker
-		} else {
-			logger.Info("Successfully created distribution record for deposit ID %s", depositIDStr)
+		// Successfully minted tokens.
+		logger.Info("Successfully minted %s MON for deposit ID %s with tx %s",
+			formatMonAmount(job.MonAmount), depositIDStr, txHash)
+
+		// CRITICAL: Ensure that a distribution record exists.
+		existingDist, distErr := pools.service.db.GetDistributionByDepositID(job.DepositID)
+		if distErr != nil || existingDist == nil {
+			logger.Info("Creating initial distribution record for deposit ID %s", depositIDStr)
+			initialDist := &database.Distribution{
+				DepositID:     job.DepositID,
+				WalletAddress: job.WalletAddress,
+				MonAmount:     job.MonAmount,
+				Status:        database.DistStatusCompleted,
+				MonadTxHash:   txHash,
+			}
+			if err := pools.service.db.CreateDistribution(initialDist); err != nil {
+				logger.Error("Failed to create initial distribution record for deposit ID %s: %v", depositIDStr, err)
+			} else {
+				logger.Info("Successfully created distribution record for deposit ID %s", depositIDStr)
+			}
 		}
-	}
 
-	// Now submit the update job to the worker pool
-	pools.DBPool.Submit(&DBWorkerJob{
-		JobType: JobUpdateDistributionStatus,
-		Distribution: &database.Distribution{
-			DepositID:   job.DepositID,
-			Status:      database.DistStatusCompleted,
-			MonadTxHash: txHash,
-			MonAmount:   job.MonAmount, // Include MON amount for updating distribution
-		},
-	})
+		// Now, asynchronously update status in the DB.
+		pools.DBPool.Submit(&DBWorkerJob{
+			JobType: JobUpdateDistributionStatus,
+			Distribution: &database.Distribution{
+				DepositID:   job.DepositID,
+				Status:      database.DistStatusCompleted,
+				MonadTxHash: txHash,
+				MonAmount:   job.MonAmount,
+			},
+		})
+		pools.DBPool.Submit(&DBWorkerJob{
+			JobType: JobUpdateDepositStatus,
+			Deposit: &database.Deposit{
+				DepositID: job.DepositID,
+				Status:    database.StatusProcessed,
+			},
+		})
+		pools.DBPool.Submit(&DBWorkerJob{
+			JobType: "update_transaction_history",
+			Distribution: &database.Distribution{
+				DepositID:   job.DepositID,
+				Status:      database.DistStatusCompleted,
+				MonadTxHash: txHash,
+				MonAmount:   job.MonAmount,
+			},
+		})
+		logger.Info("Queued transaction history update for deposit ID %s with tx hash %s and MON amount %s",
+			depositIDStr, txHash, formatMonAmount(job.MonAmount))
 
-	pools.DBPool.Submit(&DBWorkerJob{
-		JobType: JobUpdateDepositStatus,
-		Deposit: &database.Deposit{
-			DepositID: job.DepositID,
-			Status:    database.StatusProcessed,
-		},
-	})
+		// Release the lock inside the goroutine.
+		pools.unmarkProcessing(processingKey)
+	}(job, processingKey)
 
-	// Create a custom DB job to update transaction_history table with the MON amount
-	txHistoryJob := &DBWorkerJob{
-		JobType: "update_transaction_history",
-		Distribution: &database.Distribution{
-			DepositID:   job.DepositID,
-			Status:      database.DistStatusCompleted,
-			MonadTxHash: txHash,
-			MonAmount:   job.MonAmount, // Include the MON amount for the transaction history
-		},
-	}
-
-	pools.DBPool.Submit(txHistoryJob)
-	logger.Info("Queued transaction history update for deposit ID %s with tx hash %s and MON amount %s",
-		depositIDStr, txHash, formatMonAmount(job.MonAmount))
+	// Return immediately without waiting for the blockchain call.
 }
 
 // processDBJob processes database operations

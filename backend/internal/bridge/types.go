@@ -64,7 +64,7 @@ func NewBridgeService(
 		cancel:              cancel,
 		db:                  db,
 		txCache:             make(map[string]*database.Transaction),
-		txCacheExpiration:   24 * time.Hour,
+		txCacheExpiration:   1 * time.Hour,
 		processingDeposits:  make(map[string]bool),
 		instanceID:          instanceID,
 		lockDuration:        5 * time.Minute,
