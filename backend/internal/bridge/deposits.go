@@ -140,7 +140,7 @@ func (s *BridgeService) processDeposit(event listener.DepositEvent) error {
 
 	logger.Debug("Waiting for confirmations for deposit ID %s, block %d", combinedDepositID.String(), event.BlockNumber)
 
-	logger.Info("Minting %s MON tokens for wallet %s (deposit ID %s)", formatMonAmount(monAmount), event.Depositor.Hex(), combinedDepositID.String())
+	logger.Info("Minting %s tokens for wallet %s (deposit ID %s)", formatMonAmount(monAmount), event.Depositor.Hex(), combinedDepositID.String())
 
 	// Last-minute duplicate prevention.
 	logger.Debug("Checking for existing transaction for deposit ID %s", combinedDepositID.String())
