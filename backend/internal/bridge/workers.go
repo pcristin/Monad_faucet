@@ -138,6 +138,7 @@ const (
 	JobUpdateDistributionStatus = "update_distribution_status"
 	JobBulkUpdateDistributions  = "bulk_update_distributions"
 	JobBulkUpdateDeposits       = "bulk_update_deposits"
+	JobUpdateTransactionHistory = "update_transaction_history"
 )
 
 // BridgeWorkerPools contains all worker pools for the bridge service
@@ -836,6 +837,28 @@ func (pools *BridgeWorkerPools) processBatchMint(ctx context.Context, distributi
 
 	if err != nil {
 		logger.Error("Batch mint transaction failed: %v", err)
+
+		// Update transaction history with MON amount even though batch failed
+		for _, dist := range distributions {
+			// Skip distributions with zero amount (already processed)
+			if dist.MonAmount == nil || dist.MonAmount.Cmp(big.NewInt(0)) <= 0 {
+				continue
+			}
+
+			// Submit transaction history update with the MON amount but no txHash
+			pools.DBPool.Submit(&DBWorkerJob{
+				JobType: JobUpdateTransactionHistory,
+				Distribution: &database.Distribution{
+					DepositID:   dist.DepositID,
+					Status:      database.DistStatusFailed,
+					MonadTxHash: "",             // Empty txHash for failed transaction
+					MonAmount:   dist.MonAmount, // Still include the calculated MON amount
+				},
+			})
+			logger.Info("Queued transaction history update for failed batch distribution for deposit ID %s with MON amount %s",
+				dist.DepositID.String(), formatMonAmount(dist.MonAmount))
+		}
+
 		return false, nil // Complete failure, retry all individually
 	}
 
@@ -1168,6 +1191,19 @@ func (pools *BridgeWorkerPools) processDistributionJob(ctx context.Context, job 
 						Status:    database.StatusFailed,
 					},
 				})
+
+				// Update transaction history with the MON amount even though the transaction failed
+				pools.DBPool.Submit(&DBWorkerJob{
+					JobType: JobUpdateTransactionHistory,
+					Distribution: &database.Distribution{
+						DepositID:   job.DepositID,
+						Status:      database.DistStatusFailed,
+						MonadTxHash: "",            // Empty txHash for failed transaction
+						MonAmount:   job.MonAmount, // Include the calculated MON amount
+					},
+				})
+				logger.Info("Queued transaction history update for failed distribution of deposit ID %s with MON amount %s",
+					depositIDStr, formatMonAmount(job.MonAmount))
 			}
 			// Release the lock inside the goroutine.
 			pools.unmarkProcessing(processingKey)
@@ -1482,9 +1518,16 @@ func (pools *BridgeWorkerPools) processDBJob(ctx context.Context, job *DBWorkerJ
 		depositID := job.Distribution.DepositID
 		depositIDStr := depositID.String()
 		txHash := job.Distribution.MonadTxHash
+		status := database.StatusCompleted
 
-		logger.Info("Processing update_transaction_history for deposit ID %s with tx hash %s",
-			depositIDStr, txHash)
+		// If the distribution has failed status, use failed status for transaction
+		if job.Distribution.Status == database.DistStatusFailed {
+			status = database.StatusFailed
+			logger.Info("Processing update_transaction_history for failed deposit ID %s", depositIDStr)
+		} else {
+			logger.Info("Processing update_transaction_history for deposit ID %s with tx hash %s",
+				depositIDStr, txHash)
+		}
 
 		// Check if we have a MON amount directly in the job, which is preferred
 		if job.Distribution.MonAmount != nil && job.Distribution.MonAmount.Cmp(big.NewInt(0)) > 0 {
@@ -1493,23 +1536,23 @@ func (pools *BridgeWorkerPools) processDBJob(ctx context.Context, job *DBWorkerJ
 				job.Distribution.MonAmount.String())
 
 			if err := pools.service.db.UpdateTransactionWithMonAmount(
-				depositID, database.StatusCompleted, txHash, job.Distribution.MonAmount); err != nil {
+				depositID, status, txHash, job.Distribution.MonAmount); err != nil {
 				logger.Error("Failed to update transaction history with MON amount for deposit ID %s: %v",
 					depositIDStr, err)
 			} else {
-				logger.Info("Successfully updated transaction history for deposit ID %s with tx hash %s and MON amount %s",
-					depositIDStr, txHash, job.Distribution.MonAmount.String())
+				logger.Info("Successfully updated transaction history for deposit ID %s with status %s, tx hash %s and MON amount %s",
+					depositIDStr, status, txHash, job.Distribution.MonAmount.String())
 			}
 		} else {
 			// Fall back to the original method which tries to find MON amount in distributions table
 			logger.Warn("No MON amount in job for deposit ID %s, falling back to distribution table lookup",
 				depositIDStr)
 
-			if err := pools.service.UpdateTransactionStatus(ctx, depositID, database.StatusCompleted, txHash); err != nil {
+			if err := pools.service.UpdateTransactionStatus(ctx, depositID, status, txHash); err != nil {
 				logger.Error("Failed to update transaction history for deposit ID %s: %v", depositIDStr, err)
 			} else {
-				logger.Info("Successfully updated transaction history for deposit ID %s with tx hash %s",
-					depositIDStr, txHash)
+				logger.Info("Successfully updated transaction history for deposit ID %s with status %s and tx hash %s",
+					depositIDStr, status, txHash)
 			}
 		}
 
