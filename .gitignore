@@ -66,5 +66,5 @@ backend/scripts/admin/*
 !backend/scripts/admin/.gitkeep 
 
 # Analytics
-analytics/*
+analytics/.env
 venv/

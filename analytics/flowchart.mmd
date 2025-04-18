@@ -1,0 +1,73 @@
+graph TB
+    %% Main components
+    A[User/Client] -->|Deposit Request| B[API Layer]
+    B -->|Route Request| C[API Handler]
+    C -->|Process Deposit| D[Bridge Service]
+    
+    %% Event listener flow
+    E[Blockchain Event Listener] -->|Listen for Deposits| F[Deposit Event]
+    F -->|Queue for Processing| D
+    
+    %% Bridge service subprocesses
+    D -->|Record in DB| G[Database]
+    D -->|Submit Tasks| H[Worker Manager]
+    
+    %% Worker pools
+    H -->|Deposit Tasks| I[Deposit Worker Pool]
+    H -->|Calculation Tasks| J[Calculation Worker Pool]
+    H -->|Distribution Tasks| K[Distribution Worker Pool]
+    H -->|Database Tasks| L[Database Worker Pool]
+    
+    %% Processing flow
+    D -->|Process Deposit| M[Validate Deposit]
+    M -->|If Valid| N[Calculate MON Amount]
+    N -->|Submit for Distribution| O[Batch Distributor]
+    O -->|Mint Tokens| P[Blockchain Transaction]
+    P -->|Update Status| G
+    
+    %% Error handling
+    M -->|If Invalid| Q[Queue Refund]
+    Q -->|Process Refund| R[Refund Process]
+    R -->|Update Status| G
+    
+    %% Monitoring and recovery
+    D -->|Monitor System| S[System Monitor]
+    D -->|Recover Stuck Txs| T[Recovery Process]
+    
+    %% Bridges between chains
+    P -->|Send to| U[Arbitrum Network]
+    P -->|Distribute on| V[Monad Network]
+    
+    %% Status checking
+    A -->|Check Status| W[TX Status API]
+    W -->|Query| G
+    
+    %% Subgraph for worker pools
+    subgraph "Worker Pools"
+        I
+        J
+        K
+        L
+    end
+    
+    %% Subgraph for blockchain networks
+    subgraph "Blockchain Networks"
+        U
+        V
+    end
+    
+    %% Subgraph for error handling
+    subgraph "Error Handling"
+        Q
+        R
+        T
+    end
+    
+    %% Bridge service components
+    subgraph "Bridge Service"
+        D
+        M
+        N
+        O
+        S
+    end
