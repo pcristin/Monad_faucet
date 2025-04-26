@@ -242,16 +242,16 @@ func main() {
 	blockchain.LogNetworkStatus(networkUrls, contractAddresses)
 
 	// Start listening for deposit events from Arbitrum
-	go startListener(ctx, arbListener, bridgeService, "Arbitrum")
+	go startListener(ctx, arbListener, bridgeService)
 
 	// Start listening for deposit events from Base if configured
 	if baseListener != nil {
-		go startListener(ctx, baseListener, bridgeService, "Base")
+		go startListener(ctx, baseListener, bridgeService)
 	}
 
 	// Start listening for deposit events from Optimism if configured
 	if optimismListener != nil {
-		go startListener(ctx, optimismListener, bridgeService, "Optimism")
+		go startListener(ctx, optimismListener, bridgeService)
 	}
 
 	// Create API server
@@ -301,7 +301,7 @@ func main() {
 }
 
 // Helper function to start a listener
-func startListener(ctx context.Context, eventListener *listener.EventListener, bridgeService *bridge.BridgeService, chainName string) {
+func startListener(ctx context.Context, eventListener *listener.EventListener, bridgeService *bridge.BridgeService) {
 	chain := eventListener.GetChain()
 	networkName, isTestnet := listener.GetChainInfo(chain)
 	networkType := "Mainnet"

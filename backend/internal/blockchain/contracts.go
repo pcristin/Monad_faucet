@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/pcristin/monad-faucet/internal/blockchain/nonce_manager"
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
@@ -290,6 +291,7 @@ func NewMonadDistributor(client *ethclient.Client, address common.Address, priva
 		Address:       address,
 		PrivateKey:    privateKey,
 		BoundContract: boundContract,
+		NonceManager:  nonce_manager.NewNonceManager(client),
 	}, nil
 }
 
@@ -595,6 +597,16 @@ func (m *MonadDistributor) TransactWithGasBuffer(opts *bind.TransactOpts, method
 		logger.Debug("Gas estimation for %s: estimated=%d, with buffer=%d, final=%d",
 			method, estimatedGas, bufferedGas, opts.GasLimit)
 	}
+
+	// Get the nonce for the sender address
+	nonce, err := m.NonceManager.GetNonce(context.Background(), crypto.PubkeyToAddress(m.PrivateKey.PublicKey))
+	if err != nil {
+		logger.Error("failed to get nonce: %v", err)
+		return nil, err
+	}
+
+	opts.Nonce = big.NewInt(int64(nonce))
+	logger.Debug("Using nonce: %d for distribution of Monad", nonce)
 
 	// Call the actual Transact method with our calculated gas limit
 	return m.BoundContract.Transact(opts, method, params...)
