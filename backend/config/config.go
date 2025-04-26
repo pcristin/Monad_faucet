@@ -122,11 +122,6 @@ func Load() (*Config, error) {
 	// Get webhook configuration
 	useWebhook := getEnvAsBoolOrDefault("USE_WEBHOOK", false)
 
-	// For backward compatibility
-	if !useWebhook {
-		useWebhook = getEnvAsBoolOrDefault("USE_QUICKNODE_WEBHOOK", false)
-	}
-
 	// Default to quicknode for backward compatibility
 	webhookProvider := getEnvOrDefault("WEBHOOK_PROVIDER", "alchemy")
 
@@ -150,7 +145,6 @@ func Load() (*Config, error) {
 		ChainlinkEthUsdFeed:   getEnvOrDefault("CHAINLINK_ETH_USD_FEED", "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612"),
 		WalletPrivateKey:      strings.TrimPrefix(getEnvOrFatal("WALLET_PRIVATE_KEY"), "0x"),
 		AdminAPIKeys:          filteredAPIKeys,
-		LogLevel:              getEnvOrDefault("LOG_LEVEL", "info"),
 		WorkerPoolConfig: WorkerPoolConfig{
 			DepositWorkers:      depositWorkers,
 			CalculationWorkers:  calculationWorkers,
