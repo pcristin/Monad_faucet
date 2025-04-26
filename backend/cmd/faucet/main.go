@@ -61,7 +61,7 @@ func main() {
 	}
 
 	// Set production mode for logging if running in production environment
-	if os.Getenv("PRODUCTION") == "true" || os.Getenv("RENDER") == "true" {
+	if os.Getenv("PRODUCTION") == "true" {
 		logger.SetProduction(true)
 		logger.Info("Running in production mode - verbose logging disabled")
 	} else {
