@@ -136,6 +136,9 @@ func main() {
 		common.HexToAddress(cfg.BaseDepositorAddr),
 		privateKey,
 	)
+	if err != nil {
+		logger.Fatal("Failed to create Base distributor: %v", err)
+	}
 
 	monadDistributor, err := blockchain.NewMonadDistributor(
 		monadClient,
