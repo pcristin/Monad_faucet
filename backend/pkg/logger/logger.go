@@ -23,7 +23,7 @@ func init() {
 	DebugLogger = log.New(os.Stdout, "DEBUG: ", flags)
 
 	// Check if we're running in production (Render)
-	isProduction = os.Getenv("RENDER") == "true"
+	isProduction = os.Getenv("PRODUCTION") == "true"
 }
 
 // SetProduction explicitly sets production mode
