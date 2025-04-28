@@ -198,7 +198,7 @@ func (s *BridgeService) processDeposit(event listener.DepositEvent) error {
 				return fmt.Errorf("failed to mint tokens: %w", err)
 			}
 
-			logger.Info("Successfully minted %s MON for wallet %s. Updating transaction status to completed with tx %s",
+			logger.Info("Successfully minted %s for wallet %s. Updating transaction status to completed with tx %s",
 				formatMonAmount(monAmount), event.Depositor.Hex(), txHash)
 
 			// Update transaction status directly

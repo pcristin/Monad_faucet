@@ -918,7 +918,7 @@ func (pools *BridgeWorkerPools) processBatchMint(ctx context.Context, distributi
 
 		// Create a custom DB job to update transaction_history table with the MON amount
 		txHistoryJob := &DBWorkerJob{
-			JobType: "update_transaction_history",
+			JobType: JobUpdateTransactionHistory,
 			Distribution: &database.Distribution{
 				DepositID:   dist.DepositID,
 				Status:      database.DistStatusCompleted,
@@ -951,8 +951,23 @@ func (pools *BridgeWorkerPools) processBatchMint(ctx context.Context, distributi
 		logger.Info("Submitted bulk update for %d newly processed distributions",
 			len(distributionsToUpdate))
 	}
-	logger.Info("TIMING: Post-processing for successful batch mint took %v", time.Since(processStart))
 
+	// Release locks for successfully processed deposits
+	for i, depositID := range depositIDs {
+		depositIDStr := depositID.String()
+		if amounts[i].Cmp(big.NewInt(0)) <= 0 {
+			continue
+		}
+
+		if _, processed := alreadyProcessed[depositIDStr]; processed {
+			continue
+		}
+
+		logger.Debug("Releasing lock for successfully processed deposit ID %s in batch", depositIDStr)
+		pools.service.releaseLock(depositID)
+	}
+
+	logger.Info("TIMING: Post-processing for successful batch mint took %v", time.Since(processStart))
 	return true, nil // All processed successfully in batch
 }
 
@@ -1051,7 +1066,7 @@ func (pools *BridgeWorkerPools) processBatchDistributionJob(ctx context.Context,
 
 			// Update transaction history
 			pools.DBPool.Submit(&DBWorkerJob{
-				JobType: "update_transaction_history",
+				JobType: JobUpdateTransactionHistory,
 				Distribution: &database.Distribution{
 					DepositID:   dist.DepositID,
 					Status:      database.DistStatusCompleted,
@@ -1207,6 +1222,7 @@ func (pools *BridgeWorkerPools) processDistributionJob(ctx context.Context, job 
 			}
 			// Release the lock inside the goroutine.
 			pools.unmarkProcessing(processingKey)
+			pools.service.releaseLock(job.DepositID)
 			return
 		}
 
@@ -1250,7 +1266,7 @@ func (pools *BridgeWorkerPools) processDistributionJob(ctx context.Context, job 
 			},
 		})
 		pools.DBPool.Submit(&DBWorkerJob{
-			JobType: "update_transaction_history",
+			JobType: JobUpdateTransactionHistory,
 			Distribution: &database.Distribution{
 				DepositID:   job.DepositID,
 				Status:      database.DistStatusCompleted,
@@ -1263,6 +1279,7 @@ func (pools *BridgeWorkerPools) processDistributionJob(ctx context.Context, job 
 
 		// Release the lock inside the goroutine.
 		pools.unmarkProcessing(processingKey)
+		pools.service.releaseLock(job.DepositID)
 	}(job, processingKey)
 
 	// Return immediately without waiting for the blockchain call.
@@ -1513,7 +1530,7 @@ func (pools *BridgeWorkerPools) processDBJob(ctx context.Context, job *DBWorkerJ
 			logger.Info("Successfully bulk updated %d deposits in %v", count, totalTime)
 		}
 
-	case "update_transaction_history":
+	case JobUpdateTransactionHistory:
 		// Update the transaction_history table with the Monad tx hash and MON amount
 		depositID := job.Distribution.DepositID
 		depositIDStr := depositID.String()
@@ -1523,9 +1540,9 @@ func (pools *BridgeWorkerPools) processDBJob(ctx context.Context, job *DBWorkerJ
 		// If the distribution has failed status, use failed status for transaction
 		if job.Distribution.Status == database.DistStatusFailed {
 			status = database.StatusFailed
-			logger.Info("Processing update_transaction_history for failed deposit ID %s", depositIDStr)
+			logger.Info("Processing JobUpdateTransactionHistory for failed deposit ID %s", depositIDStr)
 		} else {
-			logger.Info("Processing update_transaction_history for deposit ID %s with tx hash %s",
+			logger.Info("Processing JobUpdateTransactionHistory for deposit ID %s with tx hash %s",
 				depositIDStr, txHash)
 		}
 
