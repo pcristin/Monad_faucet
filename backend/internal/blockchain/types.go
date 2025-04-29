@@ -9,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/pcristin/monad-faucet/internal/blockchain/nonce_manager"
+	"github.com/pcristin/monad-faucet/internal/blockchain/tx_sender"
 )
 
 type CurrencyType uint8
@@ -69,6 +70,7 @@ type MonadDistributor struct {
 	PrivateKey *ecdsa.PrivateKey
 	*bind.BoundContract
 	NonceManager *nonce_manager.NonceManager
+	TxSender     *tx_sender.TransactionSender
 }
 
 // MonUsdRatio represents the ratio of MON to USD (atomic value)

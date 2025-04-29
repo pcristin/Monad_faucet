@@ -7,8 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/pcristin/monad-faucet/internal/blockchain"
 	"github.com/pcristin/monad-faucet/internal/blockchain/listener"
+	"github.com/pcristin/monad-faucet/internal/blockchain/tx_sender"
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/internal/workers"
 	"github.com/pcristin/monad-faucet/pkg/logger"
@@ -18,6 +20,7 @@ import (
 type BridgeService struct {
 	arbDepositor        *blockchain.ArbitrumDepositor
 	monadDistributor    *blockchain.MonadDistributor
+	txSender            *tx_sender.TransactionSender
 	optimismDepositor   *blockchain.OptimismDepositor
 	baseDepositor       *blockchain.BaseDepositor
 	depositChan         chan listener.DepositEvent
@@ -50,6 +53,10 @@ func NewBridgeService(
 	monadDistributor *blockchain.MonadDistributor,
 	db *database.DB,
 ) *BridgeService {
+	// Create transaction sender for Monad Distributor
+	fromAddress := crypto.PubkeyToAddress(monadDistributor.PrivateKey.PublicKey)
+	txSender := tx_sender.NewTxSender(monadDistributor.Client, monadDistributor.BoundContract, fromAddress)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	instanceID := fmt.Sprintf("instance-%d", time.Now().UnixNano())
 	return &BridgeService{
@@ -57,6 +64,7 @@ func NewBridgeService(
 		optimismDepositor:   optimismDepositor,
 		baseDepositor:       baseDepositor,
 		monadDistributor:    monadDistributor,
+		txSender:            txSender,
 		depositChan:         make(chan listener.DepositEvent, 1000),
 		refundChan:          make(chan *big.Int, 1000),
 		wg:                  sync.WaitGroup{},

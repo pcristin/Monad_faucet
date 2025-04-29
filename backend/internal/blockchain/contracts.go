@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/pcristin/monad-faucet/internal/blockchain/nonce_manager"
+	"github.com/pcristin/monad-faucet/internal/blockchain/tx_sender"
 	"github.com/pcristin/monad-faucet/internal/database"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
@@ -286,12 +287,15 @@ func NewBaseDepositor(client *ethclient.Client, address common.Address, privateK
 // NewMonadDistributor creates a new instance of MonadDistributor
 func NewMonadDistributor(client *ethclient.Client, address common.Address, privateKey *ecdsa.PrivateKey) (*MonadDistributor, error) {
 	boundContract := bind.NewBoundContract(address, DistributorABI, client, client, client)
+	fromAddress := crypto.PubkeyToAddress(privateKey.PublicKey)
+
 	return &MonadDistributor{
 		Client:        client,
 		Address:       address,
 		PrivateKey:    privateKey,
 		BoundContract: boundContract,
 		NonceManager:  nonce_manager.NewNonceManager(client),
+		TxSender:      tx_sender.NewTxSender(client, boundContract, fromAddress),
 	}, nil
 }
 
@@ -608,8 +612,12 @@ func (m *MonadDistributor) TransactWithGasBuffer(opts *bind.TransactOpts, method
 	opts.Nonce = big.NewInt(int64(nonce))
 	logger.Debug("Using nonce: %d for distribution of Monad", nonce)
 
-	// Call the actual Transact method with our calculated gas limit
-	return m.BoundContract.Transact(opts, method, params...)
+	// Submit to the transaction sender
+	resultCh := m.TxSender.SendTransaction(opts.Context, method, params, opts)
+
+	// Wait for the result
+	result := <-resultCh
+	return result.Tx, result.Err
 }
 
 func (m *MonadDistributor) GetTransactOpts(ctx context.Context) (*bind.TransactOpts, error) {

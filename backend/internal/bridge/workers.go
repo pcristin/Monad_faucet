@@ -1652,21 +1652,22 @@ func (s *BridgeService) mintTokensBatch(ctx context.Context, recipients []common
 	// Execute the batch distribution transaction
 	// The contract function expects an array of TransferData structs
 	txStart := time.Now()
-	tx, err := s.monadDistributor.TransactWithGasBuffer(opts, "distributeFunds", transfers)
+	resultCh := s.txSender.SendTransaction(ctx, "distributeFunds", []interface{}{transfers}, opts)
+	result := <-resultCh
 	txTime := time.Since(txStart)
 	logger.Info("TIMING: Transaction submission took %v", txTime)
 
-	if err != nil {
-		logger.Error("Failed to distribute funds in batch: %v", err)
-		return "", fmt.Errorf("failed to distribute funds in batch: %v", err)
+	if result.Err != nil {
+		logger.Error("Failed to distribute funds in batch: %v", result.Err)
+		return "", fmt.Errorf("failed to distribute funds in batch: %v", result.Err)
 	}
 
-	txHash := tx.Hash().Hex()
+	txHash := result.Tx.Hash().Hex()
 	logger.Info("Batch mint transaction submitted: %s", txHash)
 
 	// Wait for transaction to be mined
 	waitStart := time.Now()
-	receipt, err := bind.WaitMined(ctx, s.monadDistributor.Client, tx)
+	receipt, err := bind.WaitMined(ctx, s.monadDistributor.Client, result.Tx)
 	logger.Info("TIMING: Waiting for transaction confirmation took %v", time.Since(waitStart))
 
 	if err != nil {
