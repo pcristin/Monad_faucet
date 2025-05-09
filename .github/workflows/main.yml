@@ -1,0 +1,78 @@
+name: Performance Regression Check
+
+on:
+  pull_request:
+    branches: [ stage ]
+  push:
+    branches: [ stage ]
+
+jobs:
+  profile-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Need history to get previous commit
+
+      - name: Setup Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: '1.20'
+
+      - name: Run profile test on current commit
+        run: |
+          cd backend/tests/profile
+          go run main.go
+          # Extract processing time from the output and save to file
+          grep "Total test duration:" *.log | awk '{print $4}' > current_time.txt
+          cat current_time.txt
+
+      - name: Checkout previous commit
+        run: |
+          # Store current commit SHA
+          echo "CURRENT_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          # Get previous commit SHA 
+          echo "PREVIOUS_SHA=$(git rev-parse HEAD~1)" >> $GITHUB_ENV
+          # Checkout previous commit
+          git checkout ${{ env.PREVIOUS_SHA }}
+
+      - name: Run profile test on previous commit
+        run: |
+          cd backend/tests/profile
+          go run main.go
+          # Extract processing time from the output and save to file
+          grep "Total test duration:" *.log | awk '{print $4}' > previous_time.txt
+          cat previous_time.txt
+
+      - name: Checkout back to current commit
+        run: |
+          git checkout ${{ env.CURRENT_SHA }}
+
+      - name: Compare processing times
+        run: |
+          # Convert time strings to milliseconds for comparison
+          current_ms=$(cat current_time.txt | sed 's/s$//' | awk '{print $1 * 1000}')
+          previous_ms=$(cat previous_time.txt | sed 's/s$//' | awk '{print $1 * 1000}')
+          
+          echo "Current processing time: $current_ms ms"
+          echo "Previous processing time: $previous_ms ms"
+          
+          # Allow a 5% tolerance to account for test variability
+          tolerance=1.05
+          threshold=$(echo "$previous_ms * $tolerance" | bc)
+          
+          if (( $(echo "$current_ms > $threshold" | bc -l) )); then
+            echo "::error::Performance regression detected! Processing time increased from $previous_ms ms to $current_ms ms (exceeds $threshold ms threshold)"
+            exit 1
+          else
+            echo "No significant performance regression detected."
+          fi
+      - name: Run profile test multiple times for stability
+        run: |
+         for i in {1..3}; do
+            echo "Run $i"
+            go run main.go
+            # Store results
+         done
+         # Use average for comparison
