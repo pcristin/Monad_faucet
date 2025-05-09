@@ -108,6 +108,13 @@ func (db *DB) UpdateTransactionStatus(depositID *big.Int, status, txHash string)
 	logger.Info("Updating transaction status for deposit ID %s: status=%s, txHash=%s",
 		depositIDStr, status, txHash)
 
+	if status == StatusCompleted && txHash == "" {
+		logger.Error("ERROR: Cannot mark deposit %s as completed without a txHash", depositID.String())
+		// Force the status to be "pending" if txHash is empty
+		status = StatusPending
+		logger.Error("Forcing status to 'pending' for deposit %s due to missing txHash", depositID.String())
+	}
+
 	// If the status is completed, try to get mon_amount from distributions table
 	var monAmount *big.Int
 	if status == StatusCompleted && txHash != "" {
@@ -1109,4 +1116,45 @@ func (db *DB) UpdateRefundTransactionHash(depositID *big.Int, refundTxHash strin
 	}
 
 	return nil
+}
+
+// Add this to transaction.go
+// ReleaseLocksForCompletedTransactions releases locks for transactions that are marked as completed
+func (db *DB) ReleaseLocksForCompletedTransactions() (int, error) {
+	// Find deposits that are marked as completed but still have processing locks
+	rows, err := db.Query(`
+        SELECT p.deposit_id, p.instance_id
+        FROM processing_locks p
+        JOIN transaction_history t ON p.deposit_id = t.deposit_id
+        WHERE t.status = 'completed'
+    `)
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to query locked completed transactions: %w", err)
+	}
+	defer rows.Close()
+
+	var count int
+	for rows.Next() {
+		var depositIDStr, instanceID string
+		if err := rows.Scan(&depositIDStr, &instanceID); err != nil {
+			return count, fmt.Errorf("failed to scan deposit ID: %w", err)
+		}
+
+		// Delete the lock
+		_, err := db.Exec(`
+            DELETE FROM processing_locks
+            WHERE deposit_id = $1 AND instance_id = $2
+        `, depositIDStr, instanceID)
+
+		if err != nil {
+			logger.Error("Failed to release lock for completed deposit %s: %v", depositIDStr, err)
+			continue
+		}
+
+		logger.Info("Released processing lock for completed deposit ID %s", depositIDStr)
+		count++
+	}
+
+	return count, nil
 }

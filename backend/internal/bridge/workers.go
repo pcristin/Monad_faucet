@@ -892,7 +892,7 @@ func (pools *BridgeWorkerPools) processBatchMint(ctx context.Context, distributi
 				WalletAddress: dist.WalletAddress,
 				MonAmount:     dist.MonAmount,
 				Status:        database.DistStatusCompleted,
-				MonadTxHash:   txHash,
+				MonadTxHash:   dist.txHash,
 			}
 
 			if err := pools.service.db.CreateDistribution(initialDist); err != nil {
@@ -1557,6 +1557,10 @@ func (pools *BridgeWorkerPools) processDBJob(ctx context.Context, job *DBWorkerJ
 			} else {
 				logger.Info("Successfully updated transaction history for deposit ID %s with status %s, tx hash %s and MON amount %s",
 					depositIDStr, status, txHash, job.Distribution.MonAmount.String())
+				if job.Distribution.Status == database.DistStatusCompleted {
+					logger.Info("Releasing lock after transaction history update for deposit ID %s", job.Distribution.DepositID)
+					pools.service.releaseLock(job.Distribution.DepositID)
+				}
 			}
 		} else {
 			// Fall back to the original method which tries to find MON amount in distributions table

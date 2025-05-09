@@ -50,6 +50,28 @@ func (s *BridgeService) Start() error {
 	s.wg.Add(1)
 	go s.syncChainStatesPeriodically()
 
+	// Start periodic lock release process for completed transactions
+	s.wg.Add(1)
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				count, err := s.db.ReleaseLocksForCompletedTransactions()
+				if err != nil {
+					logger.Error("Error releasing locks for completed transactions: %v", err)
+				} else {
+					logger.Info("Released %d locks for completed transactions", count)
+				}
+			case <-s.ctx.Done():
+				logger.Info("Lock release process stopped")
+				return
+			}
+		}
+	}()
+
 	logger.Info("Bridge service started successfully, all processors running")
 	return nil
 }
