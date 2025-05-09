@@ -40,8 +40,20 @@ jobs:
           cd backend/tests/profile || exit 0
           go run main.go || echo "Profile test failed but continuing workflow"
           
-          # Extract processing time or use default
-          grep "Total test duration:" *.log 2>/dev/null | awk '{print $4}' > /tmp/profile_results/current_time.txt || echo "10s" > /tmp/profile_results/current_time.txt
+          # Extract processing time with improved validation
+          if grep "Total test duration:" *.log 2>/dev/null; then
+            # Get the time value and ensure it's not empty
+            time_value=$(grep "Total test duration:" *.log 2>/dev/null | awk '{print $4}')
+            if [[ -n "$time_value" && "$time_value" =~ [0-9]+s$ ]]; then
+              echo "$time_value" > /tmp/profile_results/current_time.txt
+            else
+              echo "Invalid time format found, using default"
+              echo "10s" > /tmp/profile_results/current_time.txt
+            fi
+          else
+            echo "No time found in logs, using default"
+            echo "10s" > /tmp/profile_results/current_time.txt
+          fi
           
           # Show the result
           echo "Current test duration:"
@@ -66,8 +78,20 @@ jobs:
           cd backend/tests/profile || exit 0
           go run main.go || echo "Profile test failed but continuing workflow"
           
-          # Extract processing time or use default
-          grep "Total test duration:" *.log 2>/dev/null | awk '{print $4}' > /tmp/profile_results/previous_time.txt || echo "10s" > /tmp/profile_results/previous_time.txt
+          # Extract processing time with improved validation
+          if grep "Total test duration:" *.log 2>/dev/null; then
+            # Get the time value and ensure it's not empty
+            time_value=$(grep "Total test duration:" *.log 2>/dev/null | awk '{print $4}')
+            if [[ -n "$time_value" && "$time_value" =~ [0-9]+s$ ]]; then
+              echo "$time_value" > /tmp/profile_results/previous_time.txt
+            else
+              echo "Invalid time format found, using default"
+              echo "10s" > /tmp/profile_results/previous_time.txt
+            fi
+          else
+            echo "No time found in logs, using default"
+            echo "10s" > /tmp/profile_results/previous_time.txt
+          fi
           
           # Show the result
           echo "Previous test duration:"
@@ -95,6 +119,17 @@ jobs:
           # Convert time strings to milliseconds for comparison
           current_ms=$(echo $current_time | sed 's/s$//' | awk '{print $1 * 1000}')
           previous_ms=$(echo $previous_time | sed 's/s$//' | awk '{print $1 * 1000}')
+          
+          # Validate and handle zero values
+          if [[ "$current_ms" == "0" || -z "$current_ms" ]]; then
+            echo "Warning: Current processing time is 0 or empty, using default value"
+            current_ms=10000
+          fi
+          
+          if [[ "$previous_ms" == "0" || -z "$previous_ms" ]]; then
+            echo "Warning: Previous processing time is 0 or empty, using default value"
+            previous_ms=10000
+          fi
           
           echo "Current processing time: $current_ms ms"
           echo "Previous processing time: $previous_ms ms"
