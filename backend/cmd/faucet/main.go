@@ -61,7 +61,7 @@ func main() {
 	}
 
 	// Set production mode for logging if running in production environment
-	if os.Getenv("PRODUCTION") == "true" {
+	if os.Getenv("PRODUCTION") == "true" || os.Getenv("RENDER") == "true" {
 		logger.SetProduction(true)
 		logger.Info("Running in production mode - verbose logging disabled")
 	} else {
@@ -245,16 +245,22 @@ func main() {
 	blockchain.LogNetworkStatus(networkUrls, contractAddresses)
 
 	// Start listening for deposit events from Arbitrum
-	go startListener(ctx, arbListener, bridgeService)
+	go func() {
+		startListener(ctx, arbListener, bridgeService)
+	}()
 
 	// Start listening for deposit events from Base if configured
 	if baseListener != nil {
-		go startListener(ctx, baseListener, bridgeService)
+		go func() {
+			startListener(ctx, baseListener, bridgeService)
+		}()
 	}
 
 	// Start listening for deposit events from Optimism if configured
 	if optimismListener != nil {
-		go startListener(ctx, optimismListener, bridgeService)
+		go func() {
+			startListener(ctx, optimismListener, bridgeService)
+		}()
 	}
 
 	// Create API server

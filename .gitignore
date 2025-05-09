@@ -68,3 +68,8 @@ backend/scripts/admin/*
 # Analytics
 analytics/.env
 venv/
+
+# Profile test files
+current_time.txt
+previous_time.txt
+/backend/profiles/

@@ -20,6 +20,9 @@ jobs:
         with:
           go-version: '1.23'
 
+      - name: Pull PostgreSQL image (for local testing)
+        run: docker pull postgres:15-alpine
+
       - name: Run profile test on current commit
         run: |
           cd backend/tests/profile
