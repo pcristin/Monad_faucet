@@ -168,7 +168,10 @@ func (db *DB) migrateRecord(record MigrationRecord) error {
 
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			errRollback := tx.Rollback()
+			if errRollback != nil {
+				logger.Error("Failed to rollback transaction: %v", errRollback)
+			}
 		}
 	}()
 
@@ -610,7 +613,10 @@ func (db *DB) RunMigrations(ctx context.Context) error {
 
 		// Execute the migration
 		if err := m(tx); err != nil {
-			tx.Rollback()
+			rollbackErr := tx.Rollback()
+			if rollbackErr != nil {
+				logger.Error("Failed to rollback transaction: %v", rollbackErr)
+			}
 			return fmt.Errorf("migration %d failed: %w", i+1, err)
 		}
 

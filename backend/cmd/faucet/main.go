@@ -184,7 +184,12 @@ func main() {
 	if err := bridgeService.Start(); err != nil {
 		logger.Fatal("Failed to start bridge service: %v", err)
 	}
-	defer bridgeService.Stop()
+	defer func() {
+		err := bridgeService.Stop()
+		if err != nil {
+			logger.Error("Failed to stop bridge service: %v", err)
+		}
+	}()
 
 	// Create event listener for Arbitrum deposits
 	logger.Info("Creating event listener for Arbitrum deposits with contract address: %s", cfg.ArbDepositorAddr)

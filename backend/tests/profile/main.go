@@ -95,7 +95,12 @@ func simulateFullDepositProcessing() error {
 	if err := mockBridge.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start mock bridge: %w", err)
 	}
-	defer mockBridge.Stop()
+	defer func() {
+		err := mockBridge.Stop()
+		if err != nil {
+			fmt.Printf("Failed to stop mock bridge: %v\n", err)
+		}
+	}()
 
 	// Create bridge worker pools
 	// NOTE: We can't directly access bridge.BridgeWorkerPools because of unexported fields
@@ -178,9 +183,15 @@ func simulateFullDepositProcessing() error {
 
 	// Set up deposit event channel
 	depositEventCh := make(chan interfaces.DepositEvent, 10000)
-	mockBridge.SubscribeToDepositEvents(depositEventCh)
-	defer mockBridge.UnsubscribeFromDepositEvents(depositEventCh)
-
+	errSub := mockBridge.SubscribeToDepositEvents(depositEventCh)
+	if errSub != nil {
+		fmt.Printf("Failed to subscribe to deposit events: %v\n", errSub)
+	}
+	defer func() {
+		err := mockBridge.UnsubscribeFromDepositEvents(depositEventCh)
+		if err != nil {
+			fmt.Printf("Failed to unsubscribe from deposit events: %v\n", err)
+		}
 	// Process events from the channel and submit them to the worker pool
 	go func() {
 		for event := range depositEventCh {
@@ -268,7 +279,10 @@ func simulateFullDepositProcessing() error {
 	fmt.Println("Simulating transaction confirmations...")
 	for i := 0; i < numDeposits; i++ {
 		txHash := fmt.Sprintf("0x%064x", i)
-		mockBridge.SimulateTransactionConfirmation(txHash)
+		err := mockBridge.SimulateTransactionConfirmation(txHash)
+		if err != nil {
+			fmt.Printf("Failed to simulate transaction confirmation: %v\n", err)
+		}
 	}
 
 	// Wait for confirmation processing

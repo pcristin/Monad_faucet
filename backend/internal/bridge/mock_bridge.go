@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/pcristin/monad-faucet/internal/interfaces"
+	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
 var _ interfaces.BridgeServiceInterface = (*MockBridgeService)(nil)
@@ -288,7 +289,10 @@ func (m *MockBridgeService) processEvents() {
 			m.subscribersMu.RUnlock()
 
 			// Process the deposit automatically
-			m.ProcessDeposit(event.DepositID, event.UserAddress, event.Amount, event.TxHash)
+			err := m.ProcessDeposit(event.DepositID, event.UserAddress, event.Amount, event.TxHash)
+			if err != nil {
+				logger.Error("Failed to process deposit: %v", err)
+			}
 		}
 	}
 }
