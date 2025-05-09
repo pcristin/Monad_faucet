@@ -1050,16 +1050,28 @@ func (db *DB) UpdateTransactionWithMonAmount(depositID *big.Int, status, txHash 
 	for attempt := 1; attempt <= 3; attempt++ {
 		var result sql.Result
 
-		// Always update with the explicit MON amount
-		result, err = db.Exec(
-			`UPDATE transaction_history 
-			SET status = $1, monad_tx_hash = $2, mon_amount = $3, updated_at = CURRENT_TIMESTAMP 
-			WHERE deposit_id = $4`,
-			status,
-			txHash,
-			monAmountStr,
-			depositIDStr,
-		)
+		// If txHash is empty, preserve the existing monad_tx_hash value
+		if txHash == "" {
+			result, err = db.Exec(
+				`UPDATE transaction_history 
+                SET status = $1, mon_amount = $2, updated_at = CURRENT_TIMESTAMP 
+                WHERE deposit_id = $3`,
+				status,
+				monAmountStr,
+				depositIDStr,
+			)
+		} else {
+			// If txHash is provided, update it as well
+			result, err = db.Exec(
+				`UPDATE transaction_history 
+                SET status = $1, monad_tx_hash = $2, mon_amount = $3, updated_at = CURRENT_TIMESTAMP 
+                WHERE deposit_id = $4`,
+				status,
+				txHash,
+				monAmountStr,
+				depositIDStr,
+			)
+		}
 
 		if err != nil {
 			fmt.Printf("Error updating transaction with MON amount (attempt %d/3): %v\n", attempt, err)
