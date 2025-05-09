@@ -192,6 +192,8 @@ func simulateFullDepositProcessing() error {
 		if err != nil {
 			fmt.Printf("Failed to unsubscribe from deposit events: %v\n", err)
 		}
+	}()
+
 	// Process events from the channel and submit them to the worker pool
 	go func() {
 		for event := range depositEventCh {
