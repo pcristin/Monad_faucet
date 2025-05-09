@@ -38,12 +38,12 @@ jobs:
           
           # Run the profile test, but don't fail if it errors
           cd backend/tests/profile || exit 0
-          go run main.go || echo "Profile test failed but continuing workflow"
+          go run main.go > test_output.log 2>&1 || echo "Profile test failed but continuing workflow"
           
           # Extract processing time with improved validation
-          if grep "Total test duration:" *.log 2>/dev/null; then
+          if grep "Total test duration:" test_output.log 2>/dev/null; then
             # Get the time value and ensure it's not empty
-            time_value=$(grep "Total test duration:" *.log 2>/dev/null | awk '{print $4}')
+            time_value=$(grep "Total test duration:" test_output.log 2>/dev/null | awk '{print $4}')
             if [[ -n "$time_value" && "$time_value" =~ [0-9]+s$ ]]; then
               echo "$time_value" > /tmp/profile_results/current_time.txt
             else
@@ -76,12 +76,12 @@ jobs:
           
           # Run the profile test, but don't fail if it errors
           cd backend/tests/profile || exit 0
-          go run main.go || echo "Profile test failed but continuing workflow"
+          go run main.go > test_output.log 2>&1 || echo "Profile test failed but continuing workflow"
           
           # Extract processing time with improved validation
-          if grep "Total test duration:" *.log 2>/dev/null; then
+          if grep "Total test duration:" test_output.log 2>/dev/null; then
             # Get the time value and ensure it's not empty
-            time_value=$(grep "Total test duration:" *.log 2>/dev/null | awk '{print $4}')
+            time_value=$(grep "Total test duration:" test_output.log 2>/dev/null | awk '{print $4}')
             if [[ -n "$time_value" && "$time_value" =~ [0-9]+s$ ]]; then
               echo "$time_value" > /tmp/profile_results/previous_time.txt
             else
