@@ -30,12 +30,8 @@ jobs:
 
       - name: Checkout previous commit
         run: |
-          # Store current commit SHA
-          echo "CURRENT_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
-          # Get previous commit SHA 
-          echo "PREVIOUS_SHA=$(git rev-parse HEAD~1)" >> $GITHUB_ENV
-          # Checkout previous commit
-          git checkout ${{ env.PREVIOUS_SHA }}
+          # Get previous commit SHA and checkout directly
+          git checkout $(git rev-parse HEAD~1)
 
       - name: Run profile test on previous commit
         run: |
@@ -47,7 +43,7 @@ jobs:
 
       - name: Checkout back to current commit
         run: |
-          git checkout ${{ env.CURRENT_SHA }}
+          git checkout ${{ github.sha }}
 
       - name: Compare processing times
         run: |
