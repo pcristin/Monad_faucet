@@ -905,7 +905,7 @@ func (pools *BridgeWorkerPools) processBatchMint(ctx context.Context, distributi
 			distributionsToUpdate = append(distributionsToUpdate, &database.Distribution{
 				DepositID:     dist.DepositID,
 				Status:        database.DistStatusCompleted,
-				MonadTxHash:   txHash,
+				MonadTxHash:   dist.txHash,
 				MonAmount:     dist.MonAmount,
 				WalletAddress: dist.WalletAddress,
 			})
@@ -922,7 +922,7 @@ func (pools *BridgeWorkerPools) processBatchMint(ctx context.Context, distributi
 			Distribution: &database.Distribution{
 				DepositID:   dist.DepositID,
 				Status:      database.DistStatusCompleted,
-				MonadTxHash: txHash,
+				MonadTxHash: dist.txHash,
 				MonAmount:   dist.MonAmount, // Include the MON amount for the transaction history
 			},
 		}
@@ -956,10 +956,6 @@ func (pools *BridgeWorkerPools) processBatchMint(ctx context.Context, distributi
 	for i, depositID := range depositIDs {
 		depositIDStr := depositID.String()
 		if amounts[i].Cmp(big.NewInt(0)) <= 0 {
-			continue
-		}
-
-		if _, processed := alreadyProcessed[depositIDStr]; processed {
 			continue
 		}
 
@@ -1019,11 +1015,13 @@ func (pools *BridgeWorkerPools) processBatchDistributionJob(ctx context.Context,
 				continue
 			}
 
+			dist.txHash = txHash
+
 			// Add to bulk update collections
 			distributions = append(distributions, &database.Distribution{
 				DepositID:     dist.DepositID,
 				Status:        database.DistStatusCompleted,
-				MonadTxHash:   txHash, // Use the transaction hash from the batch
+				MonadTxHash:   dist.txHash, // Use the transaction hash from the batch
 				MonAmount:     dist.MonAmount,
 				WalletAddress: dist.WalletAddress,
 			})
