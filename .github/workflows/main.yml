@@ -488,9 +488,9 @@ jobs:
           echo "Current seconds: $current_sec"
           echo "Previous seconds: $previous_sec"
           
-          # Convert to milliseconds using bc with proper error handling
-          current_ms=$(echo "scale=0; ($current_min * 60 + $current_sec) * 1000 / 1" | bc -l || echo "0")
-          previous_ms=$(echo "scale=0; ($previous_min * 60 + $previous_sec) * 1000 / 1" | bc -l || echo "0")
+          # Convert to milliseconds using awk instead of bc for better floating point handling
+          current_ms=$(awk "BEGIN {print int(($current_min * 60 + $current_sec) * 1000)}")
+          previous_ms=$(awk "BEGIN {print int(($previous_min * 60 + $previous_sec) * 1000)}")
           
           # Validate and handle zero values
           if [[ "$current_ms" == "0" || -z "$current_ms" ]]; then
@@ -506,13 +506,12 @@ jobs:
           echo "Current processing time: $current_ms ms"
           echo "Previous processing time: $previous_ms ms"
           
-          # Allow a 5% tolerance to account for test variability
-          tolerance=1.05
-          threshold=$(echo "scale=0; $previous_ms * $tolerance / 1" | bc -l)
+          # Calculate threshold using awk
+          threshold=$(awk "BEGIN {print int($previous_ms * 1.05)}")
           
           echo "Threshold: $threshold ms"
           
-          # Compare as integers to avoid floating point comparison issues
+          # Compare as integers
           if (( $current_ms > $threshold )); then
             echo "::error::Performance regression detected! Processing time increased from $previous_ms ms to $current_ms ms (exceeds $threshold ms threshold)"
             exit 1
@@ -520,7 +519,7 @@ jobs:
             echo "No significant performance regression detected."
             # If current is faster, show the improvement percentage
             if (( $current_ms < $previous_ms )); then
-              improvement=$(echo "scale=2; ($previous_ms - $current_ms) * 100 / $previous_ms" | bc -l)
+              improvement=$(awk "BEGIN {printf \"%.2f\", ($previous_ms - $current_ms) * 100 / $previous_ms}")
               echo "Performance improved by approximately $improvement%"
             fi
           fi
