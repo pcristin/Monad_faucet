@@ -489,8 +489,9 @@ jobs:
           echo "Previous seconds: $previous_sec"
           
           # Convert to milliseconds using awk instead of bc for better floating point handling
-          current_ms=$(awk "BEGIN {print int(($current_min * 60 + $current_sec) * 1000)}")
-          previous_ms=$(awk "BEGIN {print int(($previous_min * 60 + $previous_sec) * 1000)}")
+          # Safely handle empty values by providing defaults inside awk
+          current_ms=$(awk -v min="${current_min:-0}" -v sec="${current_sec:-0}" 'BEGIN {print int((min * 60 + sec) * 1000)}')
+          previous_ms=$(awk -v min="${previous_min:-0}" -v sec="${previous_sec:-0}" 'BEGIN {print int((min * 60 + sec) * 1000)}')
           
           # Validate and handle zero values
           if [[ "$current_ms" == "0" || -z "$current_ms" ]]; then
@@ -507,7 +508,7 @@ jobs:
           echo "Previous processing time: $previous_ms ms"
           
           # Calculate threshold using awk
-          threshold=$(awk "BEGIN {print int($previous_ms * 1.05)}")
+          threshold=$(awk -v prev="$previous_ms" 'BEGIN {print int(prev * 1.05)}')
           
           echo "Threshold: $threshold ms"
           
@@ -519,7 +520,7 @@ jobs:
             echo "No significant performance regression detected."
             # If current is faster, show the improvement percentage
             if (( $current_ms < $previous_ms )); then
-              improvement=$(awk "BEGIN {printf \"%.2f\", ($previous_ms - $current_ms) * 100 / $previous_ms}")
+              improvement=$(awk -v curr="$current_ms" -v prev="$previous_ms" 'BEGIN {printf "%.2f", (prev - curr) * 100 / prev}')
               echo "Performance improved by approximately $improvement%"
             fi
           fi
