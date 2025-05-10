@@ -31,7 +31,7 @@ jobs:
           
           # Check if profile directory exists
           if [ ! -d "backend/tests/profile" ]; then
-            echo "Profile test directory doesn't exist in current commit"
+            echo "::warning::Profile test directory doesn't exist in current commit"
             echo "10s" > /tmp/profile_results/current_time.txt
             exit 0
           fi
@@ -41,26 +41,35 @@ jobs:
           
           # First check if main.go exists
           if [ ! -f "main.go" ]; then
-            echo "main.go doesn't exist in backend/tests/profile"
+            echo "::warning::main.go doesn't exist in backend/tests/profile"
             echo "10s" > /tmp/profile_results/current_time.txt
             exit 0
           fi
           
-          # Run the test with output to a log file
-          go run main.go > test_output.log 2>&1 || echo "Profile test failed but continuing workflow"
+          # Run the test with output to a log file and show output
+          echo "::group::Test Output"
+          go run main.go | tee test_output.log || echo "Profile test failed but continuing workflow"
+          echo "::endgroup::"
           
-          # Extract processing time with improved validation
-          if grep "Total test duration:" test_output.log 2>/dev/null; then
-            # Get the time value and ensure it's not empty
-            time_value=$(grep "Total test duration:" test_output.log 2>/dev/null | awk '{print $4}')
-            if [[ -n "$time_value" && "$time_value" =~ [0-9]+s$ ]]; then
+          # Debug: Show log file contents
+          echo "::group::Log File Contents"
+          cat test_output.log
+          echo "::endgroup::"
+          
+          # Look for timing patterns with multiple formats
+          if grep -E "Total test duration:|Processing time:|Duration:|Completed in" test_output.log; then
+            # Extract time value with flexible pattern
+            time_value=$(grep -E "Total test duration:|Processing time:|Duration:|Completed in" test_output.log | head -1 | grep -oE '[0-9]+(\.[0-9]+)?s')
+            
+            if [[ -n "$time_value" ]]; then
+              echo "Found time: $time_value"
               echo "$time_value" > /tmp/profile_results/current_time.txt
             else
-              echo "Invalid time format found, using default"
+              echo "::warning::Time found but couldn't extract value, using default"
               echo "10s" > /tmp/profile_results/current_time.txt
             fi
           else
-            echo "No time found in logs, using default"
+            echo "::warning::No time found in logs, using default"
             echo "10s" > /tmp/profile_results/current_time.txt
           fi
           
@@ -78,14 +87,14 @@ jobs:
         run: |
           # Check if profile directory exists
           if [ ! -d "backend/tests/profile" ]; then
-            echo "Profile test directory doesn't exist in previous commit"
+            echo "::warning::Profile test directory doesn't exist in previous commit"
             echo "10s" > /tmp/profile_results/previous_time.txt
             exit 0
           fi
           
           # First check if main.go exists to avoid errors
           if [ ! -f "backend/tests/profile/main.go" ]; then
-            echo "main.go doesn't exist in backend/tests/profile in the previous commit"
+            echo "::warning::main.go doesn't exist in backend/tests/profile in the previous commit"
             echo "10s" > /tmp/profile_results/previous_time.txt
             exit 0
           fi
@@ -100,8 +109,9 @@ jobs:
             exit 0
           fi
           
-          # Run the compiled binary instead of go run to avoid compilation errors
-          /tmp/profile_test > test_output.log 2>&1 || {
+          # Run the compiled binary with output to a log file and show output
+          echo "::group::Test Output (Previous Commit)"
+          /tmp/profile_test | tee test_output.log || {
             echo "::warning::Previous commit test failed with exit code $?"
             echo "Last 20 lines of the log:"
             tail -20 test_output.log || echo "No log output"
@@ -109,19 +119,27 @@ jobs:
             echo "10s" > /tmp/profile_results/previous_time.txt
             exit 0
           }
+          echo "::endgroup::"
           
-          # Extract processing time with improved validation
-          if grep "Total test duration:" test_output.log 2>/dev/null; then
-            # Get the time value and ensure it's not empty
-            time_value=$(grep "Total test duration:" test_output.log 2>/dev/null | awk '{print $4}')
-            if [[ -n "$time_value" && "$time_value" =~ [0-9]+s$ ]]; then
+          # Debug: Show log file contents
+          echo "::group::Log File Contents (Previous Commit)"
+          cat test_output.log
+          echo "::endgroup::"
+          
+          # Look for timing patterns with multiple formats
+          if grep -E "Total test duration:|Processing time:|Duration:|Completed in" test_output.log; then
+            # Extract time value with flexible pattern
+            time_value=$(grep -E "Total test duration:|Processing time:|Duration:|Completed in" test_output.log | head -1 | grep -oE '[0-9]+(\.[0-9]+)?s')
+            
+            if [[ -n "$time_value" ]]; then
+              echo "Found time: $time_value"
               echo "$time_value" > /tmp/profile_results/previous_time.txt
             else
-              echo "Invalid time format found, using default"
+              echo "::warning::Time found but couldn't extract value, using default"
               echo "10s" > /tmp/profile_results/previous_time.txt
             fi
           else
-            echo "No time found in logs, using default"
+            echo "::warning::No time found in logs, using default"
             echo "10s" > /tmp/profile_results/previous_time.txt
           fi
           
