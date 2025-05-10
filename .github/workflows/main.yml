@@ -46,9 +46,21 @@ jobs:
             exit 0
           fi
           
+          # Make docker available for testcontainers
+          echo "::group::Docker Setup"
+          docker info || echo "Docker appears to be unavailable"
+          echo "::endgroup::"
+          
+          # Fix permissions for docker socket if needed
+          sudo chmod 666 /var/run/docker.sock 2>/dev/null || echo "Could not chmod docker socket"
+          
           # Run the test with output to a log file and show output
           echo "::group::Test Output"
-          go run main.go | tee test_output.log || echo "Profile test failed but continuing workflow"
+          go run main.go | tee test_output.log || {
+            echo "::warning::Profile test failed but continuing workflow"
+            echo "Last 20 lines of the log:"
+            tail -20 test_output.log
+          }
           echo "::endgroup::"
           
           # Debug: Show log file contents
@@ -56,10 +68,10 @@ jobs:
           cat test_output.log
           echo "::endgroup::"
           
-          # Look for timing patterns with multiple formats
-          if grep -E "Total test duration:|Processing time:|Duration:|Completed in" test_output.log; then
-            # Extract time value with flexible pattern
-            time_value=$(grep -E "Total test duration:|Processing time:|Duration:|Completed in" test_output.log | head -1 | grep -oE '[0-9]+(\.[0-9]+)?s')
+          # Look specifically for "Total test duration: XXs" from your test output
+          if grep "Total test duration:" test_output.log; then
+            # Extract time value with pattern that matches your output: "Total test duration: 1m23.456s"
+            time_value=$(grep "Total test duration:" test_output.log | awk '{print $4}')
             
             if [[ -n "$time_value" ]]; then
               echo "Found time: $time_value"
@@ -99,6 +111,14 @@ jobs:
             exit 0
           fi
           
+          # Make docker available for testcontainers
+          echo "::group::Docker Setup (Previous Commit)"
+          docker info || echo "Docker appears to be unavailable"
+          echo "::endgroup::"
+          
+          # Fix permissions for docker socket if needed
+          sudo chmod 666 /var/run/docker.sock 2>/dev/null || echo "Could not chmod docker socket"
+          
           # Run the profile test with better error capture
           cd backend/tests/profile || exit 0
           
@@ -109,7 +129,7 @@ jobs:
             exit 0
           fi
           
-          # Run the compiled binary with output to a log file and show output
+          # Run the compiled binary instead of go run to avoid compilation errors
           echo "::group::Test Output (Previous Commit)"
           /tmp/profile_test | tee test_output.log || {
             echo "::warning::Previous commit test failed with exit code $?"
@@ -126,10 +146,10 @@ jobs:
           cat test_output.log
           echo "::endgroup::"
           
-          # Look for timing patterns with multiple formats
-          if grep -E "Total test duration:|Processing time:|Duration:|Completed in" test_output.log; then
-            # Extract time value with flexible pattern
-            time_value=$(grep -E "Total test duration:|Processing time:|Duration:|Completed in" test_output.log | head -1 | grep -oE '[0-9]+(\.[0-9]+)?s')
+          # Look specifically for "Total test duration: XXs" from your test output
+          if grep "Total test duration:" test_output.log; then
+            # Extract time value with pattern that matches your output: "Total test duration: 1m23.456s"
+            time_value=$(grep "Total test duration:" test_output.log | awk '{print $4}')
             
             if [[ -n "$time_value" ]]; then
               echo "Found time: $time_value"
@@ -167,8 +187,18 @@ jobs:
           previous_time=$(cat /tmp/profile_results/previous_time.txt)
           
           # Convert time strings to milliseconds for comparison
-          current_ms=$(echo $current_time | sed 's/s$//' | awk '{print $1 * 1000}')
-          previous_ms=$(echo $previous_time | sed 's/s$//' | awk '{print $1 * 1000}')
+          # Handle both simple formats (10s) and complex formats (1m23.456s)
+          # Extract minutes if present
+          current_min=$(echo $current_time | grep -o '[0-9]\+m' | sed 's/m//' || echo "0")
+          previous_min=$(echo $previous_time | grep -o '[0-9]\+m' | sed 's/m//' || echo "0")
+          
+          # Extract seconds
+          current_sec=$(echo $current_time | grep -o '[0-9]\+\(\.[0-9]\+\)\?s' | sed 's/s//')
+          previous_sec=$(echo $previous_time | grep -o '[0-9]\+\(\.[0-9]\+\)\?s' | sed 's/s//')
+          
+          # Convert to milliseconds
+          current_ms=$(echo "($current_min * 60 + $current_sec) * 1000" | bc)
+          previous_ms=$(echo "($previous_min * 60 + $previous_sec) * 1000" | bc)
           
           # Validate and handle zero values
           if [[ "$current_ms" == "0" || -z "$current_ms" ]]; then
