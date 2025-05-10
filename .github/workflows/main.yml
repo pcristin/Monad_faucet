@@ -440,6 +440,12 @@ jobs:
 
       - name: Compare processing times
         run: |
+          # Show the actual content of the timing files for debugging
+          echo "Content of current_time.txt:"
+          cat /tmp/profile_results/current_time.txt
+          echo "Content of previous_time.txt:"
+          cat /tmp/profile_results/previous_time.txt
+          
           # Verify timing files exist, otherwise create defaults
           if [ ! -f "/tmp/profile_results/current_time.txt" ]; then
             echo "10s" > /tmp/profile_results/current_time.txt
@@ -453,19 +459,38 @@ jobs:
           current_time=$(cat /tmp/profile_results/current_time.txt)
           previous_time=$(cat /tmp/profile_results/previous_time.txt)
           
-          # Convert time strings to milliseconds for comparison
-          # Handle both simple formats (10s) and complex formats (1m23.456s)
-          # Extract minutes if present
-          current_min=$(echo $current_time | grep -o '[0-9]\+m' | sed 's/m//' || echo "0")
-          previous_min=$(echo $previous_time | grep -o '[0-9]\+m' | sed 's/m//' || echo "0")
+          echo "Raw current time: $current_time"
+          echo "Raw previous time: $previous_time"
           
-          # Extract seconds
-          current_sec=$(echo $current_time | grep -o '[0-9]\+\(\.[0-9]\+\)\?s' | sed 's/s//')
-          previous_sec=$(echo $previous_time | grep -o '[0-9]\+\(\.[0-9]\+\)\?s' | sed 's/s//')
+          # Simplified approach to convert time strings to milliseconds
+          # This handles formats like "2.208796639s" or "1m23.456s"
           
-          # Convert to milliseconds
-          current_ms=$(echo "($current_min * 60 + $current_sec) * 1000" | bc)
-          previous_ms=$(echo "($previous_min * 60 + $previous_sec) * 1000" | bc)
+          # Extract minutes (if present) or use 0
+          current_min=$(echo "$current_time" | grep -o '[0-9]\+m' | sed 's/m//' || echo "0")
+          previous_min=$(echo "$previous_time" | grep -o '[0-9]\+m' | sed 's/m//' || echo "0")
+          
+          echo "Current minutes: $current_min"
+          echo "Previous minutes: $previous_min"
+          
+          # Extract seconds (including decimal part)
+          current_sec=$(echo "$current_time" | sed -E 's/^([0-9]+m)?([0-9]+(\.[0-9]+)?)s$/\2/')
+          previous_sec=$(echo "$previous_time" | sed -E 's/^([0-9]+m)?([0-9]+(\.[0-9]+)?)s$/\2/')
+          
+          # If extraction failed, try a simpler approach
+          if [[ -z "$current_sec" ]]; then
+            current_sec=$(echo "$current_time" | sed 's/s$//')
+          fi
+          
+          if [[ -z "$previous_sec" ]]; then
+            previous_sec=$(echo "$previous_time" | sed 's/s$//')
+          fi
+          
+          echo "Current seconds: $current_sec"
+          echo "Previous seconds: $previous_sec"
+          
+          # Convert to milliseconds using bc with proper error handling
+          current_ms=$(echo "scale=0; ($current_min * 60 + $current_sec) * 1000 / 1" | bc -l || echo "0")
+          previous_ms=$(echo "scale=0; ($previous_min * 60 + $previous_sec) * 1000 / 1" | bc -l || echo "0")
           
           # Validate and handle zero values
           if [[ "$current_ms" == "0" || -z "$current_ms" ]]; then
@@ -483,13 +508,21 @@ jobs:
           
           # Allow a 5% tolerance to account for test variability
           tolerance=1.05
-          threshold=$(echo "$previous_ms * $tolerance" | bc)
+          threshold=$(echo "scale=0; $previous_ms * $tolerance / 1" | bc -l)
           
-          if (( $(echo "$current_ms > $threshold" | bc -l) )); then
+          echo "Threshold: $threshold ms"
+          
+          # Compare as integers to avoid floating point comparison issues
+          if (( $current_ms > $threshold )); then
             echo "::error::Performance regression detected! Processing time increased from $previous_ms ms to $current_ms ms (exceeds $threshold ms threshold)"
             exit 1
           else
             echo "No significant performance regression detected."
+            # If current is faster, show the improvement percentage
+            if (( $current_ms < $previous_ms )); then
+              improvement=$(echo "scale=2; ($previous_ms - $current_ms) * 100 / $previous_ms" | bc -l)
+              echo "Performance improved by approximately $improvement%"
+            fi
           fi
 
       - name: Run profile test multiple times for stability (informational only)
