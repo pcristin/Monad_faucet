@@ -465,6 +465,7 @@ jobs:
           
           import (
             "context"
+            "database/sql"
             "fmt"
             "math/big"
             "os"
@@ -473,7 +474,7 @@ jobs:
           
             "github.com/ethereum/go-ethereum/common"
             "github.com/pcristin/monad-faucet/internal/bridge"
-            "github.com/lib/pq"
+            _ "github.com/lib/pq"
             "github.com/pcristin/monad-faucet/internal/interfaces"
             "github.com/pcristin/monad-faucet/internal/workers"
           )
@@ -486,15 +487,18 @@ jobs:
             
             ctx := context.Background()
             
-            // Create minimal db connection without migrations
+            // Create minimal db connection using database/sql directly to avoid migrations
             connStr := "postgres://postgres:postgres@localhost:5432/testdb?sslmode=disable"
-            db, err := pq.NewConnector(connStr)
+            db, err := sql.Open("postgres", connStr)
             if err != nil {
-              t.Fatalf("Failed to create database connector: %v", err)
+              t.Fatalf("Failed to create database connection: %v", err)
             }
+            defer db.Close()
             
-            conn := db.Connect(ctx)
-            defer conn.Close()
+            // Test the connection
+            if err := db.PingContext(ctx); err != nil {
+              t.Fatalf("Cannot connect to database: %v", err)
+            }
             
             // Create tables directly
             tableCreationSQL := `
@@ -522,7 +526,7 @@ jobs:
               );`
             
             // Execute the table creation SQL
-            _, err = conn.ExecContext(ctx, tableCreationSQL)
+            _, err = db.ExecContext(ctx, tableCreationSQL)
             if err != nil {
               t.Logf("Note: Table creation gave: %v (this may be normal if tables exist)", err)
               // Continue anyway since error might just be that tables already exist
