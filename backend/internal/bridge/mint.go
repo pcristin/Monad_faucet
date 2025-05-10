@@ -33,7 +33,10 @@ func (s *BridgeService) validateDepositWithAmount(state *blockchain.ContractStat
 			// Continue with the error return below, but log the failure
 		} else {
 			logger.Info("Paused deposits due to low MON balance (starting with Arbitrum)")
-			s.SyncDepositorPauseStates(ctx)
+			errSync := s.SyncDepositorPauseStates(ctx)
+			if errSync != nil {
+				logger.Error("Failed to sync depositor pause states: %v", errSync)
+			}
 		}
 		return fmt.Errorf("insufficient MON balance in distributor")
 	}

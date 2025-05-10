@@ -3,6 +3,8 @@ package workers
 import (
 	"sync"
 
+	"github.com/pcristin/monad-faucet/internal/database"
+	"github.com/pcristin/monad-faucet/internal/interfaces"
 	"github.com/pcristin/monad-faucet/pkg/logger"
 )
 
@@ -31,12 +33,27 @@ type Manager struct {
 	isRunning bool
 }
 
+type MockManager struct {
+	*Manager
+	mockBridge *interfaces.MockBridgeService
+	mockDB     *database.DB
+}
+
 // NewManager creates a new worker pool manager
 func NewManager(cfg *PoolConfig) *Manager {
 	return &Manager{
 		pools:     make(map[PoolType]*WorkerPool),
 		config:    cfg,
 		isRunning: false,
+	}
+}
+
+func NewMockManager(cfg *PoolConfig, mockBridge *interfaces.MockBridgeService, mockDB *database.DB) *MockManager {
+	manager := NewManager(cfg)
+	return &MockManager{
+		Manager:    manager,
+		mockBridge: mockBridge,
+		mockDB:     mockDB,
 	}
 }
 
