@@ -186,19 +186,17 @@ jobs:
       - name: Run profile test on previous commit
         id: previous_test
         run: |
-          # Check if profile directory exists
+          # Create working directory for timing results if needed
+          mkdir -p /tmp/profile_results
+          
+          # Check if profile directory exists in the previous commit
           if [ ! -d "backend/tests/profile" ]; then
             echo "::warning::Profile test directory doesn't exist in previous commit"
-            echo "10s" > /tmp/profile_results/previous_time.txt
-            exit 0
+            mkdir -p backend/tests/profile
           fi
           
-          # First check if main.go exists to avoid errors
-          if [ ! -f "backend/tests/profile/main.go" ]; then
-            echo "::warning::main.go doesn't exist in backend/tests/profile in the previous commit"
-            echo "10s" > /tmp/profile_results/previous_time.txt
-            exit 0
-          fi
+          # Navigate to profile directory
+          cd backend/tests/profile || exit 0
           
           # Make docker available for testcontainers
           echo "::group::Docker Setup (Previous Commit)"
@@ -209,14 +207,11 @@ jobs:
           # Fix permissions for docker socket if needed
           sudo chmod 666 /var/run/docker.sock 2>/dev/null || echo "Could not chmod docker socket"
           
-          # Run the profile test with better error capture
-          cd backend/tests/profile || exit 0
-          
-          # Create the same CI-specific test for the previous commit
+          # Create a standalone CI-specific test that doesn't depend on main.go
           cat > main_ci.go << 'EOF'
           // CI-specific version of profile test
           package main
-
+          
           import (
             "context"
             "fmt"
@@ -228,9 +223,9 @@ jobs:
             "github.com/pcristin/monad-faucet/internal/bridge"
             "github.com/pcristin/monad-faucet/internal/interfaces"
           )
-
+          
           func main() {
-            fmt.Println("Running CI-specific profile test (no testcontainers)")
+            fmt.Println("Running CI-specific profile test for previous commit")
             ctx := context.Background()
             
             // Create mock bridge service
