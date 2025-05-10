@@ -64,7 +64,6 @@ jobs:
             "context"
             "fmt"
             "math/big"
-            "os"
             "time"
             "math/rand"
             
@@ -222,7 +221,6 @@ jobs:
             "context"
             "fmt"
             "math/big"
-            "os"
             "time"
             "math/rand"
             
