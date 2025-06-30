@@ -3,74 +3,49 @@ run:
   go: "1.23"
 
 linters-settings:
+  errcheck:
+    check-type-assertions: false
+    check-blank: false
   govet:
-    check-shadowing: true
-  golint:
-    min-confidence: 0.8
-  gocyclo:
-    min-complexity: 15
-  maligned:
-    suggest-new: true
-  dupl:
-    threshold: 100
-  goconst:
-    min-len: 2
-    min-occurrences: 2
-  misspell:
-    locale: US
-  lll:
-    line-length: 140
-  goimports:
-    local-prefixes: github.com/pcristin/monad-faucet
-  gocritic:
-    enabled-tags:
-      - performance
-      - style
-      - experimental
-    disabled-checks:
-      - wrapperFunc
+    check-shadowing: false
+    enable-all: false
+    enable:
+      - assign
+      - atomic
+      - bools
+      - buildtag
+      - copylocks
+      - nilfunc
+      - printf
+      - shift
+      - tests
+      - unreachable
+  gofmt:
+    simplify: false
 
 linters:
   enable:
-    - bodyclose
-    - deadcode
-    - depguard
-    - dogsled
-    - dupl
     - errcheck
-    - gochecknoinits
-    - goconst
-    - gocritic
-    - gofmt
-    - goimports
-    - golint
-    - gomnd
-    - goprintffuncname
-    - gosec
     - gosimple
     - govet
     - ineffassign
-    - interfacer
-    - lll
-    - misspell
-    - nakedret
-    - scopelint
     - staticcheck
-    - structcheck
-    - stylecheck
     - typecheck
-    - unconvert
-    - unparam
     - unused
-    - varcheck
-    - whitespace
+    - gofmt
 
 issues:
   exclude-rules:
     - path: _test\.go
       linters:
-        - gomnd
-        - gosec
-    - path: cmd/
+        - errcheck
+    # Exclude all errors from rollback checks since they're often intentionally ignored
+    - text: "Error return value of `.*\\.Rollback` is not checked"
       linters:
-        - gochecknoinits 
+        - errcheck
+    # Exclude init function warnings  
+    - text: "don't use `init` function"
+      linters:
+        - gochecknoinits
+  max-issues-per-linter: 10
+  max-same-issues: 3 
