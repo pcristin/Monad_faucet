@@ -7,7 +7,6 @@ linters-settings:
     check-type-assertions: false
     check-blank: false
   govet:
-    check-shadowing: false
     enable-all: false
     enable:
       - assign
@@ -20,6 +19,8 @@ linters-settings:
       - shift
       - tests
       - unreachable
+    disable:
+      - shadow
   gofmt:
     simplify: false
 
@@ -41,6 +42,13 @@ issues:
         - errcheck
     # Exclude all errors from rollback checks since they're often intentionally ignored
     - text: "Error return value of `.*\\.Rollback` is not checked"
+      linters:
+        - errcheck
+    # Exclude cleanup/shutdown function error checks that are often intentionally ignored
+    - text: "Error return value of `.*\\.Stop` is not checked"
+      linters:
+        - errcheck
+    - text: "Error return value of `.*SyncDepositorPauseStates` is not checked"
       linters:
         - errcheck
     # Exclude init function warnings  

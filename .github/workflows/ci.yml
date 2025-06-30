@@ -138,4 +138,4 @@ jobs:
       with:
         version: latest
         working-directory: ./backend
-        args: --timeout=2m --max-issues-per-linter=5 --max-same-issues=2 
+        args: --timeout=2m --max-issues-per-linter=5 --max-same-issues=2 --out-format=colored-line-number 
