@@ -8,10 +8,10 @@ Smart contracts and frontend developed by [@smeshny](https://github.com/smeshny)
 
 ## Badges
 
-[![CI](https://github.com/pcristin/monad-faucet/actions/workflows/ci.yml/badge.svg)](https://github.com/pcristin/monad-faucet/actions/workflows/ci.yml)
+[![CI](https://github.com/pcristin/Monad_faucet/actions/workflows/ci.yml/badge.svg)](https://github.com/pcristin/Monad_faucet/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?style=flat&logo=go)](https://golang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen)](https://github.com/pcristin/monad-faucet)
+[![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen)](https://github.com/pcristin/Monad_faucet)
 [![Docker](https://img.shields.io/badge/docker-ready-blue?style=flat&logo=docker)](https://hub.docker.com/)
 [![Uptime](https://img.shields.io/badge/uptime-99.9%25-brightgreen)](https://api.mwdao.xyz/bridge/health)
 
@@ -97,8 +97,8 @@ curl https://api.mwdao.xyz/bridge/api/v1/info
 
 ```bash
 # Clone the repository
-git clone https://github.com/pcristin/monad-faucet.git
-cd monad-faucet
+git clone https://github.com/pcristin/Monad_faucet.git
+cd Monad_faucet
 
 # Copy environment template
 cp backend/.env.example .env
@@ -392,8 +392,8 @@ python extract_failed_deposits.py
 ```bash
 # 1. Fork the repository on GitHub
 # 2. Clone your fork
-git clone https://github.com/YOUR_USERNAME/monad-faucet.git
-cd monad-faucet
+git clone https://github.com/YOUR_USERNAME/Monad_faucet.git
+cd Monad_faucet
 
 # 3. Set up development environment
 make setup-dev  # or follow manual installation
@@ -451,6 +451,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **Maintained by**: [pcristin](https://github.com/pcristin)  
 **Live Service**: [https://api.mwdao.xyz](https://api.mwdao.xyz)  
-**Documentation**: [GitHub Wiki](https://github.com/pcristin/monad-faucet/wiki)  
+**Documentation**: [Docs](https://docs.mwdao.xyz/bridge/mwdao-bridge)  
 
 *Built for the Monad ecosystem* 
